@@ -123,7 +123,17 @@ struct NowPlaying: Equatable, Sendable {
         self.baseElapsed = (json["elapsed"] as? Double) ?? 0
         let rate = (json["rate"] as? Double) ?? 0
         self.playbackRate = rate
-        self.elapsedTimestamp = Date()
+
+        // `baseElapsed` is the position the daemon sampled at `timestampEpoch`, not "now" — the
+        // live position advances from there by wall-clock × rate (see `currentElapsed`). Many
+        // players push that sample only at track start / seek, so honoring the real sample time
+        // is what keeps the scrubber accurate; falling back to now would snap it back to the
+        // stale sample on every poll.
+        if let epoch = json["timestampEpoch"] as? Double, epoch > 0 {
+            self.elapsedTimestamp = Date(timeIntervalSince1970: epoch)
+        } else {
+            self.elapsedTimestamp = Date()
+        }
         self.isPlaying = rate > 0
     }
 

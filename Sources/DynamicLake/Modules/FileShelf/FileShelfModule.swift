@@ -21,6 +21,19 @@ final class FileShelfModule: NotchModule, ObservableObject {
     private let store = FileShelfStore()
     private var context: NotchContext?
 
+    /// True while a file is being dragged onto the notch, so the shelf surfaces its drop UI
+    /// even with nothing staged yet. Set by the engine from the window's drag destination.
+    @Published private(set) var dropTargeting = false
+
+    /// Number of currently staged files.
+    var stagedCount: Int { store.count }
+
+    /// Toggle the drag-targeting state (engine-driven).
+    func setDropTargeting(_ active: Bool) { dropTargeting = active }
+
+    /// Stage dropped file URLs (engine-driven, from a drop onto the notch).
+    func stage(urls: [URL]) { store.add(urls: urls) }
+
     // MARK: Lifecycle
 
     func activate(_ context: NotchContext) {
@@ -53,7 +66,10 @@ final class FileShelfModule: NotchModule, ObservableObject {
 
     // MARK: Expanded section
 
+    /// Only contribute the shelf when a drag is active or files are staged — otherwise the
+    /// sheet doesn't show the clip UI at all.
     func expandedSection() -> AnyView? {
-        AnyView(FileShelfExpandedView(store: store))
+        guard dropTargeting || store.count > 0 else { return nil }
+        return AnyView(FileShelfExpandedView(store: store, dropTargeting: dropTargeting))
     }
 }

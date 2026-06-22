@@ -9,11 +9,7 @@ enum ModuleRegistry {
         [
             MediaModule(),
             FileShelfModule(),
-            GlanceModule(),
             BatteryModule(),
-            TimersModule(),
-            NotificationsModule(),
-            ConversionModule(),
         ]
     }
 }

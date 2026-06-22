@@ -61,6 +61,16 @@ static NSString *MRABuildJSON(NSDictionary *info) {
     NSNumber *rate = MRANumberForKey(info, @"kMRMediaRemoteNowPlayingInfoPlaybackRate");
     if (rate != nil) out[@"rate"] = rate;
 
+    // The daemon samples ElapsedTime at this instant (an NSDate), NOT continuously — the live
+    // position is `elapsed + (now - timestamp) * rate`. Forward it as epoch seconds (NSDate is
+    // not JSON-serializable) so the Swift side can extrapolate accurately instead of assuming
+    // the sample was taken "now" (which makes the scrubber snap back to the stale sample each
+    // poll). Players that only push the sample at track start / seek rely on this entirely.
+    id timestamp = info[@"kMRMediaRemoteNowPlayingInfoTimestamp"];
+    if ([timestamp isKindOfClass:[NSDate class]]) {
+        out[@"timestampEpoch"] = @([(NSDate *)timestamp timeIntervalSince1970]);
+    }
+
     // Track identity so the Swift side can reuse cached artwork across the daemon's
     // transient artwork drops (e.g. while scrubbing) without re-decoding.
     NSString *artworkID = MRAStringForKey(info, @"kMRMediaRemoteNowPlayingInfoArtworkIdentifier");

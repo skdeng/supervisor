@@ -1,14 +1,14 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// The DynaClip section in the expanded panel: a header with a clear/select control, a
-/// drop zone that accepts file URLs, a scrollable grid of staged tiles, and an action
-/// toolbar (AirDrop, Quick Look, Reveal, Compress, Remove) operating on the current
-/// selection (or all items when nothing is selected).
+/// drop zone, a scrollable grid of staged tiles, and an action toolbar (AirDrop, Quick Look,
+/// Reveal, Compress, Remove) operating on the current selection (or all items when nothing is
+/// selected). File drops are received by the window's drag destination (so a file dragged
+/// onto the notch opens the sheet); this view just reflects the drag-targeting state.
 struct FileShelfExpandedView: View {
     @ObservedObject var store: FileShelfStore
-
-    @State private var isTargeted = false
+    /// True while a file is being dragged onto the notch (engine-driven highlight).
+    let dropTargeting: Bool
 
     private let columns = [GridItem(.adaptive(minimum: 72, maximum: 88), spacing: 8)]
 
@@ -83,10 +83,10 @@ struct FileShelfExpandedView: View {
                 .strokeBorder(
                     style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])
                 )
-                .foregroundStyle(isTargeted ? Color.accentColor : Color.white.opacity(0.25))
+                .foregroundStyle(dropTargeting ? Color.accentColor : Color.white.opacity(0.25))
                 .background(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(isTargeted ? Color.accentColor.opacity(0.12) : Color.white.opacity(0.03))
+                        .fill(dropTargeting ? Color.accentColor.opacity(0.12) : Color.white.opacity(0.03))
                 )
 
             if prompt {
@@ -103,50 +103,12 @@ struct FileShelfExpandedView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 18)
             } else {
-                Text(isTargeted ? "Release to add" : "Drop more files")
+                Text(dropTargeting ? "Release to add" : "Drop more files")
                     .font(.caption2)
                     .foregroundStyle(NotchTheme.secondaryForeground)
             }
         }
-        .animation(.snappy(duration: 0.15), value: isTargeted)
-        .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
-            handleDrop(providers)
-        }
-    }
-
-    /// Resolve every dropped item provider to a file URL off the main actor, then stage the
-    /// collected URLs in one batch. Returns true if any provider could yield a file URL.
-    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
-        let fileProviders = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
-        guard !fileProviders.isEmpty else { return false }
-
-        Task { @MainActor in
-            var urls: [URL] = []
-            // Resolve each provider in turn on the main actor; the loads are lightweight
-            // (the providers wrap already-materialized file URLs) and this keeps the
-            // non-Sendable `NSItemProvider` from crossing actor boundaries.
-            for provider in fileProviders {
-                if let url = await Self.loadFileURL(from: provider) {
-                    urls.append(url)
-                }
-            }
-            if !urls.isEmpty {
-                store.add(urls: urls)
-            }
-        }
-        return true
-    }
-
-    /// Bridge `NSItemProvider`'s callback-based file-URL load into async/await.
-    @MainActor
-    private static func loadFileURL(from provider: NSItemProvider) async -> URL? {
-        await withCheckedContinuation { continuation in
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                // The completion may fire on a background queue; `URL` is Sendable so it is
-                // safe to carry back through the continuation.
-                continuation.resume(returning: url)
-            }
-        }
+        .animation(.snappy(duration: 0.15), value: dropTargeting)
     }
 
     // MARK: Grid

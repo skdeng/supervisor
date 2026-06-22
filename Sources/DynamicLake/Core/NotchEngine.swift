@@ -42,6 +42,9 @@ public final class NotchEngine: ObservableObject {
     /// True while the cursor is hovering the notch. Drives a subtle grow affordance; the
     /// sheet itself only opens on a click.
     @Published public private(set) var isHovered: Bool = false
+    /// True while a file is being dragged onto the notch (before it is dropped). While set,
+    /// the expanded sheet surfaces only the DynaClip section so the drop target stands alone.
+    @Published public private(set) var isFileDragging: Bool = false
 
     private(set) lazy var context: NotchContext = NotchContext(
         requestExpand: { [weak self] in self?.requestExpand() },
@@ -56,8 +59,17 @@ public final class NotchEngine: ObservableObject {
     /// fixed-size transparent canvas; SwiftUI measures the actual compact content and
     /// centers it, so this only bounds how wide compact content may grow.
     public var compactSideReserve: CGFloat { settings.miniLakeEnabled ? 120 : 160 }
-    /// Size of the expanded panel that drops below the notch.
-    public let expandedPanelSize = CGSize(width: 420, height: 320)
+    /// Fixed width of the expanded panel that drops below the notch. Content is laid out to
+    /// this width, so the sheet never scrolls horizontally.
+    public let expandedPanelWidth: CGFloat = 420
+    /// Measured natural height of the expanded sheet's content (excludes the notch strip the
+    /// sheet grows out of). Reported by the panel view so the morphing surface sizes to fit its
+    /// content exactly — the sheet never scrolls vertically. Clamped to the bounds below.
+    @Published public private(set) var expandedSheetHeight: CGFloat = 220
+    /// Floor/ceiling for the measured sheet height. The ceiling also fixes the canvas budget,
+    /// so the fixed-size window is always tall enough to host the tallest sheet.
+    public let minExpandedSheetHeight: CGFloat = 96
+    public let maxExpandedSheetHeight: CGFloat = 600
 
     public init(settings: SettingsStore = .shared) {
         self.settings = settings
@@ -112,10 +124,13 @@ public final class NotchEngine: ObservableObject {
         hover.onEnter = { [weak self] in self?.handleHoverEnter() }
         hover.onExit = { [weak self] in self?.handleHoverExit() }
 
+        // Dragging a file onto the notch opens the sheet with the file shelf.
+        window.onFileDragEntered = { [weak self] in self?.handleFileDragEntered() }
+        window.onFileDragExited = { [weak self] in self?.handleFileDragExited() }
+        window.onFilesDropped = { [weak self] urls in self?.handleFilesDropped(urls) }
+
         reflowWindow()
-        // Idle/compact are click-through so the desktop and menu bar under the transparent
-        // canvas stay usable; only the expanded panel captures the mouse.
-        window.ignoresMouseEvents = true
+        updateInteractivity()
         window.orderFrontRegardless()
         hover.start()
     }
@@ -183,6 +198,17 @@ public final class NotchEngine: ObservableObject {
         reflowWindow()
     }
 
+    /// Report the expanded sheet's measured natural content height so the morphing surface and
+    /// the interactive / hover-activation rects size to fit it exactly (no scrolling). Called
+    /// from the panel view's layout measurement; clamped, and ignored when effectively
+    /// unchanged so it can't feed back into a layout loop.
+    public func reportExpandedSheetHeight(_ height: CGFloat) {
+        let clamped = min(max(height, minExpandedSheetHeight), maxExpandedSheetHeight)
+        guard abs(clamped - expandedSheetHeight) > 0.5 else { return }
+        expandedSheetHeight = clamped
+        updateInteractivity()
+    }
+
     // MARK: Hover / click handling
 
     /// Cursor entered the notch region: show the subtle grow affordance and make the surface
@@ -212,12 +238,45 @@ public final class NotchEngine: ObservableObject {
         }
     }
 
-    /// The window receives clicks while hovered (so a click can open the sheet) or while the
-    /// sheet is open (so its controls work); otherwise it is click-through so the desktop and
-    /// menu bar under the transparent canvas stay usable.
+    /// Update the window's hit-test region (clicks + file drags land only over the notch /
+    /// sheet, everything else passes through) and the hover activation rect.
     private func updateInteractivity() {
-        window.ignoresMouseEvents = !(isHovered || state == .expanded)
+        window.interactiveRect = interactiveLocalRect()
         hover.activationRect = activationRect(for: state, hovered: isHovered, geometry: geometry)
+    }
+
+    // MARK: File drag → file shelf
+
+    private var fileShelf: FileShelfModule? {
+        modules.first { $0 is FileShelfModule } as? FileShelfModule
+    }
+
+    /// A file drag entered the notch: open the sheet and show the file shelf's drop UI.
+    private func handleFileDragEntered() {
+        fileShelf?.setDropTargeting(true)
+        isFileDragging = true
+        compactRevision &+= 1  // force the panel to re-evaluate sections (show the shelf)
+        if state != .expanded {
+            transition(to: .expanded)
+        }
+    }
+
+    /// The drag left without dropping: hide the drop UI, and collapse if nothing was staged.
+    private func handleFileDragExited() {
+        fileShelf?.setDropTargeting(false)
+        isFileDragging = false
+        compactRevision &+= 1
+        if (fileShelf?.stagedCount ?? 0) == 0, state == .expanded, !isHovered {
+            transition(to: resolvedRestingState())
+        }
+    }
+
+    /// Files were dropped: stage them and keep the sheet open so the user can act on them.
+    private func handleFilesDropped(_ urls: [URL]) {
+        fileShelf?.stage(urls: urls)
+        fileShelf?.setDropTargeting(false)
+        isFileDragging = false
+        compactRevision &+= 1
     }
 
     // MARK: State machine
@@ -260,15 +319,45 @@ public final class NotchEngine: ObservableObject {
         guard geo.screenFrame.width > 0 else { return }
 
         window.setFrame(canvasFrame(for: geo), display: true)
+        window.interactiveRect = interactiveLocalRect()
         hover.activationRect = activationRect(for: state, hovered: isHovered, geometry: geo)
+    }
+
+    /// The clickable / droppable region in the window content's bounds coordinates (bottom-left
+    /// origin), pinned to the top: the notch pill when collapsed, the sheet when expanded.
+    /// Everything outside passes events through.
+    private func interactiveLocalRect() -> CGRect {
+        let geo = geometry
+        guard geo.screenFrame.width > 0 else { return .zero }
+        let canvas = canvasFrame(for: geo)
+        let w = canvas.width, h = canvas.height
+        let notchH = max(geo.notchHeight, 32)
+        let centerX = w / 2  // canvas is centered on the notch
+
+        let width: CGFloat
+        let height: CGFloat
+        switch state {
+        case .expanded:
+            width = expandedPanelWidth + 24
+            height = notchH + expandedSheetHeight + 12
+        case .compact:
+            width = geo.notchWidth + 180
+            height = notchH + 16
+        case .idle:
+            width = geo.notchWidth + 28
+            height = notchH + 14
+        }
+        return CGRect(x: centerX - width / 2, y: h - height, width: width, height: height)
     }
 
     /// The constant window frame (global, bottom-left origin): top-aligned, centered on the
     /// notch, tall enough for the dropped panel and wide enough for the widest state.
     private func canvasFrame(for geo: NotchGeometry) -> CGRect {
         let top = geo.screenTop
-        let width = max(geo.notchWidth + 2 * compactSideReserve, expandedPanelSize.width + 40)
-        let height = max(geo.notchHeight, 32) + expandedPanelSize.height
+        let width = max(geo.notchWidth + 2 * compactSideReserve, expandedPanelWidth + 40)
+        // Budget the canvas for the tallest possible sheet so the fixed-size window never has
+        // to resize as the sheet grows/shrinks to fit its content — only the surface morphs.
+        let height = max(geo.notchHeight, 32) + maxExpandedSheetHeight
         return CGRect(
             x: geo.centerX - width / 2,
             y: top - height,
@@ -302,8 +391,8 @@ public final class NotchEngine: ObservableObject {
         case .expanded:
             // Exactly the open panel bounds plus a small margin.
             let pad: CGFloat = 12
-            let width = expandedPanelSize.width + 2 * pad
-            let minY = top - notchH - expandedPanelSize.height - pad
+            let width = expandedPanelWidth + 2 * pad
+            let minY = top - notchH - expandedSheetHeight - pad
             return CGRect(x: geo.centerX - width / 2, y: minY, width: width, height: maxY - minY)
         }
     }

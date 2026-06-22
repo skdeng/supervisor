@@ -28,8 +28,9 @@ struct NotchRootView: View {
     private var notchH: CGFloat { max(geo.notchHeight, 32) }
     private var isExpanded: Bool { engine.state == .expanded }
 
-    private var panelW: CGFloat { engine.expandedPanelSize.width }
-    private var panelH: CGFloat { engine.expandedPanelSize.height }
+    private var panelW: CGFloat { engine.expandedPanelWidth }
+    /// Measured sheet content height — the surface grows to exactly fit the panel (no scroll).
+    private var panelH: CGFloat { engine.expandedSheetHeight }
 
     /// Collapsed width: the notch plus whatever compact content flanks it.
     private var compactWidth: CGFloat { notchW + leadingWidth + trailingWidth }
@@ -72,10 +73,18 @@ struct NotchRootView: View {
                     .allowsHitTesting(false)
                     .opacity(isIdle ? 0 : 1)
             }
-            // One spring keyed on `isExpanded`, so expand and retract use identical params;
-            // lower damping makes the morph noticeably springier.
-            .animation(.spring(response: 0.42, dampingFraction: 0.68), value: isExpanded)
+            // Springy when opening; critically damped (no overshoot) when closing, so the
+            // notch never bounces smaller than the physical notch on the way back.
+            .animation(
+                isExpanded
+                    ? .spring(response: 0.42, dampingFraction: 0.68)
+                    : .spring(response: 0.34, dampingFraction: 1.0),
+                value: isExpanded
+            )
             .animation(.spring(response: 0.3, dampingFraction: 0.72), value: engine.isHovered)
+            // Smoothly resize the open sheet when its content (and thus measured height)
+            // changes — e.g. a section appears/disappears or a file drag swaps the contents.
+            .animation(.spring(response: 0.34, dampingFraction: 0.9), value: engine.expandedSheetHeight)
 
             Spacer(minLength: 0)
         }
@@ -100,13 +109,14 @@ struct NotchRootView: View {
             .frame(height: notchH)
             .opacity(isExpanded ? 0 : 1)
 
-            // The sheet's content fills the surface once expanded; fades in a beat after the
-            // surface has grown.
-            ExpandedPanelView(size: engine.expandedPanelSize)
+            // The sheet's content grows + fades with the surface (it inherits the body spring,
+            // and scales from the notch at the top), so it expands out of the notch rather than
+            // sliding in from the side.
+            ExpandedPanelView(width: panelW)
                 .padding(.top, notchH)
+                .scaleEffect(isExpanded ? 1 : 0.88, anchor: .top)
                 .opacity(isExpanded ? 1 : 0)
                 .allowsHitTesting(isExpanded)
-                .animation(.easeOut(duration: 0.16).delay(isExpanded ? 0.16 : 0), value: isExpanded)
         }
         .frame(width: shapeWidth, height: shapeHeight, alignment: .top)
         .clipShape(NotchShape(cornerRadius: radius))

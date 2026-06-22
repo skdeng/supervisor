@@ -51,56 +51,43 @@ struct MediaBarsCompactView: View {
 
 /// A small three-bar equalizer that bounces while playing and rests flat when paused,
 /// echoing the iOS now-playing indicator.
+///
+/// The bounce is driven by a `TimelineView` rather than a `repeatForever` animation: the
+/// timeline ticks per frame while playing and is `paused` when stopped, and the paused branch
+/// of `barScale` returns the flat resting height. This sidesteps `repeatForever`'s start/stop
+/// fragility (a running repeat can't be cleanly interrupted, and re-arming it after a teardown
+/// is unreliable) — pause/resume here is just a function of `isPlaying`.
 struct AudioBarsView: View {
     let isPlaying: Bool
 
     private let barCount = 3
     private let barWidth: CGFloat = 2.5
     private let spacing: CGFloat = 2
-
-    /// Per-bar animation phase so each bar bounces out of sync.
-    @State private var animate = false
+    /// Flat resting height (as a fraction of the full bar) when paused/stopped.
+    private let restScale: CGFloat = 0.35
 
     var body: some View {
-        HStack(alignment: .center, spacing: spacing) {
-            ForEach(0..<barCount, id: \.self) { index in
-                Capsule(style: .continuous)
-                    .fill(NotchTheme.primaryForeground)
-                    .frame(width: barWidth)
-                    .frame(maxHeight: .infinity)
-                    .scaleEffect(y: barScale(index), anchor: .center)
-                    .animation(
-                        isPlaying
-                            ? .easeInOut(duration: duration(index))
-                                .repeatForever(autoreverses: true)
-                            : .easeOut(duration: 0.2),
-                        value: animate
-                    )
+        TimelineView(.animation(paused: !isPlaying)) { context in
+            let time = context.date.timeIntervalSinceReferenceDate
+            HStack(alignment: .center, spacing: spacing) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    Capsule(style: .continuous)
+                        .fill(NotchTheme.primaryForeground)
+                        .frame(width: barWidth)
+                        .frame(maxHeight: .infinity)
+                        .scaleEffect(y: barScale(index, time: time), anchor: .center)
+                }
             }
         }
-        .onAppear { animate = isPlaying }
-        .onChange(of: isPlaying) { _, playing in
-            animate = playing
-        }
     }
 
-    /// Tall when animating (alternating per-bar so they don't move in lockstep),
-    /// short and uniform when paused.
-    private func barScale(_ index: Int) -> CGFloat {
-        guard isPlaying else { return 0.35 }
-        // When `animate` toggles, even/odd bars are at opposite extremes.
-        let high: CGFloat = 1.0
-        let low: CGFloat = 0.35
-        let isEven = index % 2 == 0
-        if animate {
-            return isEven ? high : low
-        } else {
-            return isEven ? low : high
-        }
-    }
-
-    private func duration(_ index: Int) -> Double {
-        // Slightly different periods per bar for a livelier, less mechanical motion.
-        [0.5, 0.42, 0.58][index % 3]
+    /// Smooth oscillation in `[restScale, 1]` while playing; flat `restScale` when paused.
+    /// Each bar has its own period and phase offset so they bounce lively and out of lockstep.
+    private func barScale(_ index: Int, time: Double) -> CGFloat {
+        guard isPlaying else { return restScale }
+        let period = [0.62, 0.5, 0.72][index % 3]   // seconds per full up-down cycle
+        let phase = [0.0, 0.66, 0.33][index % 3]    // fractional offset so the bars desync
+        let unit = (sin((time / period + phase) * 2 * .pi) + 1) / 2  // 0...1
+        return restScale + (1 - restScale) * unit
     }
 }
