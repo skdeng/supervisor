@@ -2,14 +2,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "DynamicLake",
+    name: "SuperVisor",
     platforms: [
         .macOS("26.0")
     ],
     targets: [
         .executableTarget(
-            name: "DynamicLake",
-            path: "Sources/DynamicLake",
+            name: "SuperVisor",
+            path: "Sources/SuperVisor",
             swiftSettings: [
                 .unsafeFlags(["-parse-as-library"])
             ],

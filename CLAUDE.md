@@ -1,9 +1,9 @@
-# DynamicLake
+# SuperVisor
 
 A native macOS (macOS 26, Apple Silicon) menu-bar app that turns the MacBook notch / top
 menu-bar area into an interactive, iPhone-style Dynamic Island. SwiftUI + AppKit, Swift 6.2.
-It is a Swift Package Manager **executable** (`Sources/DynamicLake`) — there is no Xcode
-project. Any `.swift` file placed anywhere under `Sources/DynamicLake/` is compiled
+It is a Swift Package Manager **executable** (`Sources/SuperVisor`) — there is no Xcode
+project. Any `.swift` file placed anywhere under `Sources/SuperVisor/` is compiled
 automatically; `Package.swift` is never edited to add files.
 
 `ARCHITECTURE.md` is the canonical, byte-exact contract for the foundation files. Read it
@@ -13,12 +13,12 @@ them.
 
 ## Build & Run
 
-- **`./make-app.sh --release`** — builds, bundles, and ad-hoc-signs `build/DynamicLake.app`.
+- **`./make-app.sh --release`** — builds, bundles, and ad-hoc-signs `build/SuperVisor.app`.
   (`--run` also launches it; drop `--release` for a debug build.)
-- **`open build/DynamicLake.app`** — launch. It is an **`LSUIElement`** menu-bar agent
+- **`open build/SuperVisor.app`** — launch. It is an **`LSUIElement`** menu-bar agent
   (`.accessory` activation policy): no Dock icon, no main window. A status-bar item
   (`water.waves` glyph) hosts the **Settings…** and **Quit** menu.
-- **Quit** via the status-bar menu, or `pkill -f DynamicLake.app`.
+- **Quit** via the status-bar menu, or `pkill -f SuperVisor.app`.
 - **`swift build`** alone compiles the binary but does *not* produce the bundle. The bundle is
   required because TCC permission grants (Location, Calendar, Accessibility, Bluetooth) and the
   now-playing read only persist for a **stable, signed bundle identity** — a bare `swift run`

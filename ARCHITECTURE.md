@@ -1,10 +1,10 @@
-# DynamicLake Architecture
+# SuperVisor Architecture
 
-DynamicLake is a native macOS app that turns the MacBook notch / top menu-bar area
+SuperVisor is a native macOS app that turns the MacBook notch / top menu-bar area
 into an interactive, iPhone-style Dynamic Island. It is built with SwiftUI + AppKit,
 Swift 6.2, targeting macOS 26.5 (Liquid Glass materials), Apple Silicon. Distribution
 is via Swift Package Manager with a single path-based executable target at
-`Sources/DynamicLake` — any `.swift` file placed anywhere under that directory is
+`Sources/SuperVisor` — any `.swift` file placed anywhere under that directory is
 compiled automatically. There are no target-membership concerns and `Package.swift`
 is never edited to add files.
 
@@ -138,7 +138,7 @@ listed here.
 ## 3. File Layout
 
 ```
-Sources/DynamicLake/
+Sources/SuperVisor/
   App/        app entry, AppDelegate, ModuleRegistry (the ONE integration point)
   Core/       NotchModule.swift, NotchContext.swift, engine, window, geometry, hover
   UI/         root view, compact pill, expanded panel

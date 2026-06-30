@@ -1,5 +1,5 @@
 #!/bin/bash
-# Packages the DynamicLake SPM executable into a launchable, ad-hoc-signed .app bundle.
+# Packages the SuperVisor SPM executable into a launchable, ad-hoc-signed .app bundle.
 #
 # Why a bundle: the privacy permission grants (Location, Calendar, Accessibility,
 # Bluetooth, Notifications) only persist when macOS can identify a stable, signed bundle.
@@ -19,7 +19,7 @@ for arg in "$@"; do
   esac
 done
 
-APP_NAME="DynamicLake"
+APP_NAME="SuperVisor"
 APP_DIR="build/${APP_NAME}.app"
 MACOS_DIR="${APP_DIR}/Contents/MacOS"
 RES_DIR="${APP_DIR}/Contents/Resources"
@@ -53,7 +53,7 @@ clang -dynamiclib -fobjc-arc -O2 \
 echo "==> Ad-hoc code signing…"
 codesign --force --deep --sign - \
   --options runtime \
-  --identifier com.dynamiclake.DynamicLake \
+  --identifier com.supervisor.SuperVisor \
   "$APP_DIR"
 codesign --verify --verbose "$APP_DIR"
 

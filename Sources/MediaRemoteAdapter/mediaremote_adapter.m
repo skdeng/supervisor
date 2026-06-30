@@ -129,6 +129,7 @@ void run_mediaremote_adapter(void) {
         __block NSString *bestJSON = @"{}";
         __block BOOL haveArtwork = NO;
         __block BOOL haveTitle = NO;
+        __block int completedReads = 0;
         const int kMaxPolls = 10;
         const NSTimeInterval kPollInterval = 0.06;     // 60ms between reads
         const NSTimeInterval kHardDeadline = 0.95;     // absolute cap on the whole run
@@ -141,6 +142,7 @@ void run_mediaremote_adapter(void) {
                     if (haveArtwork) return;   // already done; skip remaining scheduled reads
                     getInfo(queue, ^(NSDictionary *info) {
                         if (haveArtwork) return;
+                        completedReads++;
                         NSString *json = MRABuildJSON(info);
                         BOOL gotArtwork = (info[@"kMRMediaRemoteNowPlayingInfoArtworkData"] != nil);
                         BOOL gotTitle =
@@ -154,6 +156,12 @@ void run_mediaremote_adapter(void) {
                         if (gotTitle) haveTitle = YES;
                         if (gotArtwork) {
                             haveArtwork = YES;
+                            CFRunLoopStop(CFRunLoopGetMain());
+                        } else if (!haveTitle && completedReads >= 2) {
+                            // No now-playing session after a couple of reads (the second
+                            // tolerates a transient empty first read): conclude nothing is
+                            // playing and stop now rather than spinning to the hard deadline.
+                            // Keeps the frequent idle polls cheap (~120ms vs ~950ms).
                             CFRunLoopStop(CFRunLoopGetMain());
                         }
                     });

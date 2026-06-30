@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>com.dynamiclake.DynamicLake</string>
+	<string>com.supervisor.SuperVisor</string>
 	<key>CFBundleName</key>
-	<string>DynamicLake</string>
+	<string>SuperVisor</string>
 	<key>CFBundleDisplayName</key>
-	<string>DynamicLake</string>
+	<string>SuperVisor</string>
 	<key>CFBundleExecutable</key>
-	<string>DynamicLake</string>
+	<string>SuperVisor</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -23,14 +23,14 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>DynamicLake uses your location to show local weather in the notch.</string>
+	<string>SuperVisor uses your location to show local weather in the notch.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>DynamicLake reads your calendar to show your next event in the notch.</string>
+	<string>SuperVisor reads your calendar to show your next event in the notch.</string>
 	<key>NSCalendarsUsageDescription</key>
-	<string>DynamicLake reads your calendar to show your next event in the notch.</string>
+	<string>SuperVisor reads your calendar to show your next event in the notch.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>DynamicLake reads Bluetooth accessory battery levels to show them in the notch.</string>
+	<string>SuperVisor reads Bluetooth accessory battery levels to show them in the notch.</string>
 	<key>NSAccessibilityUsageDescription</key>
-	<string>DynamicLake reads incoming notification banners to mirror them in the notch.</string>
+	<string>SuperVisor reads incoming notification banners to mirror them in the notch.</string>
 </dict>
 </plist>
