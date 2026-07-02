@@ -173,3 +173,9 @@ at runtime.
 `SettingsStore.debugTintEnabled` (a toggle in Settings, persisted as `debug.tintRed`) tints the
 whole rendered surface **bright red** so its exact bounds are visible against the black hardware
 notch. In debug tint the surface always renders even when idle.
+
+## Git
+
+- Committing and pushing directly to this repo is fine — no need to ask first.
+- **Commit messages must not carry co-authorship or tooling trailers** — no `Co-Authored-By:`
+  line and no `Claude-Session:` line. Keep the message to the change itself.
