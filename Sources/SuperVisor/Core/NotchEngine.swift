@@ -27,6 +27,9 @@ public final class NotchEngine: ObservableObject {
 
     /// The enabled, activated modules sorted by `order`.
     public private(set) var modules: [any NotchModule] = []
+    /// Every registered module instance (enabled or not), built once. `modules` holds the
+    /// currently-active subset; a Settings toggle reconciles against this roster live.
+    private var moduleRoster: [any NotchModule] = []
 
     // MARK: Collaborators
 
@@ -58,7 +61,7 @@ public final class NotchEngine: ObservableObject {
     /// Half-width of the compact canvas beyond the notch on each side. The window is a
     /// fixed-size transparent canvas; SwiftUI measures the actual compact content and
     /// centers it, so this only bounds how wide compact content may grow.
-    public var compactSideReserve: CGFloat { settings.miniLakeEnabled ? 120 : 160 }
+    public let compactSideReserve: CGFloat = 160
     /// Fixed width of the expanded panel that drops below the notch. Content is laid out to
     /// this width, so the sheet never scrolls horizontally.
     public let expandedPanelWidth: CGFloat = 420
@@ -97,14 +100,6 @@ public final class NotchEngine: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // miniLake changes the reserved footprint; reflow when toggled.
-        settings.$miniLakeEnabled
-            .dropFirst()
-            .sink { [weak self] _ in
-                self?.reflowWindow()
-            }
-            .store(in: &cancellables)
-
         // Recompute notch geometry when the user calibrates its width/position.
         settings.$notchWidthAdjust
             .dropFirst()
@@ -113,6 +108,15 @@ public final class NotchEngine: ObservableObject {
         settings.$notchOffsetX
             .dropFirst()
             .sink { [weak self] _ in self?.geometryProvider.recompute() }
+            .store(in: &cancellables)
+
+        // React live when a module is enabled/disabled in Settings: activate newly-enabled
+        // modules and deactivate newly-disabled ones, so a disabled module actually sheds its
+        // timers/observers/polls and a re-enabled one appears — no relaunch required. `@Published`
+        // emits during willSet, so hop to the next main-queue turn to read the committed flags.
+        settings.$moduleEnabled
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.reconcileModules() }
             .store(in: &cancellables)
 
         buildModules()
@@ -145,12 +149,13 @@ public final class NotchEngine: ObservableObject {
         window.orderOut(nil)
     }
 
-    /// Build the enabled module set from the registry, activate each, and sort by order.
+    /// Build the full module roster from the registry once, then activate the enabled subset.
     private func buildModules() {
         let all = ModuleRegistry.allModules()
         for module in all {
             settings.registerModuleIfNeeded(module.moduleID)
         }
+        moduleRoster = all
         let enabled = all
             .filter { settings.isEnabled($0.moduleID) }
             .sorted { $0.order < $1.order }
@@ -158,6 +163,30 @@ public final class NotchEngine: ObservableObject {
             module.activate(context)
         }
         modules = enabled
+    }
+
+    /// Bring the active module set in line with the current Settings toggles: deactivate modules
+    /// that were turned off (releasing their timers/observers/polls) and activate ones that were
+    /// turned on, reusing the roster instances. Then re-evaluate the pill's compact presence and
+    /// resting state.
+    private func reconcileModules() {
+        let desired = moduleRoster
+            .filter { settings.isEnabled($0.moduleID) }
+            .sorted { $0.order < $1.order }
+        let activeIDs = Set(modules.map { $0.moduleID })
+        let desiredIDs = Set(desired.map { $0.moduleID })
+        guard activeIDs != desiredIDs else { return }
+
+        for module in modules where !desiredIDs.contains(module.moduleID) {
+            module.deactivate()
+        }
+        for module in desired where !activeIDs.contains(module.moduleID) {
+            module.activate(context)
+        }
+        modules = desired
+        // A module appearing/disappearing changes compact presence and the resting state, and
+        // re-lays-out the pill.
+        setNeedsCompactRefresh()
     }
 
     // MARK: NotchContext actions
@@ -251,9 +280,12 @@ public final class NotchEngine: ObservableObject {
         modules.first { $0 is FileShelfModule } as? FileShelfModule
     }
 
-    /// A file drag entered the notch: open the sheet and show the file shelf's drop UI.
+    /// A file drag entered the notch: open the sheet and show the file shelf's drop UI. With the
+    /// shelf module disabled there is nowhere to drop, so don't open an inert sheet or advertise
+    /// a drop target.
     private func handleFileDragEntered() {
-        fileShelf?.setDropTargeting(true)
+        guard let fileShelf else { return }
+        fileShelf.setDropTargeting(true)
         isFileDragging = true
         compactRevision &+= 1  // force the panel to re-evaluate sections (show the shelf)
         if state != .expanded {
@@ -263,18 +295,20 @@ public final class NotchEngine: ObservableObject {
 
     /// The drag left without dropping: hide the drop UI, and collapse if nothing was staged.
     private func handleFileDragExited() {
-        fileShelf?.setDropTargeting(false)
+        guard let fileShelf else { return }
+        fileShelf.setDropTargeting(false)
         isFileDragging = false
         compactRevision &+= 1
-        if (fileShelf?.stagedCount ?? 0) == 0, state == .expanded, !isHovered {
+        if fileShelf.stagedCount == 0, state == .expanded, !isHovered {
             transition(to: resolvedRestingState())
         }
     }
 
     /// Files were dropped: stage them and keep the sheet open so the user can act on them.
     private func handleFilesDropped(_ urls: [URL]) {
-        fileShelf?.stage(urls: urls)
-        fileShelf?.setDropTargeting(false)
+        guard let fileShelf else { return }
+        fileShelf.stage(urls: urls)
+        fileShelf.setDropTargeting(false)
         isFileDragging = false
         compactRevision &+= 1
     }
@@ -313,7 +347,7 @@ public final class NotchEngine: ObservableObject {
     /// Position the fixed-size canvas window and update the hover activation rect. The
     /// window does NOT resize per state — it is always large enough for the expanded panel
     /// and the widest compact content — so SwiftUI animates the morph inside it without the
-    /// window jumping. Called only when geometry (or the miniLake footprint) changes.
+    /// window jumping. Called only when the geometry changes.
     private func reflowWindow() {
         let geo = geometry
         guard geo.screenFrame.width > 0 else { return }

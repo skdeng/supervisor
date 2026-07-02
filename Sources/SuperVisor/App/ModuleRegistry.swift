@@ -9,6 +9,7 @@ enum ModuleRegistry {
         [
             MediaModule(),
             CalendarModule(),
+            RemindersModule(),
             FileShelfModule(),
             BatteryModule(),
         ]

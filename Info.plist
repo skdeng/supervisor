@@ -28,6 +28,10 @@
 	<string>SuperVisor reads your calendar to show your next event in the notch.</string>
 	<key>NSCalendarsUsageDescription</key>
 	<string>SuperVisor reads your calendar to show your next event in the notch.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>SuperVisor reads your reminders to show due tasks in the notch.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>SuperVisor reads your reminders to show due tasks in the notch.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>SuperVisor reads Bluetooth accessory battery levels to show them in the notch.</string>
 	<key>NSAccessibilityUsageDescription</key>

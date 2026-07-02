@@ -99,7 +99,10 @@ final class CalendarService: ObservableObject {
     private static func makeEvent(_ ek: EKEvent) -> CalendarEvent {
         let link = MeetingLink.detect(in: ek)
         let title = ek.title.flatMap { $0.isEmpty ? nil : $0 } ?? "Untitled Event"
-        let accent: Color = ek.calendar.cgColor.map(Color.init(cgColor:)) ?? .accentColor
+        // `EKEvent.calendar` is implicitly-unwrapped but resolves to nil when the owning calendar
+        // was deleted between the fetch and this mapping (the EKEventStoreChanged race window),
+        // so access it optionally rather than trapping.
+        let accent: Color = ek.calendar?.cgColor.map(Color.init(cgColor:)) ?? .accentColor
         // Recurring events share an identifier across instances; qualify with the start time.
         let baseID = ek.eventIdentifier ?? ek.calendarItemIdentifier
         let id = baseID + "@" + String(Int(ek.startDate.timeIntervalSinceReferenceDate))

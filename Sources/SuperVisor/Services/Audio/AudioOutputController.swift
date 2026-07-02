@@ -30,8 +30,8 @@ final class AudioOutputController: ObservableObject {
     }
 
     private let systemObject = AudioObjectID(kAudioObjectSystemObject)
-    /// Registered listeners, kept so they can be removed verbatim on `stop()`.
-    private var listeners: [(address: AudioObjectPropertyAddress, block: AudioObjectPropertyListenerBlock)] = []
+    /// Registered listeners, kept so they can be unregistered on `stop()`.
+    private var listeners: [AudioPropertyListener] = []
     private var started = false
 
     // MARK: Lifecycle
@@ -47,9 +47,7 @@ final class AudioOutputController: ObservableObject {
 
     /// Stop observing and release listeners.
     func stop() {
-        for var listener in listeners {
-            AudioObjectRemovePropertyListenerBlock(systemObject, &listener.address, DispatchQueue.main, listener.block)
-        }
+        for listener in listeners { listener.invalidate() }
         listeners.removeAll()
         started = false
     }
@@ -73,18 +71,15 @@ final class AudioOutputController: ObservableObject {
     }
 
     private func addListener(for selector: AudioObjectPropertySelector) {
-        var address = AudioObjectPropertyAddress(
+        let address = AudioObjectPropertyAddress(
             mSelector: selector,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            // Registered with DispatchQueue.main below, so this runs on the main actor.
-            MainActor.assumeIsolated { self?.refresh() }
-        }
-        let status = AudioObjectAddPropertyListenerBlock(systemObject, &address, DispatchQueue.main, block)
-        if status == noErr {
-            listeners.append((address, block))
+        if let listener = AudioPropertyListener(objectID: systemObject, address: address, onChange: { [weak self] in
+            self?.refresh()
+        }) {
+            listeners.append(listener)
         }
     }
 

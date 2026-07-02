@@ -111,27 +111,25 @@ enum FileActionService {
             }
         }
 
-        // Group inputs by their containing directory so we can invoke zip with each item's
-        // relative name, keeping archive entries free of absolute path prefixes.
-        let workDir = inputs[0].deletingLastPathComponent()
-        let sameParent = inputs.allSatisfy {
-            $0.deletingLastPathComponent().standardizedFileURL == workDir.standardizedFileURL
-        }
+        // Run zip from the deepest directory that contains every input, passing each input's
+        // path RELATIVE to it. This keeps archive entries clean, preserves the directory
+        // structure of any folder inputs, and — because relative paths under a shared root are
+        // unique — never collides the way `-j` (junk paths) does on duplicate basenames such as
+        // the ubiquitous `.DS_Store` (which aborts the whole zip with "cannot repeat names").
+        //
+        // Security: the input paths are attacker-influenced (a dropped file's name is arbitrary),
+        // so guard the zip argv. `-y` stores symlinks as links instead of following them, so a
+        // symlink hidden in a dragged folder can't exfiltrate a file outside it into the archive.
+        // A `--` end-of-options marker plus a `./` prefix on every path ensures a name beginning
+        // with `-` (e.g. `-T`, `--unzip-command=…`, `-x`) is always parsed as a file, never a zip
+        // option — closing an argument-injection path that reaches command execution via `-TT`.
+        let workDir = Self.commonAncestor(of: inputs)
+        let relativePaths = inputs.map { "./" + Self.relativePath(of: $0, under: workDir) }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
-
-        var args = ["-r", "-X", archiveURL.path]
-        if sameParent {
-            process.currentDirectoryURL = workDir
-            args.append(contentsOf: inputs.map { $0.lastPathComponent })
-        } else {
-            // Mixed parents: fall back to absolute paths with junk-paths stripped so the
-            // archive stays flat and predictable.
-            args.insert("-j", at: 0)
-            args.append(contentsOf: inputs.map { $0.path })
-        }
-        process.arguments = args
+        process.currentDirectoryURL = workDir
+        process.arguments = ["-r", "-X", "-y", archiveURL.path, "--"] + relativePaths
 
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
@@ -150,5 +148,36 @@ enum FileActionService {
                 continuation.resume(throwing: ActionError.zipLaunchFailed(error.localizedDescription))
             }
         }
+    }
+
+    /// The deepest directory that contains every input. Falls back to `/` for inputs that share
+    /// no common ancestor (e.g. items on different volumes).
+    private static func commonAncestor(of urls: [URL]) -> URL {
+        let parentComponents = urls.map {
+            $0.standardizedFileURL.deletingLastPathComponent().pathComponents
+        }
+        guard var shared = parentComponents.first else { return URL(fileURLWithPath: "/") }
+        for components in parentComponents.dropFirst() {
+            var end = 0
+            while end < shared.count, end < components.count, shared[end] == components[end] {
+                end += 1
+            }
+            shared = Array(shared.prefix(end))
+        }
+        var url = URL(fileURLWithPath: "/")
+        for component in shared.dropFirst() { url.appendPathComponent(component) }
+        return url
+    }
+
+    /// `url`'s path relative to `base` (an ancestor), `/`-joined for use as a zip input argument.
+    /// Falls back to the last path component if `base` is not actually a prefix of `url`.
+    private static func relativePath(of url: URL, under base: URL) -> String {
+        let baseComponents = base.pathComponents
+        let urlComponents = url.standardizedFileURL.pathComponents
+        guard urlComponents.count > baseComponents.count,
+              Array(urlComponents.prefix(baseComponents.count)) == baseComponents else {
+            return url.lastPathComponent
+        }
+        return urlComponents.dropFirst(baseComponents.count).joined(separator: "/")
     }
 }

@@ -17,10 +17,10 @@ them.
   (`--run` also launches it; drop `--release` for a debug build.)
 - **`open build/SuperVisor.app`** — launch. It is an **`LSUIElement`** menu-bar agent
   (`.accessory` activation policy): no Dock icon, no main window. A status-bar item
-  (`water.waves` glyph) hosts the **Settings…** and **Quit** menu.
+  (`visionpro` glyph) hosts the **Settings…** and **Quit** menu.
 - **Quit** via the status-bar menu, or `pkill -f SuperVisor.app`.
 - **`swift build`** alone compiles the binary but does *not* produce the bundle. The bundle is
-  required because TCC permission grants (Location, Calendar, Accessibility, Bluetooth) and the
+  required because TCC permission grants (Location, Calendar, Reminders, Accessibility, Bluetooth) and the
   now-playing read only persist for a **stable, signed bundle identity** — a bare `swift run`
   binary gets a fresh identity each launch and grants never stick. `make-app.sh` also compiles
   the MediaRemote adapter dylib (see below); `swift build` does not.
@@ -42,18 +42,23 @@ A single morphing surface, driven by a small state machine, that modules feed co
   **appears or disappears** (which changes pill size/layout) — internal value changes inside an
   already-shown compact view update automatically via `@ObservedObject`.
 - **`App/ModuleRegistry.swift`** — THE single place modules are wired in (`allModules()`).
-  Array order is irrelevant; modules sort by `order`. Currently lists all 8 modules.
+  Array order is irrelevant; modules sort by `order`. Currently lists 5 modules
+  (Media, Calendar, Reminders, FileShelf, Battery).
 - **`Core/NotchEngine.swift`** — owns the window, geometry, hover detection, the enabled-module
   list, and the state machine: `NotchState` is `.idle` / `.compact` / `.expanded` (peek is a
   transient `.compact`). Builds the `NotchContext`, filters modules by `SettingsStore`, activates
-  them sorted by `order`. Note: the sheet opens on **click** (`toggleSheet()`), hover only shows
-  a subtle grow affordance. `compactRevision` is bumped on `setNeedsCompactRefresh`.
+  them sorted by `order`. Enabling or disabling a module in Settings activates/deactivates it live
+  (`reconcileModules`, driven by `SettingsStore.$moduleEnabled`) — no relaunch. Note: the sheet
+  opens on **click** (`toggleSheet()`), hover only shows a subtle grow affordance. `compactRevision`
+  is bumped on `setNeedsCompactRefresh`.
 - **`Core/NotchWindow.swift`** — a borderless, non-activating `NSPanel` above the status-bar
   level, on all spaces, floating over fullscreen, transparent. It is a **fixed-size canvas**
   (`canvasFrame`): always large enough for the expanded panel and widest compact content, so it
   **never resizes per state** — only the SwiftUI content morphs, so the Dynamic-Island animation
-  is never clipped by a window resize. Click-through (`ignoresMouseEvents`) except when hovered or
-  expanded, so the desktop/menu bar underneath stay usable.
+  is never clipped by a window resize. Events pass through everywhere except the notch/sheet
+  region: `NotchContentContainer` hit-tests against an interactive rect (so clicks and file drags
+  land only there) and is also a file-drag destination — dragging a file onto the notch opens the
+  sheet — while the desktop/menu bar stay usable elsewhere.
 - **`UI/NotchRootView.swift`** — the **single morphing surface**. One black `NotchShape` grows
   (width + height spring) from the notch-hugging pill into the expanded sheet; the fill stays
   black and the corner radius interpolates so the open reads as the notch itself expanding, not a
@@ -91,28 +96,69 @@ info dict. Workaround:
   `Modules/Media/MediaRemoteBridge.swift` (the `dlopen`/`dlsym` bridge). The block-typed callbacks
   there are `@convention(block)`, not `@convention(c)`.
 
+## Untrusted Input
+
+External data reaching the app is attacker-influenced and is validated before it hits a dangerous
+sink. Preserve these guards when touching the relevant code:
+
+- **Calendar fields** (event `url` / `location` / `notes`) come from anyone who can send an invite.
+  `MeetingLink` only accepts a join URL whose scheme is on an allowlist (`http` / `https` plus known
+  meeting-app schemes), and `MeetingProvider.from(host:)` matches the host exactly or as a subdomain,
+  never as a substring. `CalendarModule.join` re-checks the scheme before `NSWorkspace.open`.
+- **Dropped file names** are arbitrary. `FileActionService` runs `/usr/bin/zip` with `-y` (store
+  symlinks rather than following one out of a dragged folder) and a `--` end-of-options marker plus a
+  `./` prefix on every input path, so a name beginning with `-` can never be parsed as a zip option
+  (which reaches command execution via `-TT`).
+- **Now-playing metadata** is set by any other running app. `mediaremote_adapter.m` drops non-finite
+  numbers and validates the payload (`isValidJSONObject`) before serializing, so a malicious source
+  cannot abort the entitled perl helper with an uncaught exception.
+
 ## Module Roster
 
 Each lives self-contained in `Modules/<Name>/` (model + system observers + SwiftUI views).
+User-facing modules follow the **`<Feature>Visor`** brand naming (in their `displayName`); the
+folder names below are the code paths.
 
-- **Media** — system now-playing surface; artwork/state in compact, full transport + scrubber in
-  expanded. (Info via the perl adapter; commands via `MediaRemoteBridge`.)
-- **SystemHUD** — replaces OS overlays for volume / brightness / keyboard backlight; peeks a level
-  indicator on change, sliders in expanded. (`VolumeController`, `BrightnessController`,
-  `KeyboardBacklightController`, `MediaKeyMonitor`.)
-- **FileShelf** — drag-and-drop staging shelf; drop files onto the notch, hold them, drag back out.
-  Thumbnails, Quick Look, count affordance. (`FileShelfStore`, `ThumbnailService`,
-  `QuickLookController`, `FileActionService`.)
-- **Glance** — at-a-glance tiles (clock/date, calendar next-event, weather). Mostly expanded-only.
-  (`CalendarService`, `WeatherService`.)
-- **Battery** — power/charging status, time remaining, and connected-device (Bluetooth accessory)
-  battery; peeks on plug/unplug and low battery. (`PowerSourceMonitor`, `BluetoothMonitor`.)
-- **Timers** — countdown timers/stopwatches created from the notch; live countdown in compact,
-  list + create/pause/cancel in expanded; peeks/expands on completion.
-- **Notifications** — mirrors incoming notification banners; compact peek on arrival, scrollable
-  feed in expanded. (`NotificationCenterObserver`, `NotificationAppIconResolver`.)
-- **Conversion** — inline unit/currency converter (and media conversion via ffmpeg —
-  `FFmpegLocator`, `ConversionRunner`); expanded utility surface.
+- **Media → "MusicVisor"** (`Modules/Media`) — system now-playing surface. Compact: album-art
+  thumbnail + a three-bar equalizer **tinted with the artwork's dominant color**
+  (`MediaArtworkColor`, computed once per track). Expanded: large artwork, title/artist, a live
+  scrubber, transport, and an **audio-output device switcher**. Info via the perl adapter (with an
+  adaptive poll — faster while playing); commands via `MediaRemoteBridge`.
+- **Calendar** (`Modules/Calendar`) — next-meeting countdown chip in compact; an agenda with a
+  one-tap **Join** button (Zoom / Meet / Teams / Webex link detection) in expanded. EventKit via
+  `CalendarService`. **Meeting Mode:** while a meeting with a join link is in progress, the pill
+  shows the live mic-mute state and the sheet leads with a call HUD — elapsed timer, a system-wide
+  **mic-mute** toggle (`MicController`), an audio-output switcher, and Join; a mute applied via the
+  notch is auto-restored when the meeting ends.
+- **Reminders → "TaskVisor"** (`Modules/Reminders`) — due-today + overdue Apple Reminders. Compact:
+  a checklist count badge (red when any are overdue). Expanded: a **tap-to-complete** checklist
+  with list color, live due/overdue text, and a high-priority marker. EventKit via
+  `RemindersService`.
+- **FileShelf → "ClipVisor"** (`Modules/FileShelf`) — drag-and-drop staging shelf. Dragging a file
+  onto the notch opens the sheet with the shelf (it is not shown otherwise); hold files, drag back
+  out, Quick Look, AirDrop, zip. (`FileShelfStore`, `ThumbnailService`, `QuickLookController`,
+  `FileActionService`.)
+- **Battery** (`Modules/Battery`) — power/charging status, time remaining, and connected-device
+  (Bluetooth accessory) battery; peeks on plug/unplug and low battery. (`PowerSourceMonitor`,
+  `BluetoothMonitor`.)
+
+**`Modules/SystemHUD/`** (volume / brightness / keyboard-backlight HUD — `VolumeController`,
+`BrightnessController`, `KeyboardBacklightController`, `MediaKeyMonitor`) is present but **NOT wired
+into `ModuleRegistry`** — dead/unreferenced code kept for possible future use; nothing activates it
+at runtime.
+
+## Shared Services
+
+- **`Services/Audio/`** — CoreAudio helpers shared by modules (these are plain services, not
+  `NotchModule`s, so modules stay decoupled). `AudioOutputController` + `AudioOutputSelector` (the
+  default-output device and its inline picker, used by Media and Meeting Mode) and `MicController`
+  (default-input hardware mute for Meeting Mode; the mute follows the default input across device
+  changes, so switching mics mid-call never orphans a system-wide mute on the old device). Live
+  updates come through **`AudioPropertyListener`**, a shared wrapper over CoreAudio's **proc-based**
+  listener API (`AudioObjectAddPropertyListener` + a retained weak-box `clientData`, hopping to the
+  main actor). The block-based API is avoided: a Swift closure stored as a listener block re-bridges
+  to a new block each time it crosses the C boundary, so `AudioObjectRemovePropertyListenerBlock`
+  never matches on removal and leaks the registration on every remove.
 
 ## Theme & Settings
 
@@ -120,7 +166,7 @@ Each lives self-contained in `Modules/<Name>/` (model + system observers + Swift
   The notch pill is opaque black (blends with the hardware cutout); the expanded panel and floating
   surfaces use the native macOS 26 Liquid Glass material, degrading to `.ultraThinMaterial`.
 - **`Settings/SettingsStore.swift`** — `UserDefaults`-backed, `SettingsStore.shared`. Per-module
-  enabled flags (default on), **miniLake** (reduced-footprint compact mode), and hover sensitivity.
+  enabled flags (default on) and hover sensitivity.
 
 ## Debug
 

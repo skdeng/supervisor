@@ -28,6 +28,10 @@ final class MediaModule: NotchModule, ObservableObject {
     /// every render. `nil` when the current track has no artwork.
     @Published private(set) var artworkImage: NSImage?
 
+    /// A vibrant dominant color drawn from the current artwork, used to tint the compact
+    /// equalizer bars. Falls back to white when there's no artwork.
+    @Published private(set) var artworkAccent: Color = MediaArtworkColor.fallback
+
     /// Whether transport commands are available (MediaRemote `SendCommand` resolved).
     @Published private(set) var canControl = false
 
@@ -63,9 +67,9 @@ final class MediaModule: NotchModule, ObservableObject {
     /// artwork from a poll (e.g. while scrubbing) even though the track is unchanged; we
     /// re-inject the cached bytes so the UI artwork never flickers off mid-track.
     private var cachedArtwork: (identity: String, data: Data)?
-    /// The decoded `NSImage` behind `artworkImage`, keyed by track identity so it is rebuilt
-    /// only when the track actually changes (not on every poll/re-render).
-    private var decodedArtwork: (identity: String, image: NSImage)?
+    /// The decoded `NSImage` and its extracted accent color, keyed by track identity so they are
+    /// rebuilt only when the track actually changes (not on every poll/re-render).
+    private var decodedArtwork: (identity: String, image: NSImage, accent: Color)?
 
     /// Tracks whether a compact contribution is currently shown, so we only ask the engine
     /// to re-lay-out the pill when that visibility actually flips.
@@ -225,15 +229,28 @@ final class MediaModule: NotchModule, ObservableObject {
         guard let snapshot, let data = snapshot.artworkData, !data.isEmpty else {
             decodedArtwork = nil
             if artworkImage != nil { artworkImage = nil }
+            setAccent(MediaArtworkColor.fallback)
             return
         }
         if let cached = decodedArtwork, cached.identity == snapshot.trackIdentity {
             if artworkImage !== cached.image { artworkImage = cached.image }
+            setAccent(cached.accent)
             return
         }
-        let image = NSImage(data: data)
-        decodedArtwork = image.map { (snapshot.trackIdentity, $0) }
+        guard let image = NSImage(data: data) else {
+            decodedArtwork = nil
+            if artworkImage != nil { artworkImage = nil }
+            setAccent(MediaArtworkColor.fallback)
+            return
+        }
+        let accent = MediaArtworkColor.dominant(of: image) ?? MediaArtworkColor.fallback
+        decodedArtwork = (snapshot.trackIdentity, image, accent)
         if artworkImage !== image { artworkImage = image }
+        setAccent(accent)
+    }
+
+    private func setAccent(_ color: Color) {
+        if artworkAccent != color { artworkAccent = color }
     }
 
     /// Steady poll that keeps the UI in sync with media controlled elsewhere (Spotify, a

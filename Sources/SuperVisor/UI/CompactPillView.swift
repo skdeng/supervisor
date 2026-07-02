@@ -9,7 +9,6 @@ import SwiftUI
 /// side grows independently (volume/brightness HUD on the left, now-playing on the right).
 struct CompactPillView: View {
     @EnvironmentObject private var engine: NotchEngine
-    @ObservedObject private var settings = SettingsStore.shared
 
     /// Width of the physical notch cutout that compact content must avoid.
     let notchWidth: CGFloat
@@ -21,15 +20,11 @@ struct CompactPillView: View {
     @Binding var trailingWidth: CGFloat
 
     /// Gap between content and the notch cutout.
-    private var sidePadding: CGFloat {
-        settings.miniLakeEnabled ? NotchTheme.compactSidePaddingMini : NotchTheme.compactSidePadding
-    }
+    private let sidePadding: CGFloat = NotchTheme.compactSidePadding
 
     /// Gap between content and the pill's rounded outer edge, so indicators aren't flush
     /// against the edge (and clear the concave top-corner flare).
-    private var outerPadding: CGFloat {
-        settings.miniLakeEnabled ? 11 : 17
-    }
+    private let outerPadding: CGFloat = 17
 
     var body: some View {
         HStack(spacing: 0) {
@@ -80,20 +75,17 @@ struct CompactPillView: View {
     }
 
     private var leadingModules: [CompactEntry] {
-        let entries = engine.modules.compactMap { module -> CompactEntry? in
+        engine.modules.compactMap { module -> CompactEntry? in
             guard let view = module.compactLeading() else { return nil }
             return CompactEntry(moduleID: module.moduleID, view: view)
         }
-        // In miniLake, keep only the first (highest-order-priority) contribution per side.
-        return settings.miniLakeEnabled ? Array(entries.prefix(1)) : entries
     }
 
     private var trailingModules: [CompactEntry] {
-        let entries = engine.modules.compactMap { module -> CompactEntry? in
+        engine.modules.compactMap { module -> CompactEntry? in
             guard let view = module.compactTrailing() else { return nil }
             return CompactEntry(moduleID: module.moduleID, view: view)
         }
-        return settings.miniLakeEnabled ? Array(entries.prefix(1)) : entries
     }
 }
 

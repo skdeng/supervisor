@@ -20,8 +20,6 @@ public enum NotchTheme {
 
     /// Horizontal inset between the notch cutout and compact content.
     public static let compactSidePadding: CGFloat = 8
-    /// Horizontal inset between the notch cutout and compact content in miniLake.
-    public static let compactSidePaddingMini: CGFloat = 4
     /// Padding inside the expanded panel.
     public static let panelPadding: CGFloat = 16
     /// Vertical spacing between stacked module sections in the expanded panel.

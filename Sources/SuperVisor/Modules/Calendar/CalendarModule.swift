@@ -52,10 +52,15 @@ final class CalendarModule: NotchModule, ObservableObject {
         mic.start()
         audioOutput.start()
 
+        // `@Published` emits during willSet, so hop to the next main-queue turn before reading
+        // back the service's state — otherwise syncContributions() would observe the PREVIOUS
+        // events array and a calendar-change-driven pill update would operate on stale data.
         service.$events
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.syncContributions() }
             .store(in: &cancellables)
         service.$authorization
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.syncContributions() }
             .store(in: &cancellables)
         // Any unmute — ours, the user's in another app, or hardware — relinquishes our claim,
@@ -137,6 +142,10 @@ final class CalendarModule: NotchModule, ObservableObject {
     // MARK: Actions
 
     private func join(_ url: URL) {
+        // The URL originates from attacker-controllable calendar fields; re-check the scheme
+        // allowlist at the point of opening (defense in depth) so no unsafe scheme is ever
+        // handed to NSWorkspace, whatever path produced this URL.
+        guard MeetingLink.isAllowed(url) else { return }
         NSWorkspace.shared.open(url)
         context?.requestCollapse()
     }

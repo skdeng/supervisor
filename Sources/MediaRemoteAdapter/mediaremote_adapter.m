@@ -38,6 +38,15 @@ static NSNumber *MRANumberForKey(NSDictionary *info, NSString *key) {
     return [v isKindOfClass:[NSNumber class]] ? (NSNumber *)v : nil;
 }
 
+// Like MRANumberForKey but rejects NaN / ±Infinity. A malicious now-playing source can set a
+// non-finite duration/elapsed/rate, and NSJSONSerialization throws NSInvalidArgumentException on
+// non-finite numbers — which, uncaught, would abort this helper. Dropping the field degrades to
+// missing metadata instead.
+static NSNumber *MRAFiniteNumberForKey(NSDictionary *info, NSString *key) {
+    NSNumber *n = MRANumberForKey(info, key);
+    return (n != nil && isfinite([n doubleValue])) ? n : nil;
+}
+
 // Builds the JSON payload the Swift side parses (NowPlaying.init?(json:)). Returns the
 // serialized JSON, or "{}" when nothing is playing / the read was denied.
 static NSString *MRABuildJSON(NSDictionary *info) {
@@ -54,11 +63,11 @@ static NSString *MRABuildJSON(NSDictionary *info) {
     NSString *album = MRAStringForKey(info, @"kMRMediaRemoteNowPlayingInfoAlbum");
     if (album != nil) out[@"album"] = album;
 
-    NSNumber *duration = MRANumberForKey(info, @"kMRMediaRemoteNowPlayingInfoDuration");
+    NSNumber *duration = MRAFiniteNumberForKey(info, @"kMRMediaRemoteNowPlayingInfoDuration");
     if (duration != nil) out[@"duration"] = duration;
-    NSNumber *elapsed = MRANumberForKey(info, @"kMRMediaRemoteNowPlayingInfoElapsedTime");
+    NSNumber *elapsed = MRAFiniteNumberForKey(info, @"kMRMediaRemoteNowPlayingInfoElapsedTime");
     if (elapsed != nil) out[@"elapsed"] = elapsed;
-    NSNumber *rate = MRANumberForKey(info, @"kMRMediaRemoteNowPlayingInfoPlaybackRate");
+    NSNumber *rate = MRAFiniteNumberForKey(info, @"kMRMediaRemoteNowPlayingInfoPlaybackRate");
     if (rate != nil) out[@"rate"] = rate;
 
     // The daemon samples ElapsedTime at this instant (an NSDate), NOT continuously — the live
@@ -81,6 +90,11 @@ static NSString *MRABuildJSON(NSDictionary *info) {
         out[@"artwork"] = [(NSData *)artwork base64EncodedStringWithOptions:0];
     }
 
+    // Final safety net: bail cleanly if anything in the payload is not JSON-serializable rather
+    // than letting NSJSONSerialization raise (which would abort the helper).
+    if (![NSJSONSerialization isValidJSONObject:out]) {
+        return @"{}";
+    }
     NSError *err = nil;
     NSData *json = [NSJSONSerialization dataWithJSONObject:out options:0 error:&err];
     if (json == nil) {

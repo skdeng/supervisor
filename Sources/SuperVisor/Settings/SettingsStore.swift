@@ -3,8 +3,8 @@ import Combine
 
 /// Persistent app settings backed by `UserDefaults`.
 ///
-/// Owns the per-module enabled flags (default on), the miniLake presentation toggle, and
-/// hover sensitivity. Both `ModuleRegistry`/engine (to filter modules) and the settings
+/// Owns the per-module enabled flags (default on) and hover sensitivity. Both
+/// `ModuleRegistry`/engine (to filter modules) and the settings
 /// UI consult and mutate this store. Changes publish so the settings window and engine
 /// react live.
 @MainActor
@@ -16,16 +16,10 @@ public final class SettingsStore: ObservableObject {
 
     private enum Key {
         static let moduleEnabledPrefix = "module.enabled."
-        static let miniLake = "miniLake.enabled"
         static let hoverSensitivity = "hover.sensitivity"
         static let debugTint = "debug.tintRed"
         static let notchWidthAdjust = "notch.widthAdjust"
         static let notchOffsetX = "notch.offsetX"
-    }
-
-    /// miniLake reduced-footprint compact presentation.
-    @Published public var miniLakeEnabled: Bool {
-        didSet { defaults.set(miniLakeEnabled, forKey: Key.miniLake) }
     }
 
     /// Hover sensitivity in the range 0...1. Higher means a larger activation rect and a
@@ -57,12 +51,6 @@ public final class SettingsStore: ObservableObject {
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-
-        if defaults.object(forKey: Key.miniLake) != nil {
-            self.miniLakeEnabled = defaults.bool(forKey: Key.miniLake)
-        } else {
-            self.miniLakeEnabled = false
-        }
 
         if defaults.object(forKey: Key.hoverSensitivity) != nil {
             self.hoverSensitivity = defaults.double(forKey: Key.hoverSensitivity)

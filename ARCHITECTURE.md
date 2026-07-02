@@ -52,13 +52,6 @@ without a full expansion — e.g. "AirPods connected", "Now charging", "Volume".
 engine shows the relevant compact content for the requested duration, then auto-collapses
 back toward idle. Peek never steals the expanded panel; it is a lightweight compact nudge.
 
-### miniLake compact mode
-**miniLake** is a reduced-footprint presentation of the compact pill for users who want
-a smaller, less assertive island. In miniLake the pill keeps tighter padding, prefers
-single-side compact content, and suppresses lower-priority compact contributions so the
-surface stays close to the size of the bare notch. It is a presentation mode of the
-same compact state, not a separate window or state machine.
-
 ### Liquid Glass theming
 All chrome — the pill body, the expanded panel, separators, and module surfaces — is
 rendered through Liquid Glass material wrappers (in `Theme/`) so the app adopts the
@@ -154,7 +147,7 @@ Sources/SuperVisor/
 - **UI/** — the SwiftUI root view and the two presentation shells: the compact pill and
   the expanded panel that compose module contributions.
 - **Theme/** — Liquid Glass material wrappers shared by all chrome and modules.
-- **Settings/** — the settings store (enabled modules, miniLake mode, per-module prefs).
+- **Settings/** — the settings store (enabled modules, hover sensitivity, per-module prefs).
 - **Modules/<Name>/** — each feature lives in its own self-contained folder; a module
   folder owns its model, system observers, and SwiftUI views.
 

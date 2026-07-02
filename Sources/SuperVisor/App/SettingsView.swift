@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The settings surface: per-module enable toggles, the miniLake presentation toggle, and
-/// hover sensitivity. Backed by `SettingsStore`; changes persist and the engine reacts live.
+/// The settings surface: per-module enable toggles and hover sensitivity. Backed by
+/// `SettingsStore`; changes persist and the engine reacts live.
 struct SettingsView: View {
     @ObservedObject var settings: SettingsStore
 
@@ -12,8 +12,6 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("Presentation") {
-                Toggle("miniLake (compact footprint)", isOn: $settings.miniLakeEnabled)
-
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Hover sensitivity")
                     Slider(value: $settings.hoverSensitivity, in: 0...1)

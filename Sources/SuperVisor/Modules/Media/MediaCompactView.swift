@@ -42,7 +42,7 @@ struct MediaBarsCompactView: View {
 
     var body: some View {
         if let nowPlaying = module.nowPlaying {
-            AudioBarsView(isPlaying: nowPlaying.isPlaying)
+            AudioBarsView(isPlaying: nowPlaying.isPlaying, tint: module.artworkAccent)
                 .frame(width: 14, height: 18)
                 .transition(.opacity.combined(with: .scale))
         }
@@ -59,6 +59,8 @@ struct MediaBarsCompactView: View {
 /// is unreliable) — pause/resume here is just a function of `isPlaying`.
 struct AudioBarsView: View {
     let isPlaying: Bool
+    /// Bar color — the artwork's dominant color, or white when there's no artwork.
+    var tint: Color = NotchTheme.primaryForeground
 
     private let barCount = 3
     private let barWidth: CGFloat = 2.5
@@ -72,12 +74,13 @@ struct AudioBarsView: View {
             HStack(alignment: .center, spacing: spacing) {
                 ForEach(0..<barCount, id: \.self) { index in
                     Capsule(style: .continuous)
-                        .fill(NotchTheme.primaryForeground)
+                        .fill(tint)
                         .frame(width: barWidth)
                         .frame(maxHeight: .infinity)
                         .scaleEffect(y: barScale(index, time: time), anchor: .center)
                 }
             }
+            .animation(.easeInOut(duration: 0.4), value: tint)
         }
     }
 
