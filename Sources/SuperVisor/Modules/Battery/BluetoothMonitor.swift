@@ -6,14 +6,24 @@ import IOKit
 /// devices with names and, where available, battery levels.
 ///
 /// Connect events use the global `IOBluetoothDevice.register(forConnectNotifications:…)`.
-/// Disconnect is per-device, so on each connect we install a one-shot disconnect notification
-/// for that device. Battery levels are sourced from the IORegistry — Apple HID accessories
+/// Disconnect is per-device, so connected devices each get a one-shot disconnect
+/// notification. Battery levels are sourced from the IORegistry — Apple HID accessories
 /// (AirPods, Magic Mouse/Trackpad/Keyboard) publish `BatteryPercent` (and split L/R/case
 /// keys) on their `AppleDeviceManagementHIDEventService` / HID entries.
 ///
 /// This is an `NSObject` because IOBluetooth notification targets are Objective-C selectors.
-/// It is not main-actor isolated; it forwards changes to the module via the `onConnect`,
-/// `onDisconnect`, and `onChange` closures, which the module hops onto the main actor.
+///
+/// Threading: IOBluetooth is not main-thread-honest. Classic connect/disconnect
+/// notifications arrive on the main run loop, but BLE connection events are posted from the
+/// framework's own coordinator queue (`com.apple.bluetooth.iobluetooth.coordinatorQueue`) —
+/// crash reports show both a data race on the notification dictionary (EXC_BAD_ACCESS in the
+/// callback path) and, with the callbacks main-actor-isolated instead, the @objc thunk's
+/// isolation assert trapping on that queue. All state on this class is therefore main-actor
+/// isolated, and the notification callbacks are `nonisolated` trampolines that do nothing on
+/// the delivering thread but bounce to the main actor — they never read the passed device
+/// (a fresh paired-device query on the main actor re-derives everything) and identify spent
+/// disconnect registrations by object identity only.
+@MainActor
 final class BluetoothMonitor: NSObject {
     /// Fired when a device connects, with the freshly-read device info.
     var onConnect: ((BluetoothDeviceInfo) -> Void)?
@@ -25,53 +35,110 @@ final class BluetoothMonitor: NSObject {
     private var connectNotification: IOBluetoothUserNotification?
     /// Disconnect notifications keyed by device address so we can drop them on disconnect.
     private var disconnectNotifications: [String: IOBluetoothUserNotification] = [:]
+    /// The device list as of the last resync, diffed to announce connects/disconnects.
+    private var lastSnapshot: [BluetoothDeviceInfo] = []
+    /// Coalesces notification bursts (registration replays every connected device, and BLE
+    /// events can arrive in clusters) into one pending resync.
+    private var resyncScheduled = false
+    private var isRunning = false
 
     /// Begin observing. Registers for connect notifications and seeds the current list from
-    /// already-connected paired devices.
+    /// already-connected paired devices. Registration synchronously replays every connected
+    /// device into `deviceConnected` before returning; that replay is harmless because the
+    /// callback only schedules a resync.
     func start() {
+        isRunning = true
         connectNotification = IOBluetoothDevice.register(
             forConnectNotifications: self,
             selector: #selector(deviceConnected(_:device:))
         )
-
-        // Seed from paired devices that are already connected, and arm disconnect
-        // notifications for each so we observe their drops.
-        for device in pairedConnectedDevices() {
-            armDisconnect(for: device)
-        }
-        emitChange()
+        resync(announceDiff: false)
     }
 
     /// Tear down all notifications.
     func stop() {
+        isRunning = false
         connectNotification?.unregister()
         connectNotification = nil
         for (_, note) in disconnectNotifications {
             note.unregister()
         }
         disconnectNotifications.removeAll()
+        lastSnapshot = []
         onConnect = nil
         onDisconnect = nil
         onChange = nil
     }
 
-    // MARK: - IOBluetooth callbacks
+    // MARK: - IOBluetooth callbacks (nonisolated trampolines — no work off the main actor)
 
-    @objc private func deviceConnected(_ notification: IOBluetoothUserNotification,
-                                       device: IOBluetoothDevice) {
-        armDisconnect(for: device)
-        let info = makeInfo(for: device)
-        onConnect?(info)
-        emitChange()
+    @objc nonisolated private func deviceConnected(_ notification: IOBluetoothUserNotification?,
+                                                   device: IOBluetoothDevice?) {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                self?.scheduleResync()
+            }
+        }
     }
 
-    @objc private func deviceDisconnected(_ notification: IOBluetoothUserNotification,
-                                          device: IOBluetoothDevice) {
-        notification.unregister()
-        let key = device.addressString ?? (device.name ?? "")
-        disconnectNotifications.removeValue(forKey: key)
-        onDisconnect?(device.name ?? "Bluetooth Device")
-        emitChange()
+    @objc nonisolated private func deviceDisconnected(_ notification: IOBluetoothUserNotification?,
+                                                      device: IOBluetoothDevice?) {
+        // Identify the spent one-shot registration by identity alone; the stored reference
+        // (the same object) is unregistered on the main actor.
+        let spent = notification.map(ObjectIdentifier.init)
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                self?.retireDisconnectNotification(spent)
+                self?.scheduleResync()
+            }
+        }
+    }
+
+    // MARK: - Resync
+
+    private func retireDisconnectNotification(_ identity: ObjectIdentifier?) {
+        guard let identity else { return }
+        for (key, note) in disconnectNotifications where ObjectIdentifier(note) == identity {
+            note.unregister()
+            disconnectNotifications.removeValue(forKey: key)
+        }
+    }
+
+    private func scheduleResync() {
+        guard isRunning, !resyncScheduled else { return }
+        resyncScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.resyncScheduled = false
+            guard self.isRunning else { return }
+            self.resync(announceDiff: true)
+        }
+    }
+
+    /// Re-derive state from a fresh paired-device query: arm disconnect notifications for
+    /// connected devices, announce the diff against the previous snapshot, and publish the
+    /// full list.
+    private func resync(announceDiff: Bool) {
+        let devices = pairedConnectedDevices()
+        for device in devices {
+            armDisconnect(for: device)
+        }
+
+        let infos = devices.map { makeInfo(for: $0) }
+        let previous = lastSnapshot
+        lastSnapshot = infos
+
+        if announceDiff {
+            let previousIDs = Set(previous.map(\.id))
+            let currentIDs = Set(infos.map(\.id))
+            for info in infos where !previousIDs.contains(info.id) {
+                onConnect?(info)
+            }
+            for info in previous where !currentIDs.contains(info.id) {
+                onDisconnect?(info.name)
+            }
+        }
+        onChange?(infos)
     }
 
     // MARK: - Helpers
@@ -93,12 +160,6 @@ final class BluetoothMonitor: NSObject {
             return []
         }
         return paired.filter { $0.isConnected() }
-    }
-
-    /// Snapshot the current connected-device list and deliver it.
-    private func emitChange() {
-        let devices = pairedConnectedDevices().map { makeInfo(for: $0) }
-        onChange?(devices)
     }
 
     private func makeInfo(for device: IOBluetoothDevice) -> BluetoothDeviceInfo {

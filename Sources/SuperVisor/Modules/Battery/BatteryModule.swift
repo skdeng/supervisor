@@ -8,12 +8,10 @@ import Combine
 ///   `IOPSNotificationCreateRunLoopSource`). The module peeks on plug/unplug and when the
 ///   charge crosses the 20% and 10% thresholds downward while on battery.
 /// - Bluetooth comes from `BluetoothMonitor` (IOBluetooth connect/disconnect notifications),
-///   with accessory battery levels read from the IORegistry. The module peeks on
-///   connect/disconnect and briefly shows a Bluetooth glyph in the compact pill.
+///   with accessory battery levels read from the IORegistry.
 ///
-/// Compact trailing shows a battery ring whenever the battery is low or charging, and a
-/// short-lived Bluetooth glyph right after a connect/disconnect. The expanded section renders
-/// a `BatteryStatusCard`.
+/// The module has no compact-pill presence; it peeks the notch on plug/unplug and on low/critical
+/// battery, and the expanded section renders a `BatteryStatusCard`.
 @MainActor
 final class BatteryModule: NotchModule, ObservableObject {
     let moduleID = "battery"
@@ -36,9 +34,6 @@ final class BatteryModule: NotchModule, ObservableObject {
     private var lastAlertedThreshold: Int?
     /// Previous plugged-in state, to detect plug/unplug edges.
     private var wasPluggedIn: Bool?
-    /// Whether the battery ring was contributing on the last compact evaluation, so we only
-    /// ask the engine to re-lay-out when that actually flips.
-    private var hadCompactContribution = false
 
     // MARK: NotchModule
 
@@ -76,7 +71,6 @@ final class BatteryModule: NotchModule, ObservableObject {
 
         detectThresholdCrossings(previous: previous, new: new)
         detectPowerSourceChange(previous: previous, new: new)
-        refreshCompactContributionIfNeeded()
     }
 
     /// Fire a low/critical peek exactly once per downward crossing while on battery. Reset the
@@ -114,28 +108,6 @@ final class BatteryModule: NotchModule, ObservableObject {
         context?.requestPeek(3)
     }
 
-    // MARK: Compact contribution bookkeeping
-
-    /// Whether the compact pill currently has anything from this module on the trailing side.
-    private var contributesCompact: Bool {
-        compactBatteryVisible
-    }
-
-    /// Whether the battery ring should appear: when low/critical or actively charging.
-    private var compactBatteryVisible: Bool {
-        battery.isPresent && (battery.isLow || battery.isCritical || battery.isCharging)
-    }
-
-    /// Tell the engine to re-lay-out the pill only when our compact contribution appears or
-    /// disappears (per the NotchContext contract).
-    private func refreshCompactContributionIfNeeded() {
-        let now = contributesCompact
-        if now != hadCompactContribution {
-            hadCompactContribution = now
-            context?.setNeedsCompactRefresh()
-        }
-    }
-
     // MARK: Tints
 
     /// Tint reflecting battery state for rings/cards.
@@ -148,34 +120,11 @@ final class BatteryModule: NotchModule, ObservableObject {
 
     // MARK: UI contributions
 
-    func compactTrailing() -> AnyView? {
-        // A transient Bluetooth glyph wins the slot briefly; otherwise the battery ring when
-        // low or charging. Contribute NOTHING when idle/healthy — otherwise the pill keeps a
-        // reserved padded slot and never shrinks fully back to the notch.
-        guard contributesCompact else { return nil }
-        return AnyView(CompactTrailing(module: self))
-    }
-
     func expandedSection() -> AnyView? {
         AnyView(ExpandedSection(module: self))
     }
 
     // MARK: View wrappers (observe the module so they update live)
-
-    private struct CompactTrailing: View {
-        @ObservedObject var module: BatteryModule
-
-        var body: some View {
-            if module.compactBatteryVisible {
-                BatteryRingView(
-                    fraction: module.battery.fraction ?? 0,
-                    isCharging: module.battery.isCharging,
-                    tint: module.batteryTint
-                )
-                .transition(.scale.combined(with: .opacity))
-            }
-        }
-    }
 
     private struct ExpandedSection: View {
         @ObservedObject var module: BatteryModule

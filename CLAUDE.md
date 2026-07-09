@@ -116,12 +116,21 @@ sink. Preserve these guards when touching the relevant code:
 ## Module Roster
 
 Each lives self-contained in `Modules/<Name>/` (model + system observers + SwiftUI views).
-User-facing modules follow the **`<Feature>Visor`** brand naming (in their `displayName`); the
-folder names below are the code paths.
+Modules that surface a **generic capability** carry a **`<Feature>Visor`** brand name in their
+`displayName` (MusicVisor, TaskVisor, ClipVisor) — propose one in that style for any new module.
+Name a module literally only when its point is *whose* data it shows rather than *what* it does
+(Claude Usage), or when the plain noun already is the feature (Calendar, Battery). The folder
+names below are the code paths.
 
 - **Media → "MusicVisor"** (`Modules/Media`) — system now-playing surface. Compact: album-art
-  thumbnail + a three-bar equalizer **tinted with the artwork's dominant color**
-  (`MediaArtworkColor`, computed once per track). Expanded: large artwork, title/artist, a live
+  thumbnail + a six-thin-bar equalizer **tinted with the artwork's dominant color**
+  (`MediaArtworkColor`, computed once per track). While a track plays, the bars are a **real FFT
+  spectrum of the actual system audio** (`SpectrumBarsView`, fed by the system-audio tap in
+  `Services/Audio/`); when the tap is off, denied, or rebuilding they fall back to the
+  synthesized bounce (`AudioBarsView`) in the same footprint. A **beat aura**
+  (`UI/BeatAuraView`, layered behind the morphing surface in `NotchRootView`) glows around the
+  notch in the artwork color, following the music's bass envelope. Both are toggleable in
+  Settings (`media.trueSpectrum`, `media.beatAura`). Expanded: large artwork, title/artist, a live
   scrubber, transport, and an **audio-output device switcher**. Info via the perl adapter (with an
   adaptive poll — faster while playing); commands via `MediaRemoteBridge`.
 - **Calendar** (`Modules/Calendar`) — next-meeting countdown chip in compact; an agenda with a
@@ -141,6 +150,19 @@ folder names below are the code paths.
 - **Battery** (`Modules/Battery`) — power/charging status, time remaining, and connected-device
   (Bluetooth accessory) battery; peeks on plug/unplug and low battery. (`PowerSourceMonitor`,
   `BluetoothMonitor`.)
+- **Usage → "Claude Usage"** (`Modules/Usage`) — Claude Code plan-quota runway as one ticker row at
+  the bottom of the sheet (`5h 62% · 7d 34% ↻ 4:30 PM`, colored by headroom: green < 70 %, amber
+  < 90 %, red past it). No compact/pill presence. Data: `QuotaMonitor` **watches**
+  `~/.claude/agentpace/last-status.json` (the statusline capture the user's Claude Code
+  statusline wrapper rewrites on every refresh) through `FileChangeWatcher` and re-parses only
+  when the mtime actually moves; the `rate_limits` object carries `used_percentage`/`resets_at`
+  per window. The row exists only while Claude Code is actively in use (file fresh within
+  10 min) **and** quota data is recent (30 min TTL) — quota is retained across payloads that
+  omit `rate_limits` (desktop-bridge sessions do; terminal sessions carry it). Payload is
+  parsed defensively per the untrusted-input convention. Freshness is wall-clock-derived, so
+  when Claude Code stops writing, no file event will ever arrive: a **single timer** is armed
+  for the soonest deadline that can still hide the row (and none at all once it is hidden),
+  rather than a periodic tick that exists only to notice the absence of one.
 
 **`Modules/SystemHUD/`** (volume / brightness / keyboard-backlight HUD — `VolumeController`,
 `BrightnessController`, `KeyboardBacklightController`, `MediaKeyMonitor`) is present but **NOT wired
@@ -149,6 +171,13 @@ at runtime.
 
 ## Shared Services
 
+- **`Services/FileSystem/FileChangeWatcher.swift`** — calls back when a single file is written,
+  created, replaced, or removed. A vnode `DispatchSource` watches an open descriptor — an
+  *inode*, not a path — so a writer that updates atomically (write temp, `rename` into place)
+  leaves the watch pointing at the old unlinked inode and no later write is ever reported. The
+  watcher therefore re-arms on `.rename`/`.delete`/`.revoke`, and watches the parent directory
+  while the file is absent (so it may be started before the file exists). Callbacks are
+  debounced, and fire on a private serial queue, not the main actor.
 - **`Services/Audio/`** — CoreAudio helpers shared by modules (these are plain services, not
   `NotchModule`s, so modules stay decoupled). `AudioOutputController` + `AudioOutputSelector` (the
   default-output device and its inline picker, used by Media and Meeting Mode) and `MicController`
@@ -172,7 +201,10 @@ at runtime.
 
 `SettingsStore.debugTintEnabled` (a toggle in Settings, persisted as `debug.tintRed`) tints the
 whole rendered surface **bright red** so its exact bounds are visible against the black hardware
-notch. In debug tint the surface always renders even when idle.
+notch. The surface renders in every state — with no compact content it rests as a bare black
+pill exactly over the cutout — so the tint is always visible. The pill is **always symmetric**:
+both sides render at the wider side's measured width (`max(leading, trailing)`), so compact
+content never shifts the pill off the notch's center.
 
 ## Git
 

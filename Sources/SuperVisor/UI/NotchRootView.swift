@@ -13,6 +13,8 @@ import SwiftUI
 struct NotchRootView: View {
     @EnvironmentObject private var engine: NotchEngine
     @ObservedObject private var settings = SettingsStore.shared
+    /// Whether the system-audio tap is live (gates the beat aura) and the artwork accent color.
+    @ObservedObject private var spectrum = SpectrumCenter.shared
 
     /// Measured natural widths of each side's compact content; drive the collapsed width and
     /// the cutout-centering offset.
@@ -32,14 +34,15 @@ struct NotchRootView: View {
     /// Measured sheet content height — the surface grows to exactly fit the panel (no scroll).
     private var panelH: CGFloat { engine.expandedSheetHeight }
 
-    /// Collapsed width: the notch plus whatever compact content flanks it.
-    private var compactWidth: CGFloat { notchW + leadingWidth + trailingWidth }
-    /// The morphing surface's animated size.
+    /// Width each side of the pill reserves: the wider side's measured content width. Both
+    /// sides always match, so the pill is symmetric around the cutout and never lopsided —
+    /// the shorter side simply carries black slack at its outer edge.
+    private var sideWidth: CGFloat { max(leadingWidth, trailingWidth) }
+    /// Collapsed width: the notch plus the (equal) flanking sides.
+    private var compactWidth: CGFloat { notchW + 2 * sideWidth }
+    /// The morphing surface's animated size. Pill and sheet are both centered on the notch.
     private var shapeWidth: CGFloat { isExpanded ? panelW : compactWidth }
     private var shapeHeight: CGFloat { isExpanded ? notchH + panelH : notchH }
-    /// While collapsed, shift the asymmetric pill so the cutout stays on the physical notch;
-    /// while expanded, the sheet is centered on the notch (offset 0).
-    private var shapeOffsetX: CGFloat { isExpanded ? 0 : (trailingWidth - leadingWidth) / 2 }
     /// Tight like a pill when collapsed, rounder as the sheet opens.
     private var radius: CGFloat { isExpanded ? NotchTheme.panelCornerRadius : NotchTheme.pillCornerRadius }
 
@@ -47,38 +50,34 @@ struct NotchRootView: View {
     /// top edge so it grows down and outward, never above the screen's top.
     private var hoverScale: CGFloat { (engine.isHovered && !isExpanded) ? 1.06 : 1.0 }
 
-    /// Truly idle: nothing to show. We render no surface at all so the bare hardware notch
-    /// shows at exactly its own size — our pill never overhangs the physical cutout. In debug
-    /// tint we always render so the red bounds stay visible.
-    private var isIdle: Bool {
-        !debugTint && !isExpanded && !engine.isHovered && leadingWidth < 0.5 && trailingWidth < 0.5
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .top) {
-                // ONE surface: the notch itself grows and becomes the sheet — not a separate
-                // panel dropping below a static bar. Hidden entirely while idle so the bare
-                // hardware notch is all that shows.
-                // Fade fast when settling to/from idle, independent of the slower hover-scale
-                // spring. The rendered notch sits a hair inside the physical cutout, so without
-                // this the surface is still visible as it scales back down on hover-out and you
-                // briefly see the desktop in that gap. Fading out within ~0.12s means it is gone
-                // before the scale reaches its (slightly sub-notch) resting size.
-                morphingSurface
-                    .opacity(isIdle ? 0 : 1)
-                    .animation(.easeOut(duration: 0.12), value: isIdle)
+                // Beat aura: a blurred, artwork-tinted echo of the surface that swells with the
+                // music's bass. Behind the surface and unclipped, so the glow spills past the
+                // silhouette; mirrors the surface's size, hover scale, and centering offset so
+                // it always hugs the same shape. Exists only while the audio tap captures.
+                if settings.beatAuraEnabled && spectrum.isCapturing {
+                    BeatAuraView(cornerRadius: radius, accent: spectrum.accent)
+                        .frame(width: shapeWidth, height: shapeHeight)
+                        .scaleEffect(hoverScale, anchor: .top)
+                        .allowsHitTesting(false)
+                }
 
-                // Camera cap: solid black over the physical notch so the hardware cutout blends
-                // whenever the surface is showing. Pinned to the notch center (never offset).
-                // Purely visual — it must not swallow clicks, so taps on the notch area reach
-                // the surface's tap gesture below.
+                // ONE surface: the notch itself grows and becomes the sheet — not a separate
+                // panel dropping below a static bar. It always renders: with no compact content
+                // it rests as a bare black pill exactly over the hardware notch, so the notch is
+                // always present — and visibly marks the notch region on displays without a
+                // physical cutout.
+                morphingSurface
+
+                // Camera cap: solid black over the physical notch so the hardware cutout blends.
+                // Pinned to the notch center (never offset). Purely visual — it must not swallow
+                // clicks, so taps on the notch area reach the surface's tap gesture below.
                 NotchShape(cornerRadius: NotchTheme.pillCornerRadius)
                     .fill(surfaceColor)
                     .frame(width: notchW, height: notchH)
                     .allowsHitTesting(false)
-                    .opacity(isIdle ? 0 : 1)
-                    .animation(.easeOut(duration: 0.12), value: isIdle)
             }
             // Springy when opening; critically damped (no overshoot) when closing, so the
             // notch never bounces smaller than the physical notch on the way back.
@@ -140,7 +139,6 @@ struct NotchRootView: View {
         .clipShape(NotchShape(cornerRadius: radius))
         .contentShape(NotchShape(cornerRadius: radius))
         .scaleEffect(hoverScale, anchor: .top)
-        .offset(x: shapeOffsetX)
         .shadow(color: .black.opacity(isExpanded ? 0.45 : 0), radius: 22, y: 12)
         // Click the notch to open/close the sheet (hover only previews the grow).
         .onTapGesture { if !isExpanded { engine.toggleSheet() } }

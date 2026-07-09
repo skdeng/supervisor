@@ -36,5 +36,7 @@
 	<string>SuperVisor reads Bluetooth accessory battery levels to show them in the notch.</string>
 	<key>NSAccessibilityUsageDescription</key>
 	<string>SuperVisor reads incoming notification banners to mirror them in the notch.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>SuperVisor listens to the system audio output to render a live spectrum and beat-synced glow in the notch while music plays. Audio is analyzed in memory and never recorded or stored.</string>
 </dict>
 </plist>

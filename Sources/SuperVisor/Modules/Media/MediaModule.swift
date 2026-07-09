@@ -75,6 +75,20 @@ final class MediaModule: NotchModule, ObservableObject {
     /// to re-lay-out the pill when that visibility actually flips.
     private var hadCompactContribution = false
 
+    // MARK: Live spectrum (system-audio tap)
+
+    /// Captures the system audio for the live spectrum bars + beat aura. Runs only while a
+    /// track is actually playing (macOS shows a recording indicator while the tap is live).
+    private let spectrumTap = SystemAudioTap()
+    /// Latched when tap creation fails (permission denied or the tap stack is broken) so the
+    /// poll doesn't retry creation every cycle. Cleared when the user re-enables the feature
+    /// in Settings — that is the retry gesture.
+    private var spectrumUnavailable = false
+    /// Pending delayed tap stop after a pause, so a quick pause/resume doesn't tear the tap
+    /// down only to immediately rebuild it.
+    private var spectrumLingerTask: Task<Void, Never>?
+    private var spectrumSettingCancellable: AnyCancellable?
+
     init() {
         self.bridge = MediaRemoteBridge()
     }
@@ -85,6 +99,29 @@ final class MediaModule: NotchModule, ObservableObject {
         self.context = context
         self.canControl = bridge?.canSendCommands ?? false
         audioOutput.start()
+
+        // Live spectrum: mirror the tap's state into the shared spectrum center (the compact
+        // bars and the beat aura observe it) and latch failures so we stop retrying.
+        spectrumTap.onStateChange = { [weak self] state in
+            SpectrumCenter.shared.setCapturing(state == .running)
+            guard let self else { return }
+            if state == .unavailable {
+                self.spectrumUnavailable = true
+                self.reconcileSpectrumTap()
+            }
+        }
+        // React to the Settings toggle live; re-enabling clears the failure latch (the retry
+        // gesture after a denied permission that the user has since granted).
+        spectrumSettingCancellable = SettingsStore.shared.$trueSpectrumEnabled
+            .dropFirst()
+            .sink { [weak self] enabled in
+                guard let self else { return }
+                if enabled {
+                    self.spectrumUnavailable = false
+                    self.spectrumTap.resetAvailability()
+                }
+                self.reconcileSpectrumTap(spectrumEnabled: enabled)
+            }
 
         // MediaRemote still broadcasts now-playing change notifications even though info
         // reads are gated; subscribe for instant updates on track/state changes.
@@ -119,6 +156,10 @@ final class MediaModule: NotchModule, ObservableObject {
     func deactivate() {
         stopPolling()
         audioOutput.stop()
+        spectrumSettingCancellable = nil
+        spectrumLingerTask?.cancel()
+        spectrumLingerTask = nil
+        spectrumTap.stop()
         // Clear the read latch so a teardown mid-read can't leave it stuck (which would
         // silently freeze all future refreshes if the module were re-activated).
         isReading = false
@@ -196,6 +237,7 @@ final class MediaModule: NotchModule, ObservableObject {
         nowPlaying = reconciled
         updateArtwork(for: reconciled)
         reconcileCompactVisibility()
+        reconcileSpectrumTap()
         // Honor a refresh that was requested while this read was in flight.
         if pendingRefresh {
             pendingRefresh = false
@@ -251,6 +293,41 @@ final class MediaModule: NotchModule, ObservableObject {
 
     private func setAccent(_ color: Color) {
         if artworkAccent != color { artworkAccent = color }
+        // Mirror into the shared spectrum center so the beat aura (core UI, which never
+        // references modules) tints with the artwork too.
+        SpectrumCenter.shared.setAccent(color)
+    }
+
+    /// Drive the system-audio tap from the current playback state: capture while a track is
+    /// playing (and the feature is enabled and hasn't failed), linger 2 s across a pause so a
+    /// quick resume doesn't rebuild the whole tap, and stop immediately when the feature is
+    /// switched off (the recording indicator must honor the toggle without delay).
+    private func reconcileSpectrumTap(spectrumEnabled: Bool? = nil) {
+        let enabled = spectrumEnabled ?? SettingsStore.shared.trueSpectrumEnabled
+        let playing = nowPlaying?.isPlaying == true
+        spectrumTap.setExpectingAudio(playing)
+
+        if enabled && !spectrumUnavailable && playing {
+            spectrumLingerTask?.cancel()
+            spectrumLingerTask = nil
+            spectrumTap.start()
+        } else if !enabled || spectrumUnavailable {
+            spectrumLingerTask?.cancel()
+            spectrumLingerTask = nil
+            spectrumTap.stop()
+        } else if spectrumLingerTask == nil {
+            spectrumLingerTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard let self, !Task.isCancelled else { return }
+                self.spectrumLingerTask = nil
+                let stillWanted = SettingsStore.shared.trueSpectrumEnabled
+                    && !self.spectrumUnavailable
+                    && self.nowPlaying?.isPlaying == true
+                if !stillWanted {
+                    self.spectrumTap.stop()
+                }
+            }
+        }
     }
 
     /// Steady poll that keeps the UI in sync with media controlled elsewhere (Spotify, a

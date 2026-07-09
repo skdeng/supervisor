@@ -12,6 +12,7 @@ enum ModuleRegistry {
             RemindersModule(),
             FileShelfModule(),
             BatteryModule(),
+            UsageModule(),
         ]
     }
 }

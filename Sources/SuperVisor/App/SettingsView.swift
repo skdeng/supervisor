@@ -40,6 +40,17 @@ struct SettingsView: View {
                 }
             }
 
+            Section("MusicVisor") {
+                Toggle("Live audio spectrum", isOn: $settings.trueSpectrumEnabled)
+                Text("Draws the equalizer from the actual system audio. macOS asks once for System Audio Recording permission and shows a recording indicator in the menu bar while music plays. Off: an animated equalizer with no audio access.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle("Beat aura", isOn: $settings.beatAuraEnabled)
+                Text("Pulses a glow around the notch in the artwork's color, following the music's bass. Requires the live audio spectrum.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Debug") {
                 Toggle("Tint notch & sheet bright red", isOn: $settings.debugTintEnabled)
                 Text("Colors the rendered surface red so you can see its exact bounds against the hardware notch.")
@@ -48,7 +59,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 380, height: 420)
+        .frame(width: 380, height: 560)
     }
 }
 

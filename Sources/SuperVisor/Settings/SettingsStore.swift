@@ -20,6 +20,8 @@ public final class SettingsStore: ObservableObject {
         static let debugTint = "debug.tintRed"
         static let notchWidthAdjust = "notch.widthAdjust"
         static let notchOffsetX = "notch.offsetX"
+        static let trueSpectrum = "media.trueSpectrum"
+        static let beatAura = "media.beatAura"
     }
 
     /// Hover sensitivity in the range 0...1. Higher means a larger activation rect and a
@@ -46,6 +48,19 @@ public final class SettingsStore: ObservableObject {
         didSet { defaults.set(notchOffsetX, forKey: Key.notchOffsetX) }
     }
 
+    /// MusicVisor: render the compact equalizer from the real system audio via a CoreAudio
+    /// process tap (macOS shows a recording indicator while it runs and asks for System Audio
+    /// Recording permission once). Off = the synthesized bounce, no tap, no indicator.
+    @Published public var trueSpectrumEnabled: Bool {
+        didSet { defaults.set(trueSpectrumEnabled, forKey: Key.trueSpectrum) }
+    }
+
+    /// MusicVisor: pulse a glow around the notch, tinted with the artwork color, following the
+    /// music's bass. Only active while the spectrum tap is capturing.
+    @Published public var beatAuraEnabled: Bool {
+        didSet { defaults.set(beatAuraEnabled, forKey: Key.beatAura) }
+    }
+
     /// Per-module enabled flags, keyed by `moduleID`. Absent ids default to enabled.
     @Published public private(set) var moduleEnabled: [String: Bool]
 
@@ -61,6 +76,8 @@ public final class SettingsStore: ObservableObject {
         self.debugTintEnabled = defaults.bool(forKey: Key.debugTint)
         self.notchWidthAdjust = defaults.double(forKey: Key.notchWidthAdjust)
         self.notchOffsetX = defaults.double(forKey: Key.notchOffsetX)
+        self.trueSpectrumEnabled = (defaults.object(forKey: Key.trueSpectrum) as? Bool) ?? true
+        self.beatAuraEnabled = (defaults.object(forKey: Key.beatAura) as? Bool) ?? true
 
         // Reconstruct the per-module map from any persisted keys.
         var map: [String: Bool] = [:]

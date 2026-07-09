@@ -68,12 +68,19 @@ public final class ScreenGeometryProvider: ObservableObject {
         )
     }
 
-    /// Pick the screen that has the hardware notch, falling back to the main screen.
+    /// Pick the screen that has the hardware notch, falling back to the primary display.
+    ///
+    /// The fallback is `screens.first` — AppKit documents that as the display owning the menu
+    /// bar — and NOT `NSScreen.main`, which is whichever display holds keyboard focus at the
+    /// instant it is read. Geometry is recomputed on launch, on display reconfiguration, and
+    /// on calibration changes, so keying off `main` lets the focused window at those moments
+    /// decide where the surface lives: it lands on a different display depending on what the
+    /// user happened to be looking at when a monitor was plugged in.
     static func notchScreen() -> NSScreen? {
         if let notched = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) {
             return notched
         }
-        return NSScreen.main ?? NSScreen.screens.first
+        return NSScreen.screens.first ?? NSScreen.main
     }
 
     /// Compute notch geometry for a given screen, applying a width/offset calibration.

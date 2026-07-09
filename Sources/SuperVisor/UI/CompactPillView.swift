@@ -5,8 +5,9 @@ import SwiftUI
 ///
 /// It draws NO background or offset of its own — the single morphing surface in
 /// `NotchRootView` provides those — and reports each side's measured natural width through
-/// bindings so the surface can size itself and keep the cutout on the physical notch. Each
-/// side grows independently (volume/brightness HUD on the left, now-playing on the right).
+/// bindings so the surface can size itself. Both sides RENDER at the wider side's width
+/// (content stays hugging the cutout; the slack sits at the outer edge), so the pill is
+/// always symmetric around the physical notch.
 struct CompactPillView: View {
     @EnvironmentObject private var engine: NotchEngine
 
@@ -26,6 +27,9 @@ struct CompactPillView: View {
     /// against the edge (and clear the concave top-corner flare).
     private let outerPadding: CGFloat = 17
 
+    /// Both side slots render at the wider side's measured width, keeping the pill symmetric.
+    private var sideWidth: CGFloat { max(leadingWidth, trailingWidth) }
+
     var body: some View {
         HStack(spacing: 0) {
             leadingContent
@@ -33,7 +37,7 @@ struct CompactPillView: View {
                 .padding(.trailing, hasLeading ? sidePadding : 0)
                 .fixedSize()
                 .background(WidthReader(width: $leadingWidth))
-                .frame(width: leadingWidth, alignment: .trailing)
+                .frame(width: sideWidth, alignment: .trailing)
                 .clipped()
 
             // Reserve the physical notch cutout so content flanks it; the surface behind
@@ -46,7 +50,7 @@ struct CompactPillView: View {
                 .padding(.trailing, hasTrailing ? outerPadding : 0)
                 .fixedSize()
                 .background(WidthReader(width: $trailingWidth))
-                .frame(width: trailingWidth, alignment: .leading)
+                .frame(width: sideWidth, alignment: .leading)
                 .clipped()
         }
         .frame(height: notchHeight)

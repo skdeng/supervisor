@@ -35,22 +35,34 @@ struct MediaArtworkCompactView: View {
     }
 }
 
-/// Compact TRAILING contribution: the now-playing audio-bars equalizer (right of the notch).
-/// The bars animate while playing and rest flat when paused.
+/// Compact TRAILING contribution: the now-playing equalizer (right of the notch).
+///
+/// While the system-audio tap is capturing, the bars are a real FFT spectrum of what's playing
+/// (`SpectrumBarsView`); when the tap is off, denied, or rebuilding, they fall back to the
+/// animated sine bars. Both variants share the same six-thin-bar footprint so the swap never
+/// changes the pill's layout.
 struct MediaBarsCompactView: View {
     @ObservedObject var module: MediaModule
+    @ObservedObject private var spectrum = SpectrumCenter.shared
 
     var body: some View {
         if let nowPlaying = module.nowPlaying {
-            AudioBarsView(isPlaying: nowPlaying.isPlaying, tint: module.artworkAccent)
-                .frame(width: 14, height: 18)
-                .transition(.opacity.combined(with: .scale))
+            Group {
+                if spectrum.isCapturing {
+                    SpectrumBarsView(tint: module.artworkAccent)
+                } else {
+                    AudioBarsView(isPlaying: nowPlaying.isPlaying, tint: module.artworkAccent)
+                }
+            }
+            .frame(width: SpectrumBarsView.naturalWidth, height: 18)
+            .transition(.opacity.combined(with: .scale))
         }
     }
 }
 
-/// A small three-bar equalizer that bounces while playing and rests flat when paused,
-/// echoing the iOS now-playing indicator.
+/// A small six-bar equalizer that bounces while playing and rests flat when paused,
+/// echoing the iOS now-playing indicator. This is the no-capture fallback: the bounce is
+/// synthesized, not audio-driven.
 ///
 /// The bounce is driven by a `TimelineView` rather than a `repeatForever` animation: the
 /// timeline ticks per frame while playing and is `paused` when stopped, and the paused branch
@@ -62,9 +74,9 @@ struct AudioBarsView: View {
     /// Bar color — the artwork's dominant color, or white when there's no artwork.
     var tint: Color = NotchTheme.primaryForeground
 
-    private let barCount = 3
-    private let barWidth: CGFloat = 2.5
-    private let spacing: CGFloat = 2
+    private let barCount = SpectrumBarsView.barCount
+    private let barWidth: CGFloat = SpectrumBarsView.barWidth
+    private let spacing: CGFloat = SpectrumBarsView.spacing
     /// Flat resting height (as a fraction of the full bar) when paused/stopped.
     private let restScale: CGFloat = 0.35
 
@@ -88,8 +100,8 @@ struct AudioBarsView: View {
     /// Each bar has its own period and phase offset so they bounce lively and out of lockstep.
     private func barScale(_ index: Int, time: Double) -> CGFloat {
         guard isPlaying else { return restScale }
-        let period = [0.62, 0.5, 0.72][index % 3]   // seconds per full up-down cycle
-        let phase = [0.0, 0.66, 0.33][index % 3]    // fractional offset so the bars desync
+        let period = [0.62, 0.5, 0.72, 0.56, 0.66, 0.46][index % 6]  // seconds per up-down cycle
+        let phase = [0.0, 0.66, 0.33, 0.15, 0.82, 0.48][index % 6]   // offsets so the bars desync
         let unit = (sin((time / period + phase) * 2 * .pi) + 1) / 2  // 0...1
         return restScale + (1 - restScale) * unit
     }
