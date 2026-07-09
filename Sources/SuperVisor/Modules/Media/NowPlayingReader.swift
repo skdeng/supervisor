@@ -34,7 +34,7 @@ final class NowPlayingReader: @unchecked Sendable {
 
     /// Locate `mediaremote_adapter.dylib`. Prefers the bundle's `Resources`; falls back to a
     /// `Resources` dir alongside `Contents/MacOS/<exe>`.
-    private static func resolveDylibPath() -> String? {
+    static func resolveDylibPath() -> String? {
         let name = "mediaremote_adapter"
         if let url = Bundle.main.url(forResource: name, withExtension: "dylib") {
             return url.path

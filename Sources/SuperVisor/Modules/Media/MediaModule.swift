@@ -45,8 +45,12 @@ final class MediaModule: NotchModule, ObservableObject {
     nonisolated let reader = NowPlayingReader()
 
     private var notificationObservers: [NSObjectProtocol] = []
-    /// The steady adaptive poll that keeps the UI in sync with media controlled elsewhere
-    /// (faster while playing, slower when paused/idle). See `startPolling()`.
+    /// The long-lived helper that pushes now-playing snapshots as they change. Primary source.
+    private let stream = NowPlayingStream()
+    /// Whether the stream is carrying updates. While it is, nothing else may spawn a helper on
+    /// a timer or a notification — the stream already sees those changes.
+    private var streamActive = false
+    /// The adaptive poll, used only when the stream cannot run. See `startPolling()`.
     private var pollTask: Task<Void, Never>?
     /// Guards against overlapping helper reads piling up under a burst of notifications.
     private var isReading = false
@@ -141,19 +145,20 @@ final class MediaModule: NotchModule, ObservableObject {
                 ) { [weak self] _ in
                     // Delivered on the main queue (registered with `queue: .main`), so it is
                     // safe to assert main-actor isolation and call the @MainActor refresh.
-                    MainActor.assumeIsolated { self?.refresh() }
+                    MainActor.assumeIsolated { self?.refreshFromSystemNotification() }
                 }
                 notificationObservers.append(observer)
             }
         }
 
-        // Keep the UI in sync with media controlled anywhere on the system via a steady,
-        // self-adapting poll (notifications alone are unreliable for this app). The change
-        // notifications above still trigger an immediate refresh when they do fire.
-        startPolling()
+        startStreaming()
     }
 
     func deactivate() {
+        stream.stop()
+        stream.onSnapshot = nil
+        stream.onUnavailable = nil
+        streamActive = false
         stopPolling()
         audioOutput.stop()
         spectrumSettingCancellable = nil
@@ -330,9 +335,37 @@ final class MediaModule: NotchModule, ObservableObject {
         }
     }
 
-    /// Steady poll that keeps the UI in sync with media controlled elsewhere (Spotify, a
-    /// browser, the Music app, hardware keys). MediaRemote's change notifications are not
-    /// reliably delivered to this ad-hoc-signed app, so a poll is the dependable signal. The
+    /// Keep the UI in sync with media controlled anywhere on the system (Spotify, a browser,
+    /// the Music app, hardware keys) from one long-lived helper that pushes snapshots as they
+    /// change, so no process is spawned per update.
+    private func startStreaming() {
+        stream.onSnapshot = { [weak self] snapshot in
+            guard let self else { return }
+            // A snapshot arriving from the stream settles any read that was in flight.
+            self.isReading = false
+            self.finishRead(snapshot)
+        }
+        stream.onUnavailable = { [weak self] in
+            guard let self else { return }
+            // The helper is missing or cannot stay up. Fall back to spawning it per read.
+            self.streamActive = false
+            self.startPolling()
+        }
+        streamActive = true
+        stream.start()
+    }
+
+    /// MediaRemote's change notifications are not reliably delivered to this ad-hoc-signed app,
+    /// so they are a bonus signal rather than the dependable one. They are also redundant while
+    /// the stream runs — the helper observes the same notifications in-process and re-reads on
+    /// its own timer — so acting on them here would spawn a second helper for no new
+    /// information.
+    private func refreshFromSystemNotification() {
+        guard !streamActive else { return }
+        refresh()
+    }
+
+    /// Steady poll that keeps the UI in sync when the streaming helper is unavailable. The
     /// cadence adapts: fast while a track is actively playing (the scrubber position needs to
     /// advance), slower when paused/idle (we only need to notice external changes reasonably
     /// soon). Idle reads are cheap because the helper early-exits when nothing is playing.

@@ -24,6 +24,7 @@
 #import <Foundation/Foundation.h>
 #import <dispatch/dispatch.h>
 #import <dlfcn.h>
+#import <unistd.h>
 
 typedef void (*MRGetNowPlayingInfo_t)(dispatch_queue_t, void (^)(NSDictionary *));
 typedef void (*MRRegisterForNowPlayingNotifications_t)(dispatch_queue_t);
@@ -191,5 +192,213 @@ void run_mediaremote_adapter(void) {
 
         fputs([bestJSON UTF8String], stdout);
         fflush(stdout);
+    }
+}
+
+// MARK: - Streaming mode
+//
+// `run_mediaremote_adapter` above pays a process spawn (perl + dyld + this dylib) for every
+// read. Streaming pays it once: one long-lived helper prints one JSON object per line, and the
+// caller reads lines as they arrive.
+//
+// The helper learns about changes two ways, because neither alone is dependable. It registers
+// for MediaRemote's change notifications, which fire promptly when they fire at all — but they
+// are silent for some players, so a cheap in-process re-read also runs on a timer. That timer
+// costs an XPC round trip, not a process spawn, and it emits nothing unless the state moved.
+
+/// Reads the now-playing dict, retrying briefly so the lazily-loaded artwork bytes have a
+/// chance to arrive, then hands the richest JSON payload it saw to `completion` exactly once.
+static void MRACaptureBest(MRGetNowPlayingInfo_t getInfo, void (^completion)(NSString *)) {
+    dispatch_queue_t queue = dispatch_get_main_queue();
+    __block NSString *best = @"{}";
+    __block BOOL haveArtwork = NO, haveTitle = NO, finished = NO;
+    __block int completedReads = 0;
+    const int kMaxPolls = 8;
+    const NSTimeInterval kPollInterval = 0.06;
+    const NSTimeInterval kDeadline = 0.6;
+
+    void (^finish)(void) = ^{
+        if (finished) return;
+        finished = YES;
+        completion(best);
+    };
+
+    for (int i = 0; i < kMaxPolls; i++) {
+        dispatch_after(
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * kPollInterval * NSEC_PER_SEC)), queue, ^{
+                if (finished) return;
+                getInfo(queue, ^(NSDictionary *info) {
+                    if (finished) return;
+                    completedReads++;
+                    NSString *json = MRABuildJSON(info);
+                    BOOL gotArtwork = (info[@"kMRMediaRemoteNowPlayingInfoArtworkData"] != nil);
+                    BOOL gotTitle = (MRAStringForKey(info, @"kMRMediaRemoteNowPlayingInfoTitle") != nil);
+
+                    if (gotArtwork || (gotTitle && !haveArtwork) || (!haveTitle && !haveArtwork)) {
+                        best = json;
+                    }
+                    if (gotTitle) haveTitle = YES;
+                    if (gotArtwork) {
+                        haveArtwork = YES;
+                        finish();
+                    } else if (!haveTitle && completedReads >= 2) {
+                        finish();   // nothing is playing; don't spin to the deadline
+                    }
+                });
+            });
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kDeadline * NSEC_PER_SEC)), queue, finish);
+}
+
+// State of the last payload written to stdout, used to decide whether a fresh read is worth
+// emitting at all.
+static NSString *gLastIdentity = nil;   // title/artist/album/artworkID/duration/rate, joined
+static double gLastElapsed = 0;
+static double gLastTimestamp = 0;
+static double gLastRate = 0;
+static BOOL gHaveLast = NO;
+static BOOL gEmitting = NO;
+static BOOL gEmitPending = NO;
+
+/// The fields whose change means "different track, or different playback state".
+static NSString *MRAIdentity(NSDictionary *payload) {
+    return [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@",
+            payload[@"title"] ?: @"", payload[@"artist"] ?: @"", payload[@"album"] ?: @"",
+            payload[@"artworkIdentifier"] ?: @"", payload[@"duration"] ?: @"",
+            payload[@"rate"] ?: @""];
+}
+
+/// True when this payload says something the last one didn't.
+///
+/// `elapsed` and `timestampEpoch` move on their own every time the daemon re-samples, so they
+/// cannot be diffed directly — doing so would emit on every timer tick. The position is only
+/// news when it disagrees with where the last sample said playback would be by now, which is
+/// exactly what a seek looks like.
+static BOOL MRAIsNewsworthy(NSDictionary *payload) {
+    if (!gHaveLast) return YES;
+    if (![MRAIdentity(payload) isEqualToString:gLastIdentity]) return YES;
+
+    NSNumber *elapsed = payload[@"elapsed"];
+    NSNumber *timestamp = payload[@"timestampEpoch"];
+    if (elapsed == nil || timestamp == nil) return NO;
+
+    double predicted = gLastElapsed + ([timestamp doubleValue] - gLastTimestamp) * gLastRate;
+    return fabs([elapsed doubleValue] - predicted) > 1.5;   // a seek, not drift
+}
+
+static void MRARemember(NSDictionary *payload) {
+    gLastIdentity = MRAIdentity(payload);
+    gLastElapsed = [payload[@"elapsed"] doubleValue];
+    gLastTimestamp = [payload[@"timestampEpoch"] doubleValue];
+    gLastRate = [payload[@"rate"] doubleValue];
+    gHaveLast = YES;
+}
+
+/// Capture a snapshot and write it as one line, but only if it carries news. Overlapping calls
+/// (a notification landing mid-capture) collapse into one trailing re-capture.
+static void MRAEmitIfChanged(MRGetNowPlayingInfo_t getInfo) {
+    if (gEmitting) { gEmitPending = YES; return; }
+    gEmitting = YES;
+
+    MRACaptureBest(getInfo, ^(NSString *json) {
+        gEmitting = NO;
+
+        NSData *data = [json dataUsingEncoding:NSUTF8StringEncoding];
+        NSDictionary *payload = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+        if ([payload isKindOfClass:[NSDictionary class]] && MRAIsNewsworthy(payload)) {
+            MRARemember(payload);
+            // Writing to a pipe whose reader is gone raises SIGPIPE, which terminates this
+            // helper — the correct outcome when the app has exited.
+            fputs([json UTF8String], stdout);
+            fputc('\n', stdout);
+            fflush(stdout);
+        }
+
+        if (gEmitPending) {
+            gEmitPending = NO;
+            MRAEmitIfChanged(getInfo);
+        }
+    });
+}
+
+/// Exit when the parent closes our stdin, so the helper can never outlive the app that spawned
+/// it. SIGPIPE covers the case where we are mid-write; this covers a helper that is idle and
+/// would otherwise linger forever without writing.
+static void MRAExitWhenParentGoes(void) {
+    static dispatch_source_t source;   // must outlive this function
+    source = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, STDIN_FILENO, 0,
+                                    dispatch_get_main_queue());
+    dispatch_source_set_event_handler(source, ^{
+        char scratch[256];
+        if (read(STDIN_FILENO, scratch, sizeof(scratch)) <= 0) exit(0);   // EOF
+    });
+    dispatch_resume(source);
+}
+
+/// Entry point invoked by perl via DynaLoader for `stream` mode. Never returns.
+__attribute__((visibility("default")))
+void run_mediaremote_adapter_stream(void) {
+    @autoreleasepool {
+        void *handle = dlopen(
+            "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_NOW);
+        if (handle == NULL) return;
+
+        MRGetNowPlayingInfo_t getInfo =
+            (MRGetNowPlayingInfo_t)dlsym(handle, "MRMediaRemoteGetNowPlayingInfo");
+        MRRegisterForNowPlayingNotifications_t reg =
+            (MRRegisterForNowPlayingNotifications_t)dlsym(
+                handle, "MRMediaRemoteRegisterForNowPlayingNotifications");
+        if (getInfo == NULL) return;
+
+        MRAExitWhenParentGoes();
+
+        // Registering both makes the daemon push state to this process (so artwork is warm) and
+        // enables the change notifications observed below.
+        if (reg != NULL) reg(dispatch_get_main_queue());
+
+        // The notification names are exported as CFStringRef constants, so the symbol's address
+        // is the address *of the variable*; dereference it to get the string.
+        const char *notificationSymbols[] = {
+            "kMRMediaRemoteNowPlayingInfoDidChangeNotification",
+            "kMRMediaRemoteNowPlayingApplicationIsPlayingDidChangeNotification",
+            "kMRMediaRemoteNowPlayingApplicationClientStateDidChange",
+            "kMRMediaRemoteNowPlayingApplicationDidChangeNotification",
+        };
+        for (int i = 0; i < 4; i++) {
+            void *symbol = dlsym(handle, notificationSymbols[i]);
+            if (symbol == NULL) continue;
+            NSString *name = (__bridge NSString *)*(CFStringRef *)symbol;
+            [[NSNotificationCenter defaultCenter] addObserverForName:name
+                                                              object:nil
+                                                               queue:[NSOperationQueue mainQueue]
+                                                          usingBlock:^(NSNotification *note) {
+                MRAEmitIfChanged(getInfo);
+            }];
+        }
+
+        // Publish the current state at once. The caller has nothing to show until the first
+        // line arrives, so it must not wait for a timer tick.
+        MRAEmitIfChanged(getInfo);
+
+        // Re-read on a timer as well: the notifications above stay silent for some players, and
+        // a seek performed elsewhere never announces itself. Faster while playing, because that
+        // is the only time the position can drift out from under the caller. Emitting is still
+        // gated on the state having actually moved, so a quiet system writes nothing.
+        dispatch_source_t timer = dispatch_source_create(
+            DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+        dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                                  (uint64_t)(2.0 * NSEC_PER_SEC), (uint64_t)(0.5 * NSEC_PER_SEC));
+        dispatch_source_set_event_handler(timer, ^{
+            static int tick = 0;
+            tick++;
+            // Paused: re-read every other tick (4s). Slower than this and a play pressed in
+            // another app would take that long to reach the notch whenever the change
+            // notifications stay silent, which they do for some players.
+            BOOL playing = (gLastRate != 0);
+            if (playing || (tick % 2) == 0) MRAEmitIfChanged(getInfo);
+        });
+        dispatch_resume(timer);
+
+        CFRunLoopRun();
     }
 }

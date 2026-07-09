@@ -87,11 +87,21 @@ Since macOS 15.4, `mediaremoted` gates the now-playing **info read**
 info dict. Workaround:
 
 - `make-app.sh` compiles **`Sources/MediaRemoteAdapter/mediaremote_adapter.m`** into
-  `mediaremote_adapter.dylib`, shipped in the bundle's `Resources/`.
-- `Modules/Media/NowPlayingReader.swift` spawns **`/usr/bin/perl`** (Apple-signed,
-  `com.apple.perl`, which the gate admits), has it `DynaLoader`-load the dylib and call
-  `run_mediaremote_adapter`, which runs the MediaRemote C call inside the entitled host and prints
-  JSON (artwork as base64) to stdout.
+  `mediaremote_adapter.dylib`, shipped in the bundle's `Resources/`. It exports two entry points.
+- **Streaming (the live path).** `Modules/Media/NowPlayingStream.swift` spawns **`/usr/bin/perl`**
+  (Apple-signed, `com.apple.perl`, which the gate admits) **once**, has it `DynaLoader`-load the
+  dylib and enter `run_mediaremote_adapter_stream`, which never returns: it prints one JSON object
+  per line (artwork as base64) as the now-playing state changes. Inside that entitled host it both
+  observes MediaRemote's change notifications and re-reads on a timer (2 s playing / 4 s paused),
+  because the notifications are silent for some players. It emits only when the state actually
+  moved — `elapsed`/`timestampEpoch` advance on every daemon re-sample, so they are compared
+  against where the previous sample predicted playback would be, which detects a seek and ignores
+  drift. It exits on stdin EOF, so it can never outlive the app. The Swift side respawns it with a
+  widening backoff and, after 4 failures in 60 s, falls back permanently to the one-shot reader.
+- **One-shot.** `Modules/Media/NowPlayingReader.swift` spawns the same helper per read and calls
+  `run_mediaremote_adapter`, which prints a single JSON object and exits. Used for user-initiated
+  refreshes (right after a transport command) and as the fallback poll. Each call costs a process
+  spawn (~10 ms CPU), which is why it is not the steady-state path.
 - **Transport commands** (play/pause/skip) are *not* gated and go direct via
   `Modules/Media/MediaRemoteBridge.swift` (the `dlopen`/`dlsym` bridge). The block-typed callbacks
   there are `@convention(block)`, not `@convention(c)`.
@@ -131,8 +141,9 @@ names below are the code paths.
   (`UI/BeatAuraView`, layered behind the morphing surface in `NotchRootView`) glows around the
   notch in the artwork color, following the music's bass envelope. Both are toggleable in
   Settings (`media.trueSpectrum`, `media.beatAura`). Expanded: large artwork, title/artist, a live
-  scrubber, transport, and an **audio-output device switcher**. Info via the perl adapter (with an
-  adaptive poll — faster while playing); commands via `MediaRemoteBridge`.
+  scrubber, transport, and an **audio-output device switcher**. Info streams from one long-lived
+  perl adapter (`NowPlayingStream`), which pushes a snapshot only when the state changes; commands
+  via `MediaRemoteBridge`.
 - **Calendar** (`Modules/Calendar`) — next-meeting countdown chip in compact; an agenda with a
   one-tap **Join** button (Zoom / Meet / Teams / Webex link detection) in expanded. EventKit via
   `CalendarService`. **Meeting Mode:** while a meeting with a join link is in progress, the pill
