@@ -11,6 +11,10 @@ import SwiftUI
 struct BeatAuraView: View {
     /// The morphing surface's current bottom-corner radius, so the glow hugs the same silhouette.
     var cornerRadius: CGFloat
+    /// How far the surface has lifted off the screen's top edge, so the glow lifts with it.
+    var pillness: CGFloat
+    /// The surface's drop distance at full pillness.
+    var topDrop: CGFloat
     /// The artwork's dominant color.
     var accent: Color
 
@@ -20,7 +24,7 @@ struct BeatAuraView: View {
             // Below the visibility threshold, skip the blurred shape entirely — a per-frame
             // GPU blur is real work, and on quiet passages the glow would be invisible anyway.
             if aura > 0.02 {
-                NotchShape(cornerRadius: cornerRadius)
+                NotchShape(cornerRadius: cornerRadius, pillness: pillness, topDrop: topDrop)
                     .fill(accent)
                     .blur(radius: 10 + 16 * aura)
                     // Quadratic ramp: near-invisible on quiet passages, a real flare on hits.

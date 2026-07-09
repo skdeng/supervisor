@@ -357,6 +357,16 @@ public final class NotchEngine: ObservableObject {
         hover.activationRect = activationRect(for: state, hovered: isHovered, geometry: geo)
     }
 
+    /// How much a hovered surface has swelled, for sizing the regions that must contain it.
+    ///
+    /// Only the detached pill is accounted for. The hardware notch's 6% nudge already sits well
+    /// inside the aiming margins below, and inflating those by it would widen the zone enough to
+    /// arm the notch from a brush past neighbouring menu-bar items.
+    private func hoverGrowth(hovered: Bool, state: NotchState, geometry geo: NotchGeometry) -> CGFloat {
+        guard hovered, state != .expanded, !geo.isHardwareNotch else { return 1 }
+        return NotchTheme.pillHoverScale
+    }
+
     /// The clickable / droppable region in the window content's bounds coordinates (bottom-left
     /// origin), pinned to the top: the notch pill when collapsed, the sheet when expanded.
     /// Everything outside passes events through.
@@ -368,6 +378,12 @@ public final class NotchEngine: ObservableObject {
         let notchH = max(geo.notchHeight, 32)
         let centerX = w / 2  // canvas is centered on the notch
 
+        // Off a notched screen the surface detaches on hover and while the sheet is open. The
+        // hit-test region drops with it, so the strip of menu bar it vacates goes back to being
+        // the menu bar rather than a dead zone that swallows clicks.
+        let drop = (isHovered || state == .expanded) ? geo.pillTopDrop : 0
+        let growth = hoverGrowth(hovered: isHovered, state: state, geometry: geo)
+
         let width: CGFloat
         let height: CGFloat
         switch state {
@@ -375,23 +391,27 @@ public final class NotchEngine: ObservableObject {
             width = expandedPanelWidth + 24
             height = notchH + expandedSheetHeight + 12
         case .compact:
-            width = geo.notchWidth + 180
-            height = notchH + 16
+            width = geo.notchWidth * growth + 180
+            height = notchH * growth + 16
         case .idle:
-            width = geo.notchWidth + 28
-            height = notchH + 14
+            width = geo.notchWidth * growth + 28
+            height = notchH * growth + 14
         }
-        return CGRect(x: centerX - width / 2, y: h - height, width: width, height: height)
+        return CGRect(x: centerX - width / 2, y: h - drop - height, width: width, height: height)
     }
 
     /// The constant window frame (global, bottom-left origin): top-aligned, centered on the
     /// notch, tall enough for the dropped panel and wide enough for the widest state.
     private func canvasFrame(for geo: NotchGeometry) -> CGRect {
         let top = geo.screenTop
-        let width = max(geo.notchWidth + 2 * compactSideReserve, expandedPanelWidth + 40)
+        // A hovered pill swells, so the canvas has to be wide enough to hold the widest compact
+        // content at full growth; the surface is only ever clipped by the window, never resized.
+        let pillGrowth = geo.isHardwareNotch ? 1 : NotchTheme.pillHoverScale
+        let width = max((geo.notchWidth + 2 * compactSideReserve) * pillGrowth, expandedPanelWidth + 40)
         // Budget the canvas for the tallest possible sheet so the fixed-size window never has
         // to resize as the sheet grows/shrinks to fit its content — only the surface morphs.
-        let height = max(geo.notchHeight, 32) + maxExpandedSheetHeight
+        // The drop is budgeted too, since a detached pill pushes the sheet that far further down.
+        let height = max(geo.notchHeight, 32) + maxExpandedSheetHeight + geo.pillTopDrop
         return CGRect(
             x: geo.centerX - width / 2,
             y: top - height,
@@ -418,15 +438,21 @@ public final class NotchEngine: ObservableObject {
         case .idle, .compact:
             // Just the notch plus a small aiming margin on each side. A larger margin once
             // hovered gives tolerance so the slightly-grown notch doesn't flicker the hover.
+            //
+            // Off a notched screen the surface detaches on hover and drops away from the cursor
+            // that summoned it. The zone has to reach down over where the pill lands — and still
+            // start at the screen's top edge, where the surface rests — or the hover would end
+            // the instant it began and the pill would chatter in and out.
             let pad: CGFloat = hovered ? 40 : 24
-            let width = geo.notchWidth + 2 * pad
-            let minY = top - notchH - (hovered ? 22 : 12)
+            let growth = hoverGrowth(hovered: hovered, state: state, geometry: geo)
+            let width = geo.notchWidth * growth + 2 * pad
+            let minY = top - (hovered ? geo.pillTopDrop : 0) - notchH * growth - (hovered ? 22 : 12)
             return CGRect(x: geo.centerX - width / 2, y: minY, width: width, height: maxY - minY)
         case .expanded:
             // Exactly the open panel bounds plus a small margin.
             let pad: CGFloat = 12
             let width = expandedPanelWidth + 2 * pad
-            let minY = top - notchH - expandedSheetHeight - pad
+            let minY = top - notchH - expandedSheetHeight - pad - geo.pillTopDrop
             return CGRect(x: geo.centerX - width / 2, y: minY, width: width, height: maxY - minY)
         }
     }

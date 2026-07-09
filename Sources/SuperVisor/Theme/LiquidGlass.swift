@@ -16,6 +16,17 @@ public enum NotchTheme {
     /// Corner radius used for inner module surfaces inside the expanded panel.
     public static let surfaceCornerRadius: CGFloat = 16
 
+    // MARK: Hover growth
+
+    /// How much the surface swells while hovered, before a click opens the sheet.
+    ///
+    /// A hardware notch only nudges: it is welded to the physical cutout, and growing it far
+    /// would peel the black surface off the bezel it is pretending to be. A pill that has
+    /// already detached has no such obligation, so it can swell into a real target. The engine
+    /// sizes its hit-test and hover rects from the same numbers.
+    public static let notchHoverScale: CGFloat = 1.06
+    public static let pillHoverScale: CGFloat = 1.2
+
     // MARK: Spacing
 
     /// Horizontal inset between the notch cutout and compact content.

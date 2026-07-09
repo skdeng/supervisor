@@ -14,6 +14,11 @@ public struct NotchGeometry: Equatable, Sendable {
     public var notchRect: CGRect
     /// Whether the notch is real hardware (true) or synthesized (false).
     public var isHardwareNotch: Bool
+    /// How far below the screen's top edge the surface sits once it has morphed into a floating
+    /// pill: a quarter of the notch's height, enough to read as detached without wandering away
+    /// from the screen edge it came from. Zero on a screen with a physical cutout, which never
+    /// detaches — the surface *is* the hardware there.
+    public var pillTopDrop: CGFloat = 0
 
     public var notchWidth: CGFloat { notchRect.width }
     public var notchHeight: CGFloat { notchRect.height }
@@ -135,6 +140,11 @@ public final class ScreenGeometryProvider: ObservableObject {
             height: rawRect.height
         )
 
-        return NotchGeometry(screenFrame: frame, notchRect: notchRect, isHardwareNotch: isHardware)
+        return NotchGeometry(
+            screenFrame: frame,
+            notchRect: notchRect,
+            isHardwareNotch: isHardware,
+            pillTopDrop: isHardware ? 0 : notchRect.height / 4
+        )
     }
 }

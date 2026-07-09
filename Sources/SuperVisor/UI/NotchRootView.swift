@@ -30,6 +30,21 @@ struct NotchRootView: View {
     private var notchH: CGFloat { max(geo.notchHeight, 32) }
     private var isExpanded: Bool { engine.state == .expanded }
 
+    /// How far the surface has lifted off the screen's top edge: 0 while it is the notch, 1 once
+    /// it has become a free-floating pill. A screen with a physical cutout never lifts — the
+    /// surface *is* the hardware there, so it stays welded to the bezel.
+    ///
+    /// Off a notched screen there is nothing to be welded to, so pointing at it detaches it: the
+    /// concave menu-bar flares unwind into round corners and it drops clear of the menu bar. The
+    /// open sheet keeps that silhouette, so the pill simply grows rather than snapping back up.
+    private var pillness: CGFloat {
+        guard !geo.isHardwareNotch else { return 0 }
+        return (engine.isHovered || isExpanded) ? 1 : 0
+    }
+
+    /// Distance the surface has actually dropped right now.
+    private var topDrop: CGFloat { geo.pillTopDrop * pillness }
+
     private var panelW: CGFloat { engine.expandedPanelWidth }
     /// Measured sheet content height — the surface grows to exactly fit the panel (no scroll).
     private var panelH: CGFloat { engine.expandedSheetHeight }
@@ -40,15 +55,28 @@ struct NotchRootView: View {
     private var sideWidth: CGFloat { max(leadingWidth, trailingWidth) }
     /// Collapsed width: the notch plus the (equal) flanking sides.
     private var compactWidth: CGFloat { notchW + 2 * sideWidth }
-    /// The morphing surface's animated size. Pill and sheet are both centered on the notch.
+    /// The morphing surface's animated size. Pill and sheet are both centered on the notch. The
+    /// frame grows by the drop so the body keeps its height as the shape lifts inside it.
     private var shapeWidth: CGFloat { isExpanded ? panelW : compactWidth }
-    private var shapeHeight: CGFloat { isExpanded ? notchH + panelH : notchH }
+    private var shapeHeight: CGFloat { (isExpanded ? notchH + panelH : notchH) + topDrop }
     /// Tight like a pill when collapsed, rounder as the sheet opens.
     private var radius: CGFloat { isExpanded ? NotchTheme.panelCornerRadius : NotchTheme.pillCornerRadius }
 
-    /// Subtle grow affordance while hovering (before a click opens the sheet). Anchored at the
-    /// top edge so it grows down and outward, never above the screen's top.
-    private var hoverScale: CGFloat { (engine.isHovered && !isExpanded) ? 1.06 : 1.0 }
+    /// Grow affordance while hovering, before a click opens the sheet.
+    private var hoverScale: CGFloat {
+        guard engine.isHovered, !isExpanded else { return 1 }
+        return geo.isHardwareNotch ? NotchTheme.notchHoverScale : NotchTheme.pillHoverScale
+    }
+
+    /// Grow from the surface's own top edge, never the screen's.
+    ///
+    /// A hardware notch starts at the screen's top edge, so the two coincide. A detached pill
+    /// starts `topDrop` below it, and scaling about the screen edge would multiply that gap —
+    /// the pill would slide further down the more it grew, instead of swelling in place.
+    private var scaleAnchor: UnitPoint {
+        guard shapeHeight > 0, topDrop > 0 else { return .top }
+        return UnitPoint(x: 0.5, y: topDrop / shapeHeight)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -58,10 +86,15 @@ struct NotchRootView: View {
                 // silhouette; mirrors the surface's size, hover scale, and centering offset so
                 // it always hugs the same shape. Exists only while the audio tap captures.
                 if settings.beatAuraEnabled && spectrum.isCapturing {
-                    BeatAuraView(cornerRadius: radius, accent: spectrum.accent)
-                        .frame(width: shapeWidth, height: shapeHeight)
-                        .scaleEffect(hoverScale, anchor: .top)
-                        .allowsHitTesting(false)
+                    BeatAuraView(
+                        cornerRadius: radius,
+                        pillness: pillness,
+                        topDrop: geo.pillTopDrop,
+                        accent: spectrum.accent
+                    )
+                    .frame(width: shapeWidth, height: shapeHeight)
+                    .scaleEffect(hoverScale, anchor: scaleAnchor)
+                    .allowsHitTesting(false)
                 }
 
                 // ONE surface: the notch itself grows and becomes the sheet — not a separate
@@ -74,10 +107,14 @@ struct NotchRootView: View {
                 // Camera cap: solid black over the physical notch so the hardware cutout blends.
                 // Pinned to the notch center (never offset). Purely visual — it must not swallow
                 // clicks, so taps on the notch area reach the surface's tap gesture below.
-                NotchShape(cornerRadius: NotchTheme.pillCornerRadius)
-                    .fill(surfaceColor)
-                    .frame(width: notchW, height: notchH)
-                    .allowsHitTesting(false)
+                // A screen with no cutout has nothing to blend into, and a cap welded to the top
+                // edge would be left stranded there the moment the surface detaches.
+                if geo.isHardwareNotch {
+                    NotchShape(cornerRadius: NotchTheme.pillCornerRadius)
+                        .fill(surfaceColor)
+                        .frame(width: notchW, height: notchH)
+                        .allowsHitTesting(false)
+                }
             }
             // Springy when opening; critically damped (no overshoot) when closing, so the
             // notch never bounces smaller than the physical notch on the way back.
@@ -105,10 +142,12 @@ struct NotchRootView: View {
         ZStack(alignment: .top) {
             // One deep-black surface in every state: the notch and the sheet it grows into are
             // the same solid black, so the open reads as the notch simply expanding.
-            NotchShape(cornerRadius: radius)
+            NotchShape(cornerRadius: radius, pillness: pillness, topDrop: geo.pillTopDrop)
                 .fill(surfaceColor)
 
-            // Compact content flanks the notch while collapsed; fades out as it expands.
+            // Compact content flanks the notch while collapsed; fades out as it expands. It
+            // rides down with the surface so it stays centered in the body, never stranded in
+            // the gap the pill opens above itself.
             CompactPillView(
                 notchWidth: notchW,
                 notchHeight: notchH,
@@ -116,6 +155,7 @@ struct NotchRootView: View {
                 trailingWidth: $trailingWidth
             )
             .frame(height: notchH)
+            .offset(y: topDrop)
             .opacity(isExpanded ? 0 : 1)
 
             // The sheet's content grows + fades with the surface (it inherits the body spring,
@@ -128,7 +168,7 @@ struct NotchRootView: View {
             // a correct open animation.
             if isExpanded || engine.isHovered {
                 ExpandedPanelView(width: panelW)
-                    .padding(.top, notchH)
+                    .padding(.top, notchH + topDrop)
                     .scaleEffect(isExpanded ? 1 : 0.88, anchor: .top)
                     .opacity(isExpanded ? 1 : 0)
                     .allowsHitTesting(isExpanded)
@@ -136,58 +176,93 @@ struct NotchRootView: View {
             }
         }
         .frame(width: shapeWidth, height: shapeHeight, alignment: .top)
-        .clipShape(NotchShape(cornerRadius: radius))
-        .contentShape(NotchShape(cornerRadius: radius))
-        .scaleEffect(hoverScale, anchor: .top)
-        .shadow(color: .black.opacity(isExpanded ? 0.45 : 0), radius: 22, y: 12)
+        .clipShape(NotchShape(cornerRadius: radius, pillness: pillness, topDrop: geo.pillTopDrop))
+        .contentShape(NotchShape(cornerRadius: radius, pillness: pillness, topDrop: geo.pillTopDrop))
+        .scaleEffect(hoverScale, anchor: scaleAnchor)
+        // A detached pill casts a shadow so it reads as hovering over the desktop rather than
+        // painted onto it. A surface welded to the top edge casts none: there is nothing behind
+        // it to fall on but the bezel.
+        .shadow(color: .black.opacity(isExpanded ? 0.45 : 0.3 * pillness), radius: 22, y: 12)
         // Click the notch to open/close the sheet (hover only previews the grow).
         .onTapGesture { if !isExpanded { engine.toggleSheet() } }
     }
 
 }
 
-/// The classic MacBook notch silhouette: the top edge spans the full width and flares into
-/// the body through small CONCAVE fillets at the top corners (so it blends naturally into the
-/// menu bar), while the bottom corners are CONVEX rounded.
+/// The morphing silhouette, from the MacBook notch to a free-floating pill.
+///
+/// At `pillness == 0` it is the classic notch: the top edge spans the full width and flares into
+/// the body through small CONCAVE fillets at the top corners, so it blends into the menu bar,
+/// while the bottom corners are CONVEX rounded.
+///
+/// At `pillness == 1` it is a pill: the shape drops `topDrop` clear of the screen's top edge and
+/// the flares have curled inward into CONVEX rounded corners.
+///
+/// Each top corner is a single quadratic curve throughout, never two. Both the concave flare and
+/// the convex corner share the same control point — the corner itself — and differ only in where
+/// they begin and end. So the morph is one curve whose endpoints slide from outside the corner
+/// (`-flare`, an outward flute) through flat and on to inside it (`+radius`, a rounded corner).
+/// Growing a second curve alongside a shrinking first would read as a bump beside a dip.
 struct NotchShape: Shape {
     /// Bottom corner radius (convex). Animatable so it can round out as the sheet opens.
     var cornerRadius: CGFloat
-    /// Top corner radius (concave flare where the notch meets the screen's top edge).
+    /// Size of the concave flare where the notch meets the screen's top edge, at `pillness == 0`.
     var topRadius: CGFloat = 10
+    /// 0 = notch flush with the screen's top edge, 1 = pill floating below it.
+    var pillness: CGFloat = 0
+    /// How far the shape's top edge sits below the rect's top edge at `pillness == 1`.
+    var topDrop: CGFloat = 0
 
-    var animatableData: CGFloat {
-        get { cornerRadius }
-        set { cornerRadius = newValue }
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(cornerRadius, pillness) }
+        set {
+            cornerRadius = newValue.first
+            pillness = newValue.second
+        }
     }
 
     func path(in rect: CGRect) -> Path {
+        let pill = min(max(pillness, 0), 1)
         let top = max(0, min(topRadius, rect.width / 2, rect.height))
-        let bottom = max(0, min(cornerRadius, (rect.width - 2 * top) / 2, rect.height - top))
 
+        // The body's sides never move; only the flare above them retracts. That keeps the pill
+        // concentric with the notch it grew out of.
+        let left = rect.minX + top
+        let right = rect.maxX - top
+        let topY = rect.minY + topDrop * pill
+        guard right > left, rect.maxY > topY else { return Path() }
+
+        // How far the corner curve reaches OUTSIDE the body (the flare) and INSIDE it (the
+        // rounding). They trade places across the morph, so their sum is how far down the side
+        // the curve lands, and their difference is where along the top edge it starts.
+        let flare = top * (1 - pill)
+        let rounding = max(0, min(cornerRadius * pill, (right - left) / 2, (rect.maxY - topY) / 2))
+        let cornerY = topY + flare + rounding
+        let bottom = max(0, min(cornerRadius, (right - left) / 2, rect.maxY - cornerY))
+
+        // Traversed top-left → down the left side → across the bottom → up the right side, and
+        // closed by the implicit top edge. At `pillness == 0` this emits exactly the element
+        // sequence the plain notch always had.
         var path = Path()
-        // Outer top-left, then a concave fillet down into the (slightly inset) body.
-        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
-        path.addQuadCurve(
-            to: CGPoint(x: rect.minX + top, y: rect.minY + top),
-            control: CGPoint(x: rect.minX + top, y: rect.minY)
+        path.move(to: CGPoint(x: left - flare + rounding, y: topY))
+        path.addQuadCurve(                                      // top-left: flute → rounded corner
+            to: CGPoint(x: left, y: cornerY),
+            control: CGPoint(x: left, y: topY)
         )
-        // Left side down to the convex bottom-left corner.
-        path.addLine(to: CGPoint(x: rect.minX + top, y: rect.maxY - bottom))
+        path.addLine(to: CGPoint(x: left, y: rect.maxY - bottom))
         path.addQuadCurve(
-            to: CGPoint(x: rect.minX + top + bottom, y: rect.maxY),
-            control: CGPoint(x: rect.minX + top, y: rect.maxY)
+            to: CGPoint(x: left + bottom, y: rect.maxY),
+            control: CGPoint(x: left, y: rect.maxY)
         )
-        // Bottom edge to the convex bottom-right corner.
-        path.addLine(to: CGPoint(x: rect.maxX - top - bottom, y: rect.maxY))
+        path.addLine(to: CGPoint(x: right - bottom, y: rect.maxY))
         path.addQuadCurve(
-            to: CGPoint(x: rect.maxX - top, y: rect.maxY - bottom),
-            control: CGPoint(x: rect.maxX - top, y: rect.maxY)
+            to: CGPoint(x: right, y: rect.maxY - bottom),
+            control: CGPoint(x: right, y: rect.maxY)
         )
-        // Right side up to the concave top-right fillet, then the top edge closes it.
-        path.addLine(to: CGPoint(x: rect.maxX - top, y: rect.minY + top))
-        path.addQuadCurve(
-            to: CGPoint(x: rect.maxX, y: rect.minY),
-            control: CGPoint(x: rect.maxX - top, y: rect.minY)
+        path.addLine(to: CGPoint(x: right, y: cornerY))
+        path.addQuadCurve(                                      // top-right: flute → rounded corner
+            to: CGPoint(x: right + flare - rounding, y: topY),
+            control: CGPoint(x: right, y: topY)
         )
         path.closeSubpath()
         return path

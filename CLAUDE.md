@@ -72,6 +72,41 @@ height) and the gap between `auxiliaryTopLeftArea` / `auxiliaryTopRightArea` (th
 On non-notch Macs it synthesizes a 200×32 region centered at the top. All rects are global AppKit
 coordinates (bottom-left origin). Recomputed on `didChangeScreenParametersNotification`.
 
+`notchScreen()` renders on the screen whose `safeAreaInsets.top > 0`, else on the **primary**
+display (`NSScreen.screens.first`, which AppKit documents as the one owning the menu bar).
+Never `NSScreen.main` — that is whichever display holds keyboard focus when it is read, so the
+focused window at launch or at display reconfiguration would decide where the surface lives.
+
+## The pill (screens with no physical cutout)
+
+Only one screen ever hosts the surface, so this applies exactly when **no attached screen has a
+notch** — a Mac mini/Studio, an older MacBook, or a notched MacBook in clamshell. An external
+monitor beside a notched built-in display does *not* reach it.
+
+At rest the surface is the notch silhouette, flush with the screen's top edge. **Hovering detaches
+it into a floating pill**: it drops `pillTopDrop` (a quarter of the notch height), swells by
+`NotchTheme.pillHoverScale`, and its concave menu-bar flares curl inward into convex corners. The
+open sheet keeps that silhouette, so the pill grows rather than snapping back to the edge.
+
+- **`NotchShape`** morphs on one continuous `pillness` (0…1), animated through
+  `AnimatablePair(cornerRadius, pillness)`. Each top corner is a **single** quadratic curve, not
+  two: the concave flute and the convex corner share the same control point (the corner) and
+  differ only in their endpoints, which slide from `-flare` outside the body to `+rounding` inside
+  it. Growing a second curve beside a shrinking first reads as a bump next to a dip. At
+  `pillness == 0` the path emits an element sequence byte-identical to the plain notch — verify
+  any change to it by rasterizing both and diffing coverage.
+- **`pillTopDrop` is 0 on a hardware notch**, which is what makes nearly every downstream branch a
+  no-op there rather than an `if`. The explicit `isHardwareNotch` tests are few: the camera cap
+  (drawn only over a real cutout — a cap welded to the top edge would strand there once the
+  surface detaches), the hover scale, and `NotchEngine.hoverGrowth`.
+- The surface **grows from its own top edge**, not the screen's (`scaleAnchor`); scaling about the
+  screen edge would multiply the drop and slide the pill further down the more it grew.
+- `NotchEngine` sizes the canvas, the hit-test rect, and the hover activation rect from the same
+  drop and growth. The hover zone must start at the screen's top edge (where the surface rests) and
+  reach down over where the pill lands, or the pill drops out from under the cursor that summoned
+  it and chatters. The hit-test rect drops with the pill, so the menu-bar strip it vacates goes
+  back to being the menu bar instead of a dead zone.
+
 ## Private-Framework Access
 
 Private system frameworks (MediaRemote, DisplayServices, etc.) are reached with `dlopen` +
