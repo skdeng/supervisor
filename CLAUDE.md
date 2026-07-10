@@ -238,8 +238,22 @@ at runtime.
 ## Theme & Settings
 
 - **`Theme/LiquidGlass.swift`** (`NotchTheme`) — design tokens + Liquid Glass material wrappers.
-  The notch pill is opaque black (blends with the hardware cutout); the expanded panel and floating
-  surfaces use the native macOS 26 Liquid Glass material, degrading to `.ultraThinMaterial`.
+  `LiquidGlassSurface` clips to a rounded rectangle; `LiquidGlassShape` pours the material into an
+  arbitrary `Shape` (the morphing `NotchShape` is neither a rectangle nor fixed). Both use the
+  native macOS 26 `glassEffect`, degrading to `.ultraThinMaterial`.
+- **The surface's material depends on the screen.** Over a physical cutout it is opaque black in
+  every state — it is impersonating milled aluminum, and translucency would give that away. On a
+  screen with no cutout, the pill *and* the sheet it grows into are **clear Liquid Glass**
+  (`ExpandedPanelView` carries no chrome of its own; the morphing surface is its background).
+- **A glass surface needs a fill under it or it cannot be clicked.** `NotchWindow`'s container
+  gates on `interactiveRect` and then defers to `NSHostingView.hitTest`, which reports a hit only
+  where SwiftUI actually *drew* something. `glassEffect` paints a material but contributes no body,
+  and a fully clear fill draws nothing, so clicks fall straight through the window to the desktop —
+  the surface would answer only where compact content happens to cover it. `.contentShape` does not
+  help: it steers gesture dispatch *after* AppKit has routed the event to the view. Hence the fill
+  at `NotchTheme.hitTestableAlpha` (0.001, under one unit of an 8-bit channel). Verify any change
+  here by posting synthetic clicks at bare surface *and* at the canvas outside it — the first must
+  reach `toggleSheet()`, the second must still pass through.
 - **`Settings/SettingsStore.swift`** — `UserDefaults`-backed, `SettingsStore.shared`. Per-module
   enabled flags (default on) and hover sensitivity.
 

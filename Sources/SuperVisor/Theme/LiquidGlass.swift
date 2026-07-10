@@ -40,6 +40,12 @@ public enum NotchTheme {
 
     /// The black used for the pill body so it reads as part of the hardware notch.
     public static let notchBlack = Color.black
+
+    /// Alpha for a fill that exists purely to be clicked on, over a material that draws no body
+    /// of its own. `NSHostingView` reports a hit only where SwiftUI drew something, so a truly
+    /// clear fill would let clicks fall through the window. At this alpha the fill contributes
+    /// less than one unit of an 8-bit channel and is invisible.
+    public static let hitTestableAlpha: Double = 0.001
     /// Primary foreground tint for content rendered on the dark surface.
     public static let primaryForeground = Color.white
     /// Secondary, dimmer foreground tint.
@@ -85,6 +91,32 @@ public struct LiquidGlassSurface: ViewModifier {
     }
 }
 
+/// View modifier that fills an arbitrary shape with Liquid Glass.
+///
+/// `LiquidGlassSurface` only ever clips to a rounded rectangle. The morphing notch surface is
+/// neither a rectangle nor a fixed shape, so it needs the material poured into whatever
+/// silhouette it currently holds.
+///
+/// The `clear` variant refracts what is behind it without frosting it; the regular variant
+/// frosts. Both degrade to `.ultraThinMaterial` where `glassEffect` is unavailable.
+public struct LiquidGlassShape<S: Shape>: ViewModifier {
+    public var shape: S
+    public var clear: Bool
+
+    public init(shape: S, clear: Bool = false) {
+        self.shape = shape
+        self.clear = clear
+    }
+
+    public func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            return AnyView(content.glassEffect(clear ? Glass.clear : Glass.regular, in: shape))
+        } else {
+            return AnyView(content.background(.ultraThinMaterial, in: shape))
+        }
+    }
+}
+
 /// View modifier for the expanded panel chrome: Liquid Glass material plus the panel's
 /// rounded corners and drop shadow.
 public struct PanelChrome: ViewModifier {
@@ -106,6 +138,11 @@ public extension View {
     /// Applies the Liquid Glass surface treatment with the given corner radius.
     func liquidGlass(cornerRadius: CGFloat, tint: Color? = nil, interactive: Bool = false) -> some View {
         modifier(LiquidGlassSurface(cornerRadius: cornerRadius, tint: tint, interactive: interactive))
+    }
+
+    /// Fills the given shape with Liquid Glass, clear or frosted.
+    func liquidGlass<S: Shape>(in shape: S, clear: Bool = false) -> some View {
+        modifier(LiquidGlassShape(shape: shape, clear: clear))
     }
 
     /// Applies the expanded-panel chrome (Liquid Glass + corners + shadow).

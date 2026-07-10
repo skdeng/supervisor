@@ -2,12 +2,14 @@ import SwiftUI
 
 /// The SwiftUI root hosted by `NotchWindow`.
 ///
-/// A single surface morphs from the notch into the sheet: while collapsed it is a black pill
-/// hugging the hardware notch with compact live-activity content flanking the cutout; on
-/// expand it grows — width and height spring outward — and its fill crossfades from black to
-/// Liquid Glass, so the open reads as the notch itself expanding into the sheet rather than a
-/// separate panel dropping below a static bar. A solid black cap always covers the physical
-/// notch so the hardware cutout blends. The sheet is centered on the notch when open.
+/// A single surface morphs from the notch into the sheet: while collapsed it hugs the notch with
+/// compact live-activity content flanking the cutout; on expand it grows — width and height
+/// spring outward — so the open reads as the notch itself expanding into the sheet rather than a
+/// separate panel dropping below a static bar. The sheet is centered on the notch when open.
+///
+/// Over a physical cutout the surface is opaque black in every state and a solid black cap covers
+/// the cutout, so the two blend. On a screen with no cutout it is clear Liquid Glass instead, and
+/// detaches into a floating pill on hover (see `pillness`).
 ///
 /// The window itself is a fixed-size transparent canvas; all motion happens here in SwiftUI.
 struct NotchRootView: View {
@@ -21,7 +23,8 @@ struct NotchRootView: View {
     @State private var leadingWidth: CGFloat = 0
     @State private var trailingWidth: CGFloat = 0
 
-    /// Debug: render the whole surface bright red so its exact bounds are visible.
+    /// Debug: render the whole surface bright red so its exact bounds are visible. It overrides
+    /// the glass material too, which is otherwise hard to pin down against a busy desktop.
     private var debugTint: Bool { settings.debugTintEnabled }
     private var surfaceColor: Color { debugTint ? .red : NotchTheme.notchBlack }
 
@@ -137,13 +140,46 @@ struct NotchRootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    /// The single shape that morphs from the notch (black pill) into the Liquid Glass sheet.
+    /// What the surface is made of, in whatever silhouette it currently holds.
+    ///
+    /// Over a physical cutout it is opaque black in every state: it is standing in for the
+    /// hardware, and any translucency would betray that the notch is drawn rather than milled.
+    /// A surface on a screen with no cutout has no hardware to impersonate, so it is clear
+    /// Liquid Glass and lets the desktop through — as the pill and as the sheet it grows into.
+    ///
+    /// The glass is laid over a filled shape rather than used alone, and that fill's alpha is
+    /// small but *not* zero.
+    ///
+    /// `NotchWindow`'s container passes a click to `NSHostingView.hitTest`, which reports a hit
+    /// only where SwiftUI actually drew something — a fully transparent view is not drawn, and
+    /// `.contentShape` cannot help, because it steers gesture dispatch after AppKit has already
+    /// decided the event belongs to this view. `glassEffect` paints a material without
+    /// contributing a body of its own. Glass alone therefore leaves the surface answering clicks
+    /// only where compact content happens to cover it, and every click on the bare pill — most of
+    /// it, since the middle is the reserved cutout — falls straight through to the desktop.
+    ///
+    /// An opaque fill is what carried the hit region before this surface became glass. The fill
+    /// below restores it at an alpha that rounds to nothing on screen.
+    @ViewBuilder
+    private var surfaceBackground: some View {
+        let shape = NotchShape(cornerRadius: radius, pillness: pillness, topDrop: geo.pillTopDrop)
+        if debugTint {
+            shape.fill(surfaceColor)
+        } else if geo.isHardwareNotch {
+            shape.fill(NotchTheme.notchBlack)
+        } else {
+            Color.clear
+                .liquidGlass(in: shape, clear: true)
+                .overlay { shape.fill(Color.white.opacity(NotchTheme.hitTestableAlpha)) }
+        }
+    }
+
+    /// The single shape that morphs from the notch into the sheet.
     private var morphingSurface: some View {
         ZStack(alignment: .top) {
-            // One deep-black surface in every state: the notch and the sheet it grows into are
-            // the same solid black, so the open reads as the notch simply expanding.
-            NotchShape(cornerRadius: radius, pillness: pillness, topDrop: geo.pillTopDrop)
-                .fill(surfaceColor)
+            // One surface in every state: the notch and the sheet it grows into are the same
+            // material, so the open reads as the notch simply expanding.
+            surfaceBackground
 
             // Compact content flanks the notch while collapsed; fades out as it expands. It
             // rides down with the surface so it stays centered in the body, never stranded in
