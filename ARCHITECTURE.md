@@ -135,6 +135,7 @@ Sources/SuperVisor/
   App/        app entry, AppDelegate, ModuleRegistry (the ONE integration point)
   Core/       NotchModule.swift, NotchContext.swift, engine, window, geometry, hover
   UI/         root view, compact pill, expanded panel
+  Services/   shared system integrations used by multiple modules
   Theme/      Liquid Glass material wrappers
   Settings/   settings store
   Modules/<Name>/   one folder per feature module, self-contained
@@ -146,6 +147,8 @@ Sources/SuperVisor/
   the state machine (idle / compact / peek / expanded).
 - **UI/** — the SwiftUI root view and the two presentation shells: the compact pill and
   the expanded panel that compose module contributions.
+- **Services/** — shared system integrations that are not modules themselves, including
+  CoreAudio helpers and local-file Quick Look/thumbnail services.
 - **Theme/** — Liquid Glass material wrappers shared by all chrome and modules.
 - **Settings/** — the settings store (enabled modules, hover sensitivity, per-module prefs).
 - **Modules/<Name>/** — each feature lives in its own self-contained folder; a module
@@ -208,10 +211,18 @@ and related toggles. Observes the relevant system state and peeks on change
 (`requestPeek`) to show a compact level indicator. Expanded: sliders and current values.
 
 ### fileshelf
-A drag-and-drop staging shelf living in the notch. Dragging files over the notch expands
-a drop zone; dropped items are held in a temporary shelf the user can drag back out to
-any target (Finder, Mail, chat). Compact: a count/affordance when items are held.
-Expanded: thumbnails of staged files with remove/clear.
+One unified staging inbox for both dropped files and screenshots. Dragging files over the
+notch expands a drop zone and stages them; a bundled screenshot watcher treats a new direct
+child of the configured screenshot destination as a capture only when it is a regular,
+non-symlink image/PDF carrying the system screenshot metadata attribute (existing files are
+baselined, and preferences-plist changes rebase the watcher). Each item records its source
+(dropped / screenshot / generated), shown as a tile badge. Compact: a count/affordance while
+items are held, plus a transient thumbnail flourish that animates a new screenshot into the
+trailing pill and requests a peek. Expanded: a filmstrip of staged thumbnails with Copy, Copy
+Text (local Vision OCR), Quick Look, AirDrop, Reveal, Zip, and agent actions, plus a
+non-destructive Remove and an identity-verified Move-to-Trash (checks the recorded volume/inode
+so a replacement at the same path is never removed). Dragging items back out to any target
+(Finder, Mail, chat) works from every tile. It never captures the screen itself.
 
 ### glance
 At-a-glance widgets — small informational tiles (e.g. clock/date, calendar next-event,

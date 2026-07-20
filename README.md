@@ -14,14 +14,20 @@ no Xcode project.
 
 - **macOS 26** (Tahoe) or later, **Apple Silicon**
 - A Swift 6.2 toolchain (Xcode 26 / matching command-line tools)
+- An Apple signing identity is recommended so privacy grants persist across rebuilds
 
 ## Build & run
 
 ```sh
-./make-app.sh --release        # build, bundle, and ad-hoc-sign build/SuperVisor.app
+./make-app.sh --release        # build, bundle, and sign build/SuperVisor.app
 ./make-app.sh --release --run  # …and launch it
 open build/SuperVisor.app      # launch manually
 ```
+
+`make-app.sh` prefers a Developer ID Application identity, then Apple Development. Override the
+selection with `SIGNING_IDENTITY="Apple Development: …" ./make-app.sh --release`. If neither is
+installed, the script falls back to ad-hoc signing; TCC grants may then require approval after
+each rebuild.
 
 SuperVisor runs as an `LSUIElement` menu-bar agent: no Dock icon, no main window. A status-bar
 item (a `visionpro` glyph) hosts the **Settings…** and **Quit** menu. Quit from there, or
@@ -41,16 +47,42 @@ Modules never reference each other; the engine lays them out.
 | Module | Compact | Expanded |
 | --- | --- | --- |
 | **MusicVisor** (Media) | Album-art thumbnail + an equalizer tinted with the artwork's dominant color | Large artwork, title/artist, a live scrubber, transport, and an audio-output switcher |
-| **Calendar** | Countdown chip to your next meeting; live mic-mute state once a call is in progress | Agenda with one-tap **Join** (Zoom / Meet / Teams / Webex), plus a **Meeting Mode** call HUD — elapsed timer, system-wide mic mute, output switcher |
+| **Calendar** | Countdown chip to your next meeting | Agenda with one-tap **Join** (Zoom / Meet / Teams / Webex), plus a **Meeting Mode** call HUD — elapsed timer, system-wide mic mute, output switcher |
 | **TaskVisor** (Reminders) | Checklist count badge (red when anything is overdue) | Tap-to-complete checklist of due-today + overdue reminders |
-| **ClipVisor** (FileShelf) | Count badge for staged files | Drag files onto the notch to stage them; drag back out, Quick Look, AirDrop, or zip |
+| **FileShelf** | Count badge for staged items; a newly saved screenshot flies into the pill as a transient thumbnail | One inbox for dropped files **and** screenshots — drag in or drop, drag back out, Quick Look, Copy, Copy Text (OCR), AirDrop, Zip, run an agent action, Remove, or Move to Trash |
 | **Battery** | Charge ring when low or charging; connected-accessory battery | Power status, time remaining, and Bluetooth-accessory battery |
+| **Claude Usage** | — | Live Claude Code plan-quota ticker with utilization and reset time |
+| **GPT Usage** | — | Live Codex plan-quota ticker with the same utilization and reset-time UX |
 
-**Meeting Mode** is the standout: while a meeting with a join link is in progress, the pill shows
-your live mic state and the sheet leads with a call HUD. The mic mute is a true system-wide
-hardware mute (it silences the mic for every app), and it follows your default input across device
-changes so switching mics mid-call never leaves a stale mute behind. A mute you applied via the
-notch is auto-restored when the meeting ends.
+**Meeting Mode** is the standout: while a meeting with a join link is in progress, the sheet leads
+with a call HUD. The mic mute is a true system-wide hardware mute (it silences the mic for every
+app), and it follows your default input across device changes so switching mics mid-call never
+leaves a stale mute behind. A mute you applied via the notch is auto-restored when the meeting
+ends.
+
+### FileShelf
+
+FileShelf is one staging inbox for anything you want to hold at the notch — files you drop and
+screenshots you take share the same surface, distinguished by a small source badge on each tile:
+
+- Drag files onto the notch to stage them; a newly saved screenshot animates up into the compact
+  pill and peeks for a few seconds, then settles into the shelf.
+- Any item can be dragged back out to another app, opened in Quick Look, copied, revealed in
+  Finder, AirDropped, or zipped. **Copy Text** runs Apple Vision recognition locally on an image
+  or PDF and places the detected text on the clipboard — contents are not uploaded or retained.
+- **Agent actions** (Summarize / Explain / Extract Text) run a sandboxed local coding agent on the
+  file and stage the result back onto the shelf. The file is copied into an isolated scratch
+  directory and the agent is restricted to reading only that copy, so a malicious file cannot read
+  anything else on disk.
+- **Remove** takes an item off the shelf without touching the original. **Move to Trash** is the
+  explicit destructive action — it moves the original to the macOS Trash after verifying the file's
+  identity, so a file swapped in at the same path is never trashed.
+
+Screenshot detection follows the destination configured in macOS, including custom folders, and
+identifies captures through the system `kMDItemIsScreenCapture` metadata rather than a particular
+filename or language. Files already present when SuperVisor starts, or when the destination
+changes, are baselined and are not surfaced as new captures. Screenshots past the most recent
+eight are evicted; dropped files and agent results are kept until you remove them.
 
 ## How it works
 
@@ -67,6 +99,7 @@ state; only the SwiftUI content morphs, so the animation is never clipped.
   synthesized region at the top-center of the menu bar.
 
 See [`CLAUDE.md`](CLAUDE.md) for the full architecture and conventions.
+See [`PRODUCT_IDEAS.md`](PRODUCT_IDEAS.md) for the product backlog and recommended roadmap.
 
 ### Now-playing without an Apple entitlement
 
@@ -79,14 +112,25 @@ the entitled host, printing the metadata (artwork as base64) as JSON. Transport 
 
 ## Permissions
 
-TCC prompts appear the first time a feature is used, and stick thanks to the signed bundle
-identity.
+TCC prompts appear the first time a feature is used. Apple-issued signing keeps grants stable
+across rebuilds, and `SuperVisor.entitlements` supplies the Calendar entitlement required by the
+hardened runtime. After changing the signature or entitlements, quit the app and reset Calendar
+before relaunching:
+
+```sh
+tccutil reset Calendar com.supervisor.SuperVisor
+```
 
 | Permission | Needed by | For |
 | --- | --- | --- |
 | Calendar (Full Access) | Calendar | Reading upcoming events and detecting join links |
 | Reminders (Full Access) | TaskVisor | Reading due/overdue reminders and completing them |
 | Bluetooth | Battery | Reading accessory battery levels |
+| Files and Folders | FileShelf | Watching the configured macOS screenshot folder for newly saved captures |
+
+FileShelf reads only the configured screenshot directory and the files you stage (for preview,
+copy, OCR, or an agent action). It does not use Screen Recording permission and does not capture
+the screen itself; macOS remains responsible for creating every screenshot.
 
 Controlling the microphone's hardware mute (Meeting Mode) uses CoreAudio to control the *device*,
 not capture it, so it needs **no** Microphone permission and does not trip the recording
@@ -101,9 +145,9 @@ Sources/
   SuperVisor/
     App/         AppDelegate, ModuleRegistry, SettingsView
     Core/        NotchEngine, NotchWindow, NotchModule/Context, ScreenGeometry, HoverMonitor
-    UI/          NotchRootView, CompactPillView, ExpandedPanelView
-    Modules/     Media, Calendar, Reminders, FileShelf, Battery (+ unwired SystemHUD)
-    Services/    Audio (shared CoreAudio helpers)
+    UI/          NotchRootView, shared surfaces and usage-ticker chrome
+    Modules/     Media, Calendar, Reminders, Capture, FileShelf, Battery, Usage, GPTUsage (+ unwired SystemHUD)
+    Services/    Shared Audio and FileSystem integrations
     Theme/       LiquidGlass design tokens
     Settings/    SettingsStore
   MediaRemoteAdapter/

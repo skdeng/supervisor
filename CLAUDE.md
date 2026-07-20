@@ -13,8 +13,10 @@ them.
 
 ## Build & Run
 
-- **`./make-app.sh --release`** — builds, bundles, and ad-hoc-signs `build/SuperVisor.app`.
-  (`--run` also launches it; drop `--release` for a debug build.)
+- **`./make-app.sh --release`** — builds, bundles, and signs `build/SuperVisor.app`.
+  (`--run` also launches it; drop `--release` for a debug build.) It prefers Developer ID
+  Application, then Apple Development, and falls back to ad-hoc signing. Set
+  `SIGNING_IDENTITY` to override selection.
 - **`open build/SuperVisor.app`** — launch. It is an **`LSUIElement`** menu-bar agent
   (`.accessory` activation policy): no Dock icon, no main window. A status-bar item
   (`visionpro` glyph) hosts the **Settings…** and **Quit** menu.
@@ -23,7 +25,8 @@ them.
   required because TCC permission grants (Location, Calendar, Reminders, Accessibility, Bluetooth) and the
   now-playing read only persist for a **stable, signed bundle identity** — a bare `swift run`
   binary gets a fresh identity each launch and grants never stick. `make-app.sh` also compiles
-  the MediaRemote adapter dylib (see below); `swift build` does not.
+  the MediaRemote adapter dylib (see below), applies `SuperVisor.entitlements`, and DER-encodes
+  its Calendar entitlement; `swift build` does none of those packaging steps.
 
 ## High-Level Architecture
 
@@ -42,8 +45,8 @@ A single morphing surface, driven by a small state machine, that modules feed co
   **appears or disappears** (which changes pill size/layout) — internal value changes inside an
   already-shown compact view update automatically via `@ObservedObject`.
 - **`App/ModuleRegistry.swift`** — THE single place modules are wired in (`allModules()`).
-  Array order is irrelevant; modules sort by `order`. Currently lists 5 modules
-  (Media, Calendar, Reminders, FileShelf, Battery).
+  Array order is irrelevant; modules sort by `order`. Currently lists 8 modules
+  (Media, Calendar, Reminders, FileShelf, Flow, Battery, Claude Usage, GPT Usage).
 - **`Core/NotchEngine.swift`** — owns the window, geometry, hover detection, the enabled-module
   list, and the state machine: `NotchState` is `.idle` / `.compact` / `.expanded` (peek is a
   transient `.compact`). Builds the `NotchContext`, filters modules by `SettingsStore`, activates
@@ -157,14 +160,30 @@ sink. Preserve these guards when touching the relevant code:
 - **Now-playing metadata** is set by any other running app. `mediaremote_adapter.m` drops non-finite
   numbers and validates the payload (`isValidJSONObject`) before serializing, so a malicious source
   cannot abort the entitled perl helper with an uncaught exception.
+- **Screenshot-directory contents** are arbitrary local files. `ScreenshotMonitor` accepts only
+  direct, regular, non-symlink image/PDF children carrying macOS's
+  `com.apple.metadata:kMDItemIsScreenCapture` attribute, requires a non-zero size, and rejects files
+  over 512 MiB. It baselines existing paths before emitting anything. Vision OCR separately caps
+  decoded dimensions at 120 million pixels before creating a recognition request. Before Move to
+  Trash moves a staged file's original to Trash, `FileShelfStore` compares the current volume/file
+  numbers with the identity recorded when the item entered the shelf; a replacement at the same
+  path is refused.
+- **Dropped-file agent dispatch** feeds untrusted file content to a model. `FileShelfStore` copies
+  the file (via an `O_NOFOLLOW` descriptor whose volume/inode must match the staging identity) into
+  a per-run scratch directory under Application Support, then runs the headless CLI with cwd = that
+  scratch dir and `--tools Read --allowedTools Read(<copy path>) --strict-mcp-config
+  --setting-sources project`. The toolset is Read-only (no exfiltration tool), the auto-allow is
+  scoped to the single copied file, MCP is disabled, and the user's own hooks/settings do not load,
+  so a prompt-injection payload in the file cannot read anything but the copy. A natural-language
+  preamble marks the content as data, not instructions, as defense-in-depth.
 
 ## Module Roster
 
 Each lives self-contained in `Modules/<Name>/` (model + system observers + SwiftUI views).
 Modules that surface a **generic capability** carry a **`<Feature>Visor`** brand name in their
-`displayName` (MusicVisor, TaskVisor, ClipVisor) — propose one in that style for any new module.
+`displayName` (MusicVisor, TaskVisor) — propose one in that style for any new module.
 Name a module literally only when its point is *whose* data it shows rather than *what* it does
-(Claude Usage), or when the plain noun already is the feature (Calendar, Battery). The folder
+(Claude Usage), or when the plain noun already is the feature (Calendar, Battery, FileShelf). The folder
 names below are the code paths.
 
 - **Media → "MusicVisor"** (`Modules/Media`) — system now-playing surface. Compact: album-art
@@ -181,18 +200,57 @@ names below are the code paths.
   via `MediaRemoteBridge`.
 - **Calendar** (`Modules/Calendar`) — next-meeting countdown chip in compact; an agenda with a
   one-tap **Join** button (Zoom / Meet / Teams / Webex link detection) in expanded. EventKit via
-  `CalendarService`. **Meeting Mode:** while a meeting with a join link is in progress, the pill
-  shows the live mic-mute state and the sheet leads with a call HUD — elapsed timer, a system-wide
-  **mic-mute** toggle (`MicController`), an audio-output switcher, and Join; a mute applied via the
-  notch is auto-restored when the meeting ends.
+  `CalendarService`. **Meeting Mode:** while a meeting with a join link is in progress, Calendar
+  contributes no compact mic indicator because macOS already shows microphone activity in the
+  menu bar; the sheet leads with a call HUD — elapsed timer, a system-wide **mic-mute** toggle
+  (`MicController`), an audio-output switcher, and Join. A mute applied via the notch is
+  auto-restored when the meeting ends. Any surfaced meeting can be dismissed from its agenda row
+  or Meeting HUD; the occurrence is excluded everywhere, including FlowVisor's meeting deferral.
+  Dismissals live in memory in `MeetingDismissalStore` (`Services/Meetings/`), keyed by event ID
+  plus start time and pruned when the meeting ends; an **N dismissed** Up Next footer lists them
+  for one-tap restore and keeps the section visible when every meeting is dismissed.
 - **Reminders → "TaskVisor"** (`Modules/Reminders`) — due-today + overdue Apple Reminders. Compact:
   a checklist count badge (red when any are overdue). Expanded: a **tap-to-complete** checklist
   with list color, live due/overdue text, and a high-priority marker. EventKit via
   `RemindersService`.
-- **FileShelf → "ClipVisor"** (`Modules/FileShelf`) — drag-and-drop staging shelf. Dragging a file
-  onto the notch opens the sheet with the shelf (it is not shown otherwise); hold files, drag back
-  out, Quick Look, AirDrop, zip. (`FileShelfStore`, `ThumbnailService`, `QuickLookController`,
-  `FileActionService`.)
+- **FileShelf** (`Modules/FileShelf`) — one unified staging inbox for both dropped files and
+  screenshots (named literally, not a `<Feature>Visor` brand). Each `StagedFile` carries a
+  `source` (`.dropped` / `.screenshot` / `.generated`) that drives a corner badge on its tile.
+  Dropping a file onto the notch opens the sheet and stages it; `ScreenshotMonitor` (moved into
+  this module) recognizes new macOS screenshots through the system
+  `com.apple.metadata:kMDItemIsScreenCapture` extended attribute (never by localized/user-defined
+  filenames), watching both the destination directory and
+  `~/Library/Preferences/com.apple.screencapture.plist` — a destination change reconfigures the
+  watcher live, and existing files are baselined on activation/reconfiguration. A new screenshot
+  animates into the pill with a 3.2-second peek, then its arrival flourish collapses into the
+  persistent count badge. Screenshots evict oldest-first past eight; dropped and generated items
+  are never auto-evicted. Expanded: a horizontal filmstrip of tiles with an icon-only capsule —
+  Copy, Copy Text (Vision OCR, images/PDF; runs detached, only the resulting `String` returns to
+  the main actor), Quick Look, AirDrop, Reveal, Zip, and an **agent-verbs** menu (Summarize /
+  Explain / Extract Text) — plus, separated, **Remove** (off-shelf, non-destructive; a generated
+  artifact's backing file is deleted) and **Move to Trash** (moves the original to the macOS Trash
+  after verifying the file's recorded volume/inode identity, refusing a file swapped at the path).
+  Agent dispatch runs the file through a sandboxed headless agent (see Untrusted Input). Drag-out,
+  Quick Look, and thumbnails via `FileShelfStore`, `ThumbnailService`, `QuickLookController`,
+  `FileActionService`; agent runner + live-operation model in `Services/AgentDispatch` and
+  `Services/Operations`.
+- **Flow → "FlowVisor"** (`Modules/Flow`) — an activity-aware break coach. Derives a work/break
+  state machine from ONE permissionless signal: seconds since the last user input
+  (`CGEventSource.secondsSinceLastEventType`, content-blind, no TCC). At the configured work
+  interval (default 60 min) of continuous work it peeks a nudge — but only at a micro-pause (≥10 s
+  idle, so never mid-keystroke) and, when `flow.deferDuringMeetings` is on, only after any in-progress
+  meeting ends (`FlowTracker` makes its own EventKit query reading **only** event start/end dates);
+  dismissed meetings and all-day events do not defer nudges.
+  Breaks are forgiving: ≥180 s away is a break and silently resets the clock, whether nudged or
+  spontaneous — someone who naturally breaks never hears from it; a nudged break earns a brief
+  "recharged" compact ack on return. Compact: a brand-gradient arc that fades in over the final 10
+  minutes and fills toward the nudge, a break countdown ring, or the ack — nothing otherwise.
+  Expanded: a ring + honest "1h 04m heads-down" total, Take 5 / Snooze 10 / Skip, and a *today*
+  rhythm strip of the session-local work/break segments. Timer discipline per the idle-CPU rule: a
+  single rearming deadline task fires only at the next real boundary (60 s sampler, tightening to
+  5 s only while a nudge waits for a micro-pause) and is torn down entirely on screen lock / system
+  sleep — that suspended time counts as break credit. Settings: `flow.workInterval` (45/60/90),
+  `flow.breakLength` (3/5/10), `flow.deferDuringMeetings`.
 - **Battery** (`Modules/Battery`) — power/charging status, time remaining, and connected-device
   (Bluetooth accessory) battery; peeks on plug/unplug and low battery. (`PowerSourceMonitor`,
   `BluetoothMonitor`.)
@@ -209,6 +267,16 @@ names below are the code paths.
   when Claude Code stops writing, no file event will ever arrive: a **single timer** is armed
   for the soonest deadline that can still hide the row (and none at all once it is hidden),
   rather than a periodic tick that exists only to notice the absence of one.
+- **GPTUsage → "GPT Usage"** (`Modules/GPTUsage`) — Codex plan-quota runway with the exact same
+  expanded-only ticker chrome, headroom colors, and reset-time formatting as Claude Usage (shared
+  in `UI/UsageTickerRowView`). `CodexQuotaMonitor` uses a recursive FSEvents watcher over
+  `~/.codex/sessions/` and reads only JSONL mtimes to determine whether Codex is active; it never
+  opens transcript contents or auth files, and sessions crossing midnight or resumed from older
+  date folders remain visible. While active, `CodexRateLimitClient` launches the installed
+  `codex app-server`, performs its initialize handshake, and reads the supported
+  `account/rateLimits/read` snapshot. Codex itself owns authentication and network access. The
+  helper is reused across activity updates, throttled to one request per 5 seconds, and stopped
+  when the same 10-minute activity window expires. Quota freshness uses the same 30-minute TTL.
 
 **`Modules/SystemHUD/`** (volume / brightness / keyboard-backlight HUD — `VolumeController`,
 `BrightnessController`, `KeyboardBacklightController`, `MediaKeyMonitor`) is present but **NOT wired
@@ -217,13 +285,19 @@ at runtime.
 
 ## Shared Services
 
-- **`Services/FileSystem/FileChangeWatcher.swift`** — calls back when a single file is written,
-  created, replaced, or removed. A vnode `DispatchSource` watches an open descriptor — an
+- **`Services/FileSystem/FileChangeWatcher.swift`** — calls back when a file or directory is
+  written, created, replaced, or removed. A vnode `DispatchSource` watches an open descriptor — an
   *inode*, not a path — so a writer that updates atomically (write temp, `rename` into place)
   leaves the watch pointing at the old unlinked inode and no later write is ever reported. The
   watcher therefore re-arms on `.rename`/`.delete`/`.revoke`, and watches the parent directory
   while the file is absent (so it may be started before the file exists). Callbacks are
   debounced, and fire on a private serial queue, not the main actor.
+- **`Services/FileSystem/DirectoryTreeWatcher.swift`** — a recursive, debounced FSEvents watcher
+  used for Codex's date-partitioned sessions tree. It notices nested appends with one stream,
+  including an older transcript resumed after its original date, without a discovery poll.
+- **`Services/FileSystem/ThumbnailService.swift` + `QuickLookController.swift`** — shared local-file
+  previews used by FileShelf. Thumbnail generation stays in Quick Look's service;
+  the main actor only materializes the resulting `NSImage`.
 - **`Services/Audio/`** — CoreAudio helpers shared by modules (these are plain services, not
   `NotchModule`s, so modules stay decoupled). `AudioOutputController` + `AudioOutputSelector` (the
   default-output device and its inline picker, used by Media and Meeting Mode) and `MicController`
@@ -241,6 +315,22 @@ at runtime.
   `LiquidGlassSurface` clips to a rounded rectangle; `LiquidGlassShape` pours the material into an
   arbitrary `Shape` (the morphing `NotchShape` is neither a rectangle nor fixed). Both use the
   native macOS 26 `glassEffect`, degrading to `.ultraThinMaterial`.
+- **Brand color: a pink→cyan gradient is the app's primary accent.** Any element that needs a
+  primary/accent color uses the brand, never the system `Color.accentColor`. `NotchTheme.brandGradient`
+  (`brandPink` → `brandCyan`, top-leading to bottom-trailing) is a `ShapeStyle`, so it goes directly
+  into `.fill`, `.strokeBorder`, and `.foregroundStyle` — use it for selection strokes, drop-target
+  highlights, the compact badge, checkmarks, prominent buttons (the Meeting Mode dot + Join), etc.
+  `NotchTheme.brandColor` is the single-`Color` fallback for the few sites that require a `Color`
+  rather than a gradient (a shadow/glow color, a per-list color fallback); `brandPink`/`brandCyan`
+  are the endpoints. Leave **semantic status colors** (green = live/ongoing, orange = due soon, red =
+  destructive/muted) and **per-list colors** (a calendar's or reminder list's own `event.accent` /
+  `item.accent`) as they are — those carry meaning and are not the brand.
+- **Tooltips need `.notchTooltip(_:)`, not `.help(_:)`.** `NotchWindow` is a borderless,
+  non-activating `NSPanel` (`canBecomeKey == false`), so macOS never gives it tooltip tracking and
+  native `.help()` tooltips do not render. `.notchTooltip(_:)` (in `Theme/LiquidGlass.swift`) is a
+  custom hover overlay that shows a label above the view after a short delay; its reveal is a
+  cancellable hover-scoped `Task`, so nothing runs at idle. Keep `.help()` alongside it for
+  accessibility, but the custom modifier is what the user actually sees.
 - **The surface's material depends on the screen.** Over a physical cutout it is opaque black in
   every state — it is impersonating milled aluminum, and translucency would give that away. On a
   screen with no cutout, the pill *and* the sheet it grows into are **clear Liquid Glass**
