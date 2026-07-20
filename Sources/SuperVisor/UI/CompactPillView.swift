@@ -6,8 +6,8 @@ import SwiftUI
 /// It draws NO background or offset of its own — the single morphing surface in
 /// `NotchRootView` provides those — and reports each side's measured natural width through
 /// bindings so the surface can size itself. Both sides RENDER at the wider side's width
-/// (content stays hugging the cutout; the slack sits at the outer edge), so the pill is
-/// always symmetric around the physical notch.
+/// (content hugs the pill's outer edge; the slack sits against the cutout, where it reads
+/// as notch body), so the pill is always symmetric around the physical notch.
 struct CompactPillView: View {
     @EnvironmentObject private var engine: NotchEngine
 
@@ -37,7 +37,7 @@ struct CompactPillView: View {
                 .padding(.trailing, hasLeading ? sidePadding : 0)
                 .fixedSize()
                 .background(WidthReader(width: $leadingWidth))
-                .frame(width: sideWidth, alignment: .trailing)
+                .frame(width: sideWidth, alignment: .leading)
                 .clipped()
 
             // Reserve the physical notch cutout so content flanks it; the surface behind
@@ -50,7 +50,7 @@ struct CompactPillView: View {
                 .padding(.trailing, hasTrailing ? outerPadding : 0)
                 .fixedSize()
                 .background(WidthReader(width: $trailingWidth))
-                .frame(width: sideWidth, alignment: .leading)
+                .frame(width: sideWidth, alignment: .trailing)
                 .clipped()
         }
         .frame(height: notchHeight)

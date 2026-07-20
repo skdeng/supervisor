@@ -2,6 +2,12 @@ import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
+enum ItemSource: Equatable, Sendable {
+    case dropped
+    case screenshot
+    case generated
+}
+
 /// One item held on the file shelf. Identified by a stable UUID so SwiftUI can track it
 /// across reorders and thumbnail updates, and keyed by its resolved file URL for the
 /// drag-out, reveal, AirDrop, compress, and Quick Look operations.
@@ -11,8 +17,10 @@ final class StagedFile: ObservableObject, Identifiable {
     let id = UUID()
     /// The on-disk location of the staged file.
     let url: URL
-    /// When the item was dropped onto the shelf (drives newest-first ordering).
+    /// When the item entered the shelf (drives newest-first ordering).
     let addedAt: Date
+    /// Origin of the staged item.
+    let source: ItemSource
 
     /// Display name (the file's last path component).
     let displayName: String
@@ -22,16 +30,31 @@ final class StagedFile: ObservableObject, Identifiable {
     let isDirectory: Bool
     /// File size in bytes, or nil if it could not be determined.
     let byteSize: Int64?
+    /// File-system identity captured when the item entered the shelf.
+    let fileIdentity: FileSystemIdentity?
+    /// Generated artifacts are deleted when they leave the in-memory shelf.
+    let isAppOwnedGeneratedArtifact: Bool
 
     /// Live thumbnail image. Starts nil (a type glyph stands in) and is filled in
     /// asynchronously by the `ThumbnailService` once generated.
     @Published var thumbnail: NSImage?
 
-    init(url: URL, addedAt: Date = Date()) {
+    /// The agent task currently operating on this item.
+    @Published var activeOperation: LiveOperation?
+
+    init(
+        url: URL,
+        addedAt: Date = Date(),
+        source: ItemSource,
+        isAppOwnedGeneratedArtifact: Bool = false
+    ) {
         let resolved = url.resolvingSymlinksInPath()
         self.url = resolved
         self.addedAt = addedAt
+        self.source = source
         self.displayName = resolved.lastPathComponent
+        self.isAppOwnedGeneratedArtifact = isAppOwnedGeneratedArtifact
+        self.fileIdentity = FileSystemIdentity.regularFile(at: resolved)
 
         let values = try? resolved.resourceValues(forKeys: [
             .contentTypeKey, .isDirectoryKey, .fileSizeKey, .totalFileSizeKey,

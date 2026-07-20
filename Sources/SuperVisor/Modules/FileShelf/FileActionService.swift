@@ -69,7 +69,7 @@ enum FileActionService {
 
         let archiveName = Self.archiveName(for: inputs)
         let outDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ClipVisor-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("FileShelf-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
         let archiveURL = outDir.appendingPathComponent(archiveName)
 

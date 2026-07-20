@@ -1,5 +1,5 @@
 #!/bin/bash
-# Packages the SuperVisor SPM executable into a launchable, ad-hoc-signed .app bundle.
+# Packages the SuperVisor SPM executable into a launchable, signed .app bundle.
 #
 # Why a bundle: the privacy permission grants (Location, Calendar, Accessibility,
 # Bluetooth, Notifications) only persist when macOS can identify a stable, signed bundle.
@@ -49,10 +49,29 @@ clang -dynamiclib -fobjc-arc -O2 \
   Sources/MediaRemoteAdapter/mediaremote_adapter.m \
   -o "${RES_DIR}/mediaremote_adapter.dylib"
 
-# Ad-hoc sign so macOS assigns a stable code identity (required for TCC permission grants).
-echo "==> Ad-hoc code signing…"
-codesign --force --deep --sign - \
+# Prefer an installed Apple-issued identity so TCC grants persist across rebuilds. An
+# explicit SIGNING_IDENTITY can be supplied by CI or a developer with multiple identities.
+SIGN_IDENTITY="${SIGNING_IDENTITY:-}"
+if [ -z "$SIGN_IDENTITY" ]; then
+  IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  SIGN_IDENTITY="$(printf '%s\n' "$IDENTITIES" | awk -F'"' '/Developer ID Application:/ { print $2; exit }')"
+  if [ -z "$SIGN_IDENTITY" ]; then
+    SIGN_IDENTITY="$(printf '%s\n' "$IDENTITIES" | awk -F'"' '/Apple Development:/ { print $2; exit }')"
+  fi
+fi
+
+if [ -z "$SIGN_IDENTITY" ]; then
+  SIGN_IDENTITY="-"
+  echo "==> Ad-hoc code signing (no Apple identity found)…"
+else
+  echo "==> Code signing with ${SIGN_IDENTITY}…"
+fi
+
+codesign --force --deep --sign "$SIGN_IDENTITY" \
   --options runtime \
+  --timestamp=none \
+  --entitlements SuperVisor.entitlements \
+  --generate-entitlement-der \
   --identifier com.supervisor.SuperVisor \
   "$APP_DIR"
 codesign --verify --verbose "$APP_DIR"

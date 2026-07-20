@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Menu-bar agent: no Dock icon, never the active app's foreground UI.
         NSApp.setActivationPolicy(.accessory)
+        AppManagedFileStorage.sweepOrphans()
 
         installStatusItem()
         engine.install()

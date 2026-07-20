@@ -1,21 +1,10 @@
 import SwiftUI
 
-/// ClipVisor — a drag-and-drop file shelf living in the notch.
-///
-/// The expanded panel exposes a drop zone that stages dropped file URLs in memory with
-/// Quick Look thumbnails. Per-file and multi-select actions cover AirDrop, Quick Look
-/// preview, Reveal in Finder, Compress to `.zip`, and Remove. Staged files can be dragged
-/// back out to any app via their file URL. The compact trailing surface shows a count badge
-/// that pulses when a file is dropped.
-///
-/// All staging state lives in `FileShelfStore` (an `@MainActor ObservableObject`); the views
-/// returned here observe it so their subtrees re-render on change without involving the
-/// engine. The engine is nudged via `NotchContext` only when the compact contribution
-/// appears/disappears (`setNeedsCompactRefresh`) or to peek on a drop (`requestPeek`).
+/// FileShelf stages dropped files, screenshots, and generated results in one local inbox.
 @MainActor
 final class FileShelfModule: NotchModule, ObservableObject {
     let moduleID = "fileshelf"
-    let displayName = "ClipVisor"
+    let displayName = "FileShelf"
     let order = 40
 
     private let store = FileShelfStore()
@@ -38,38 +27,51 @@ final class FileShelfModule: NotchModule, ObservableObject {
 
     func activate(_ context: NotchContext) {
         self.context = context
-
-        // Wire the store's engine-facing callbacks. The store never imports the engine; it
-        // drives layout/peek purely through these closures.
         store.onCompactPresenceChanged = { [weak context] in
             context?.setNeedsCompactRefresh()
         }
         store.onDropPeek = { [weak context] in
-            // Briefly surface the compact badge so a drop is visible without expanding.
             context?.requestPeek(1.6)
         }
+        store.onScreenshotPeek = { [weak context] in
+            context?.requestPeek(3.2)
+        }
+        store.operations.onPresenceChanged = { [weak context] in
+            context?.setNeedsCompactRefresh()
+        }
+        store.beginActivation()
     }
 
     func deactivate() {
-        store.clearAll()
+        store.endActivation()
         store.onCompactPresenceChanged = nil
         store.onDropPeek = nil
+        store.onScreenshotPeek = nil
+        store.operations.onPresenceChanged = nil
         context = nil
     }
 
     // MARK: Compact contributions
 
     func compactTrailing() -> AnyView? {
-        guard store.count > 0 else { return nil }
+        guard store.count > 0 || store.hasActiveOperations || store.arrivalItem != nil else {
+            return nil
+        }
         return AnyView(FileShelfCompactView(store: store))
     }
 
     // MARK: Expanded section
 
-    /// Only contribute the shelf when a drag is active or files are staged — otherwise the
-    /// sheet doesn't show the clip UI at all.
+    /// The section remains available while an operation is visible so paid work can be
+    /// inspected and cancelled after its source item leaves the shelf.
     func expandedSection() -> AnyView? {
-        guard dropTargeting || store.count > 0 else { return nil }
+        guard dropTargeting
+                || store.count > 0
+                || store.arrivalItem != nil
+                || !store.operations.operations.isEmpty
+        else {
+            return nil
+        }
         return AnyView(FileShelfExpandedView(store: store, dropTargeting: dropTargeting))
     }
 }

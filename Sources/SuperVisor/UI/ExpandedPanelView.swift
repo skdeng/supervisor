@@ -61,7 +61,7 @@ struct ExpandedPanelView: View {
     }
 
     private var sections: [SectionEntry] {
-        // While a file is being dragged onto the notch, surface only the ClipVisor section so
+        // While a file is being dragged onto the notch, surface only the FileShelf section so
         // the drop target stands alone; other modules return once the drag ends.
         let visible = engine.isFileDragging
             ? engine.modules.filter { $0 is FileShelfModule }

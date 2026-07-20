@@ -1,6 +1,7 @@
 import Foundation
 
-/// Calls `onChange` whenever the file at `url` is written, replaced, created, or removed.
+/// Calls `onChange` whenever the file or directory at `url` is written, replaced, created, or
+/// removed. For a directory, adding or removing a direct child counts as a write.
 ///
 /// A vnode `DispatchSource` watches an open descriptor — an *inode*, not a path. A writer that
 /// updates a file atomically (write a temporary, `rename(2)` it into place) leaves that

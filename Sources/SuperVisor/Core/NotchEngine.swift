@@ -46,7 +46,7 @@ public final class NotchEngine: ObservableObject {
     /// sheet itself only opens on a click.
     @Published public private(set) var isHovered: Bool = false
     /// True while a file is being dragged onto the notch (before it is dropped). While set,
-    /// the expanded sheet surfaces only the ClipVisor section so the drop target stands alone.
+    /// the expanded sheet surfaces only the FileShelf section so the drop target stands alone.
     @Published public private(set) var isFileDragging: Bool = false
 
     private(set) lazy var context: NotchContext = NotchContext(

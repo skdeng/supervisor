@@ -1,9 +1,8 @@
 import AppKit
 import QuickLookThumbnailing
 
-/// Generates Quick Look thumbnails for staged files off the main actor and hands the
-/// resulting image back on the main actor. Uses the shared `QLThumbnailGenerator`, which
-/// renders real previews for images, PDFs, video frames, documents, and folder icons.
+/// Generates Quick Look thumbnails for local files off the main actor and hands the result
+/// back on the main actor. Shared by modules that surface file-backed previews.
 enum ThumbnailService {
     /// Pixel size of the requested thumbnail; the request scales for the display.
     static let pointSize = CGSize(width: 80, height: 80)

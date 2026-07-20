@@ -1,10 +1,10 @@
 import AppKit
 import Quartz
 
-/// Drives the shared `QLPreviewPanel` for a set of staged file URLs. `QLPreviewPanel` pulls
-/// its content from a data source and is steered by a delegate; both live here. The panel is
-/// a shared singleton, so this controller installs itself as the current data source/delegate
-/// while previewing and tears that down when finished.
+/// Drives the shared `QLPreviewPanel` for a set of local file URLs. `QLPreviewPanel` pulls its
+/// content from a data source and is steered by a delegate; both live here. The panel is a shared
+/// singleton, so this controller installs itself as the current data source/delegate while
+/// previewing and tears that down when finished.
 @MainActor
 final class QuickLookController: NSObject, @MainActor QLPreviewPanelDataSource, @MainActor QLPreviewPanelDelegate {
     /// URLs currently being previewed, in display order.
