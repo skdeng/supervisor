@@ -25,15 +25,7 @@ import Foundation
 /// `onPresenceChange`.
 @MainActor
 final class QuotaMonitor: ObservableObject {
-    /// One rate-limit window, e.g. the 5-hour session limit.
-    struct Window: Equatable {
-        /// Short display label ("5h", "7d", "Opus").
-        let label: String
-        /// Percentage of the limit used, 0...100.
-        let usedPercentage: Double
-        /// When the window resets.
-        let resetsAt: Date
-    }
+    typealias Window = UsageTickerWindow
 
     struct Snapshot: Equatable {
         let windows: [Window]
