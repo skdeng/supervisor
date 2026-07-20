@@ -22,6 +22,9 @@ public final class SettingsStore: ObservableObject {
         static let notchOffsetX = "notch.offsetX"
         static let trueSpectrum = "media.trueSpectrum"
         static let beatAura = "media.beatAura"
+        static let flowWorkInterval = "flow.workInterval"
+        static let flowBreakLength = "flow.breakLength"
+        static let flowDeferDuringMeetings = "flow.deferDuringMeetings"
     }
 
     /// Hover sensitivity in the range 0...1. Higher means a larger activation rect and a
@@ -61,6 +64,21 @@ public final class SettingsStore: ObservableObject {
         didSet { defaults.set(beatAuraEnabled, forKey: Key.beatAura) }
     }
 
+    /// FlowVisor: minutes of heads-down work before break nudges become eligible.
+    @Published public var flowWorkIntervalMinutes: Int {
+        didSet { defaults.set(flowWorkIntervalMinutes, forKey: Key.flowWorkInterval) }
+    }
+
+    /// FlowVisor: duration in minutes of an explicitly started break.
+    @Published public var flowBreakLengthMinutes: Int {
+        didSet { defaults.set(flowBreakLengthMinutes, forKey: Key.flowBreakLength) }
+    }
+
+    /// FlowVisor: delays a break nudge until all currently overlapping calendar events end.
+    @Published public var flowDeferDuringMeetings: Bool {
+        didSet { defaults.set(flowDeferDuringMeetings, forKey: Key.flowDeferDuringMeetings) }
+    }
+
     /// Per-module enabled flags, keyed by `moduleID`. Absent ids default to enabled.
     @Published public private(set) var moduleEnabled: [String: Bool]
 
@@ -78,6 +96,16 @@ public final class SettingsStore: ObservableObject {
         self.notchOffsetX = defaults.double(forKey: Key.notchOffsetX)
         self.trueSpectrumEnabled = (defaults.object(forKey: Key.trueSpectrum) as? Bool) ?? true
         self.beatAuraEnabled = (defaults.object(forKey: Key.beatAura) as? Bool) ?? true
+        let storedWorkInterval = defaults.integer(forKey: Key.flowWorkInterval)
+        self.flowWorkIntervalMinutes = [45, 60, 90].contains(storedWorkInterval)
+            ? storedWorkInterval
+            : 60
+        let storedBreakLength = defaults.integer(forKey: Key.flowBreakLength)
+        self.flowBreakLengthMinutes = [3, 5, 10].contains(storedBreakLength)
+            ? storedBreakLength
+            : 5
+        self.flowDeferDuringMeetings =
+            (defaults.object(forKey: Key.flowDeferDuringMeetings) as? Bool) ?? true
 
         // Reconstruct the per-module map from any persisted keys.
         var map: [String: Bool] = [:]

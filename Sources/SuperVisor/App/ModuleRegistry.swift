@@ -11,8 +11,10 @@ enum ModuleRegistry {
             CalendarModule(),
             RemindersModule(),
             FileShelfModule(),
+            FlowModule(),
             BatteryModule(),
             UsageModule(),
+            GPTUsageModule(),
         ]
     }
 }
