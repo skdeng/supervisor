@@ -115,7 +115,7 @@ final class RemindersService: ObservableObject {
         // to nil when the owning list/account was deleted between the fetch and this mapping
         // (the exact EKEventStoreChanged race window this runs in), so access it optionally.
         let calendar = reminder.calendar
-        let accent: Color = calendar?.cgColor.map(Color.init(cgColor:)) ?? .accentColor
+        let accent: Color = calendar?.cgColor.map(Color.init(cgColor:)) ?? NotchTheme.brandColor
         return ReminderItem(
             id: reminder.calendarItemIdentifier,
             title: title,

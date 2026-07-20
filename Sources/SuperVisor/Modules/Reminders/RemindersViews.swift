@@ -42,7 +42,7 @@ struct RemindersChecklistView: View {
                 row(item)
             }
         }
-        .padding(14)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .liquidGlass(cornerRadius: NotchTheme.surfaceCornerRadius)
         .animation(.snappy(duration: 0.2), value: service.reminders)
@@ -135,9 +135,9 @@ struct RemindersAccessPromptView: View {
             }
             .buttonStyle(.plain)
             .font(.caption.weight(.semibold))
-            .foregroundStyle(Color.accentColor)
+            .foregroundStyle(NotchTheme.brandGradient)
         }
-        .padding(14)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .liquidGlass(cornerRadius: NotchTheme.surfaceCornerRadius)
     }

@@ -50,7 +50,7 @@ struct BatteryStatusCard: View {
                 }
             }
         }
-        .padding(14)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .liquidGlass(cornerRadius: NotchTheme.surfaceCornerRadius)
     }

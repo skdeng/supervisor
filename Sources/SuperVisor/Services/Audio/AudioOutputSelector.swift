@@ -13,7 +13,11 @@ struct OutputRouteButton: View {
         Button(action: action) {
             Image(systemName: AudioOutputDeviceList.icon(for: controller.currentName))
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(active ? Color.accentColor : NotchTheme.primaryForeground)
+                .foregroundStyle(
+                    active
+                        ? AnyShapeStyle(NotchTheme.brandGradient)
+                        : AnyShapeStyle(NotchTheme.primaryForeground)
+                )
                 .frame(width: 36, height: 36)
                 .contentShape(Circle())
         }
@@ -56,7 +60,11 @@ struct AudioOutputDeviceList: View {
                 Image(systemName: Self.icon(for: device.name))
                     .font(.system(size: 12, weight: .medium))
                     .frame(width: 20)
-                    .foregroundStyle(isCurrent ? Color.accentColor : NotchTheme.secondaryForeground)
+                    .foregroundStyle(
+                        isCurrent
+                            ? AnyShapeStyle(NotchTheme.brandGradient)
+                            : AnyShapeStyle(NotchTheme.secondaryForeground)
+                    )
                 Text(device.name)
                     .font(.system(size: 12, weight: isCurrent ? .semibold : .regular))
                     .lineLimit(1)
@@ -65,7 +73,7 @@ struct AudioOutputDeviceList: View {
                 if isCurrent {
                     Image(systemName: "checkmark")
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(NotchTheme.brandGradient)
                 }
             }
             .padding(.horizontal, 12)

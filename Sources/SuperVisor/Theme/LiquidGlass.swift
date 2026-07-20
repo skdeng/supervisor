@@ -53,6 +53,17 @@ public enum NotchTheme {
     /// Hairline separator color.
     public static let separator = Color.white.opacity(0.12)
 
+    // MARK: Brand
+
+    public static let brandPink = Color(red: 1.0, green: 0.29, blue: 0.62)
+    public static let brandCyan = Color(red: 0.16, green: 0.85, blue: 0.96)
+    public static let brandGradient = LinearGradient(
+        colors: [brandPink, brandCyan],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
+    public static let brandColor = Color(red: 0.62, green: 0.5, blue: 0.9)
+
     // MARK: Shadows
 
     public static let panelShadowColor = Color.black.opacity(0.45)
@@ -148,5 +159,62 @@ public extension View {
     /// Applies the expanded-panel chrome (Liquid Glass + corners + shadow).
     func panelChrome() -> some View {
         modifier(PanelChrome())
+    }
+}
+
+private struct NotchTooltipModifier: ViewModifier {
+    let text: String
+
+    @State private var isPresented = false
+    @State private var revealTask: Task<Void, Never>?
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .top) {
+                if isPresented {
+                    Text(text)
+                        .font(.caption2)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.black.opacity(0.85))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .strokeBorder(NotchTheme.separator, lineWidth: 0.5)
+                                }
+                        }
+                        .fixedSize()
+                        .offset(y: -30)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+            }
+            .onHover { hovering in
+                revealTask?.cancel()
+                revealTask = nil
+                if hovering {
+                    revealTask = Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(450))
+                        guard !Task.isCancelled else { return }
+                        isPresented = true
+                    }
+                } else {
+                    isPresented = false
+                }
+            }
+            .onDisappear {
+                revealTask?.cancel()
+                revealTask = nil
+                isPresented = false
+            }
+            .animation(.snappy(duration: 0.12), value: isPresented)
+    }
+}
+
+extension View {
+    func notchTooltip(_ text: String) -> some View {
+        modifier(NotchTooltipModifier(text: text))
     }
 }
