@@ -64,6 +64,7 @@ final class CalendarService: ObservableObject {
     /// Re-read upcoming timed events from the store. Assigns only on an actual change so the
     /// periodic tick doesn't churn the UI.
     func reload() {
+        MeetingDismissalStore.shared.prune()
         guard isAuthorized else {
             if !events.isEmpty { events = [] }
             return
@@ -77,8 +78,9 @@ final class CalendarService: ObservableObject {
         let mapped = store.events(matching: predicate)
             .filter { !$0.isAllDay && $0.endDate > now }
             .sorted { $0.startDate < $1.startDate }
-            .prefix(12)
             .map(Self.makeEvent)
+            .filter { !MeetingDismissalStore.shared.isDismissed($0.id) }
+            .prefix(12)
         let next = Array(mapped)
         if next != events { events = next }
     }
@@ -102,10 +104,10 @@ final class CalendarService: ObservableObject {
         // `EKEvent.calendar` is implicitly-unwrapped but resolves to nil when the owning calendar
         // was deleted between the fetch and this mapping (the EKEventStoreChanged race window),
         // so access it optionally rather than trapping.
-        let accent: Color = ek.calendar?.cgColor.map(Color.init(cgColor:)) ?? .accentColor
+        let accent: Color = ek.calendar?.cgColor.map(Color.init(cgColor:)) ?? NotchTheme.brandColor
         // Recurring events share an identifier across instances; qualify with the start time.
         let baseID = ek.eventIdentifier ?? ek.calendarItemIdentifier
-        let id = baseID + "@" + String(Int(ek.startDate.timeIntervalSinceReferenceDate))
+        let id = MeetingDismissalStore.occurrenceID(baseIdentifier: baseID, start: ek.startDate)
         return CalendarEvent(
             id: id,
             title: title,

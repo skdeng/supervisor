@@ -9,10 +9,9 @@ import SwiftUI
 ///   countdown chip appears in the compact pill (`12m` → `1m` → `Now`), and the expanded panel
 ///   lists upcoming meetings, each with a one-tap **Join** button when a Zoom / Meet / Teams /
 ///   Webex link is detected.
-/// - **Meeting Mode:** once a meeting with a join link is in progress, the compact pill instead
-///   shows your live mic-mute state, and the expanded panel leads with a call HUD — elapsed
-///   timer, a global mic-mute toggle, an audio-output switcher, and Join. If you muted via the
-///   notch, the mic is automatically restored when the meeting ends.
+/// - **Meeting Mode:** once a meeting with a join link is in progress, the expanded panel leads
+///   with a call HUD — elapsed timer, a global mic-mute toggle, an audio-output switcher, and
+///   Join. If you muted via the notch, the mic is automatically restored when the meeting ends.
 ///
 /// Event data comes from `CalendarService` (EventKit); mic and output control come from
 /// `MicController` / `AudioOutputController` (CoreAudio).
@@ -23,6 +22,7 @@ final class CalendarModule: NotchModule, ObservableObject {
     let order = 20
 
     let service = CalendarService()
+    let dismissals = MeetingDismissalStore.shared
     private let mic = MicController()
     private let audioOutput = AudioOutputController()
 
@@ -109,14 +109,15 @@ final class CalendarModule: NotchModule, ObservableObject {
         restoreMicIfMeetingEnded(active: active)
 
         let compactKey: String?
-        if let active {
-            compactKey = "mtg:" + active.id
+        if active != nil {
+            compactKey = nil
         } else if let event = service.relevantEvent(within: leadWindow, asOf: now) {
             compactKey = "soon:" + event.id
         } else {
             compactKey = nil
         }
         let expanded = service.isDenied || active != nil || !service.events.isEmpty
+            || !dismissals.dismissed.isEmpty
 
         if compactKey != lastCompactKey || expanded != hadExpanded {
             lastCompactKey = compactKey
@@ -155,13 +156,29 @@ final class CalendarModule: NotchModule, ObservableObject {
         weMuted = mic.isMuted
     }
 
+    private func dismiss(_ event: CalendarEvent) {
+        dismissals.dismiss(
+            id: event.id,
+            title: event.title,
+            start: event.start,
+            end: event.end
+        )
+        service.reload()
+        syncContributions()
+    }
+
+    private func restore(_ id: String) {
+        dismissals.restore(id)
+        service.reload()
+        syncContributions()
+    }
+
     // MARK: UI contributions
 
     func compactLeading() -> AnyView? {
-        // In a meeting: show mute state. Otherwise: the countdown to the next meeting.
-        if let active = service.activeMeeting() {
-            return AnyView(MeetingMicChip(mic: mic, event: active))
-        }
+        // Once a meeting begins, macOS already surfaces microphone activity in the menu bar.
+        // Keep the pill quiet and reserve the mic state/control for the expanded Meeting HUD.
+        if service.activeMeeting() != nil { return nil }
         if let event = service.relevantEvent(within: leadWindow) {
             return AnyView(CalendarCompactView(event: event))
         }
@@ -172,13 +189,17 @@ final class CalendarModule: NotchModule, ObservableObject {
         if service.isDenied {
             return AnyView(CalendarAccessPromptView())
         }
-        guard service.activeMeeting() != nil || !service.events.isEmpty else { return nil }
+        guard service.activeMeeting() != nil || !service.events.isEmpty
+            || !dismissals.dismissed.isEmpty else { return nil }
         return AnyView(CalendarSection(
             service: service,
+            dismissals: dismissals,
             mic: mic,
             audioOutput: audioOutput,
             onJoin: { [weak self] url in self?.join(url) },
-            onToggleMute: { [weak self] in self?.toggleMute() }
+            onToggleMute: { [weak self] in self?.toggleMute() },
+            onDismiss: { [weak self] event in self?.dismiss(event) },
+            onRestore: { [weak self] id in self?.restore(id) }
         ))
     }
 }

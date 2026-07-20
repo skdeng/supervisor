@@ -1,20 +1,5 @@
 import SwiftUI
 
-/// Compact leading contribution during Meeting Mode: a mic glyph that reflects the system mute
-/// state at a glance — green `mic.fill` when live, red `mic.slash.fill` when muted — so you can
-/// always see whether you're muted without opening anything.
-struct MeetingMicChip: View {
-    @ObservedObject var mic: MicController
-    let event: CalendarEvent
-
-    var body: some View {
-        Image(systemName: mic.isMuted ? "mic.slash.fill" : "mic.fill")
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(mic.isMuted ? .red : .green)
-            .fixedSize()
-    }
-}
-
 /// The expanded Meeting Mode card shown while a meeting is in progress: a live elapsed timer, a
 /// global mic-mute toggle, a quick audio-output switcher, and a Join button. Surfaces only when
 /// the ongoing event has a detected join link.
@@ -24,6 +9,7 @@ struct MeetingHUDView: View {
     @ObservedObject var audioOutput: AudioOutputController
     let onJoin: (URL) -> Void
     let onToggleMute: () -> Void
+    let onDismiss: () -> Void
 
     @State private var showOutputPicker = false
 
@@ -36,7 +22,7 @@ struct MeetingHUDView: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .padding(14)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .liquidGlass(cornerRadius: NotchTheme.surfaceCornerRadius)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showOutputPicker)
@@ -48,7 +34,7 @@ struct MeetingHUDView: View {
         TimelineView(.periodic(from: meeting.start, by: 1)) { context in
             HStack(spacing: 8) {
                 Circle()
-                    .fill(.green)
+                    .fill(NotchTheme.brandGradient)
                     .frame(width: 7, height: 7)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(meeting.title)
@@ -66,6 +52,17 @@ struct MeetingHUDView: View {
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(NotchTheme.secondaryForeground)
                 }
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Color.white.opacity(0.10)))
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .notchTooltip("Dismiss meeting")
+                .help("Dismiss meeting")
             }
         }
     }
@@ -114,7 +111,7 @@ struct MeetingHUDView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(Capsule().fill(Color.green))
+            .background(Capsule().fill(NotchTheme.brandGradient))
             .foregroundStyle(.white)
             .contentShape(Capsule())
         }
@@ -146,10 +143,13 @@ struct MeetingHUDView: View {
 /// HUD appears/disappears and the agenda stays live as the clock advances.
 struct CalendarSection: View {
     @ObservedObject var service: CalendarService
+    @ObservedObject var dismissals: MeetingDismissalStore
     @ObservedObject var mic: MicController
     @ObservedObject var audioOutput: AudioOutputController
     let onJoin: (URL) -> Void
     let onToggleMute: () -> Void
+    let onDismiss: (CalendarEvent) -> Void
+    let onRestore: (String) -> Void
 
     var body: some View {
         TimelineView(.periodic(from: Date(), by: 5)) { context in
@@ -162,11 +162,18 @@ struct CalendarSection: View {
                         mic: mic,
                         audioOutput: audioOutput,
                         onJoin: onJoin,
-                        onToggleMute: onToggleMute
+                        onToggleMute: onToggleMute,
+                        onDismiss: { onDismiss(active) }
                     )
                 }
-                if !upcoming.isEmpty {
-                    CalendarAgendaView(events: upcoming, onJoin: onJoin)
+                if !upcoming.isEmpty || !dismissals.dismissed.isEmpty {
+                    CalendarAgendaView(
+                        events: upcoming,
+                        dismissals: dismissals,
+                        onJoin: onJoin,
+                        onDismiss: onDismiss,
+                        onRestore: onRestore
+                    )
                 }
             }
         }

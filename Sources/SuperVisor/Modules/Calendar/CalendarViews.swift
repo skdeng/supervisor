@@ -46,7 +46,12 @@ struct CalendarCompactView: View {
 /// "starts in / now" line, and a one-tap Join button when a meeting link was detected.
 struct CalendarAgendaView: View {
     let events: [CalendarEvent]
+    @ObservedObject var dismissals: MeetingDismissalStore
     let onJoin: (URL) -> Void
+    let onDismiss: (CalendarEvent) -> Void
+    let onRestore: (String) -> Void
+
+    @State private var showsDismissed = false
 
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -60,8 +65,11 @@ struct CalendarAgendaView: View {
             ForEach(events) { event in
                 eventRow(event)
             }
+            if !dismissals.dismissed.isEmpty {
+                dismissedFooter
+            }
         }
-        .padding(14)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .liquidGlass(cornerRadius: NotchTheme.surfaceCornerRadius)
     }
@@ -99,29 +107,96 @@ struct CalendarAgendaView: View {
                 Spacer(minLength: 6)
 
                 if let url = event.joinURL {
-                    joinButton(url: url, ongoing: ongoing)
+                    joinButton(url: url)
+                }
+                dismissButton(event)
+            }
+        }
+    }
+
+    private func joinButton(url: URL) -> some View {
+        Button {
+            onJoin(url)
+        } label: {
+            Image(systemName: "video.fill")
+                .font(.system(size: 11, weight: .bold))
+                .frame(width: 30, height: 24)
+                .background(Capsule().fill(Color.white.opacity(0.10)))
+                .foregroundStyle(NotchTheme.primaryForeground)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .notchTooltip("Join")
+        .help("Join")
+    }
+
+    private func dismissButton(_ event: CalendarEvent) -> some View {
+        Button {
+            onDismiss(event)
+        } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 10, weight: .bold))
+                .frame(width: 24, height: 24)
+                .background(Capsule().fill(Color.white.opacity(0.10)))
+                .foregroundStyle(NotchTheme.secondaryForeground)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .notchTooltip("Dismiss")
+        .help("Dismiss")
+    }
+
+    private var dismissedFooter: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                showsDismissed.toggle()
+            } label: {
+                HStack(spacing: 5) {
+                    Text("\(dismissals.dismissed.count) dismissed")
+                        .font(.caption)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                    Image(systemName: showsDismissed ? "chevron.up" : "chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if showsDismissed {
+                ForEach(dismissals.dismissed) { entry in
+                    HStack(spacing: 8) {
+                        Text(entry.title)
+                            .font(.caption)
+                            .foregroundStyle(NotchTheme.secondaryForeground)
+                            .strikethrough()
+                            .lineLimit(1)
+                        Text(Self.timeFormatter.string(from: entry.start))
+                            .font(.caption2)
+                            .foregroundStyle(NotchTheme.secondaryForeground)
+                        Spacer(minLength: 6)
+                        restoreButton(entry.id)
+                    }
                 }
             }
         }
     }
 
-    private func joinButton(url: URL, ongoing: Bool) -> some View {
+    private func restoreButton(_ id: String) -> some View {
         Button {
-            onJoin(url)
+            onRestore(id)
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "video.fill")
-                    .font(.system(size: 10, weight: .bold))
-                Text("Join")
-                    .font(.system(size: 11, weight: .semibold))
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Capsule().fill(ongoing ? Color.green : Color.accentColor))
-            .foregroundStyle(.white)
-            .contentShape(Capsule())
+            Image(systemName: "arrow.uturn.backward")
+                .font(.system(size: 10, weight: .bold))
+                .frame(width: 24, height: 24)
+                .background(Capsule().fill(Color.white.opacity(0.10)))
+                .foregroundStyle(NotchTheme.secondaryForeground)
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .notchTooltip("Restore")
+        .help("Restore")
     }
 
     private func subtitle(_ event: CalendarEvent, ongoing: Bool, now: Date) -> String {
@@ -165,9 +240,9 @@ struct CalendarAccessPromptView: View {
             }
             .buttonStyle(.plain)
             .font(.caption.weight(.semibold))
-            .foregroundStyle(Color.accentColor)
+            .foregroundStyle(NotchTheme.brandGradient)
         }
-        .padding(14)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .liquidGlass(cornerRadius: NotchTheme.surfaceCornerRadius)
     }
