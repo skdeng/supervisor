@@ -22,9 +22,7 @@ struct MeetingHUDView: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .liquidGlass(cornerRadius: NotchTheme.surfaceCornerRadius)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showOutputPicker)
     }
 

@@ -69,9 +69,7 @@ struct CalendarAgendaView: View {
                 dismissedFooter
             }
         }
-        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .liquidGlass(cornerRadius: NotchTheme.surfaceCornerRadius)
     }
 
     private var header: some View {
@@ -242,8 +240,6 @@ struct CalendarAccessPromptView: View {
             .font(.caption.weight(.semibold))
             .foregroundStyle(NotchTheme.brandGradient)
         }
-        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .liquidGlass(cornerRadius: NotchTheme.surfaceCornerRadius)
     }
 }

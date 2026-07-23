@@ -34,9 +34,7 @@ struct FileShelfExpandedView: View {
                     .transition(.opacity)
             }
         }
-        .padding(12)
         .opacity(dropTargeting ? 0.72 : 1)
-        .liquidGlass(cornerRadius: NotchTheme.surfaceCornerRadius)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay { targetingOverlay }
         .animation(.snappy(duration: 0.15), value: dropTargeting)

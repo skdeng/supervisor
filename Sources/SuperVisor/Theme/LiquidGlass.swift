@@ -33,8 +33,9 @@ public enum NotchTheme {
     public static let compactSidePadding: CGFloat = 8
     /// Padding inside the expanded panel.
     public static let panelPadding: CGFloat = 16
-    /// Vertical spacing between stacked module sections in the expanded panel.
-    public static let sectionSpacing: CGFloat = 12
+    /// Vertical spacing between stacked module sections in the expanded panel. Sections carry
+    /// no card chrome of their own, so this gap alone is what separates them visually.
+    public static let sectionSpacing: CGFloat = 20
 
     // MARK: Colors
 
