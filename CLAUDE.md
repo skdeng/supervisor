@@ -34,8 +34,9 @@ A single morphing surface, driven by a small state machine, that modules feed co
 
 - **`Core/NotchModule.swift`** — the plugin contract. `@MainActor public protocol NotchModule`:
   `moduleID` / `displayName` / `order` (lower renders earlier in the expanded panel),
-  `activate(_:)` / `deactivate()`, and three optional UI surfaces — `compactLeading()`,
-  `compactTrailing()`, `expandedSection()` (each returns `AnyView?`, default `nil`). Modules are
+  `activate(_:)` / `deactivate()`, and four optional UI surfaces — `compactLeading()`,
+  `compactTrailing()`, `expandedSection()`, and `peekBanner()` (a below-the-notch banner during a
+  peek). Each returns `AnyView?` and defaults to `nil`. Modules are
   typically `final class … : NotchModule, ObservableObject`; the `AnyView`s they return wrap an
   `@ObservedObject` of themselves, so a module's own `@Published` changes re-render only its
   subtree. Modules never reference each other.
@@ -45,8 +46,8 @@ A single morphing surface, driven by a small state machine, that modules feed co
   **appears or disappears** (which changes pill size/layout) — internal value changes inside an
   already-shown compact view update automatically via `@ObservedObject`.
 - **`App/ModuleRegistry.swift`** — THE single place modules are wired in (`allModules()`).
-  Array order is irrelevant; modules sort by `order`. Currently lists 8 modules
-  (Media, Calendar, Reminders, FileShelf, Flow, Battery, Claude Usage, GPT Usage).
+  Array order is irrelevant; modules sort by `order`. Currently lists 7 modules
+  (Media, Calendar, Reminders, FileShelf, Flow, Battery, AI Usage).
 - **`Core/NotchEngine.swift`** — owns the window, geometry, hover detection, the enabled-module
   list, and the state machine: `NotchState` is `.idle` / `.compact` / `.expanded` (peek is a
   transient `.compact`). Builds the `NotchContext`, filters modules by `SettingsStore`, activates
@@ -183,7 +184,7 @@ Each lives self-contained in `Modules/<Name>/` (model + system observers + Swift
 Modules that surface a **generic capability** carry a **`<Feature>Visor`** brand name in their
 `displayName` (MusicVisor, TaskVisor) — propose one in that style for any new module.
 Name a module literally only when its point is *whose* data it shows rather than *what* it does
-(Claude Usage), or when the plain noun already is the feature (Calendar, Battery, FileShelf). The folder
+(AI Usage), or when the plain noun already is the feature (Calendar, Battery, FileShelf). The folder
 names below are the code paths.
 
 - **Media → "MusicVisor"** (`Modules/Media`) — system now-playing surface. Compact: album-art
@@ -243,8 +244,11 @@ names below are the code paths.
   dismissed meetings and all-day events do not defer nudges.
   Breaks are forgiving: ≥180 s away is a break and silently resets the clock, whether nudged or
   spontaneous — someone who naturally breaks never hears from it; a nudged break earns a brief
-  "recharged" compact ack on return. Compact: a brand-gradient arc that fades in over the final 10
-  minutes and fills toward the nudge, a break countdown ring, or the ack — nothing otherwise.
+  "recharged" compact ack on return. The nudge presents as a banner extending below the notch with
+  the heads-down message and a one-tap Take action, while the compact ring shows only the arc and
+  elapsed time; the banner holds (an indefinite peek, `requestPeek(.infinity)`) until Take /
+  Snooze / Skip or a spontaneous break resolves it. Compact: a brand-gradient arc that fades in over the final 10 minutes and fills
+  toward the nudge, a break countdown ring, or the ack — nothing otherwise.
   Expanded: a ring + honest "1h 04m heads-down" total, Take 5 / Snooze 10 / Skip, and a *today*
   rhythm strip of the session-local work/break segments. Timer discipline per the idle-CPU rule: a
   single rearming deadline task fires only at the next real boundary (60 s sampler, tightening to
@@ -254,29 +258,32 @@ names below are the code paths.
 - **Battery** (`Modules/Battery`) — power/charging status, time remaining, and connected-device
   (Bluetooth accessory) battery; peeks on plug/unplug and low battery. (`PowerSourceMonitor`,
   `BluetoothMonitor`.)
-- **Usage → "Claude Usage"** (`Modules/Usage`) — Claude Code plan-quota runway as one ticker row at
-  the bottom of the sheet (`5h 62% · 7d 34% ↻ 4:30 PM`, colored by headroom: green < 70 %, amber
-  < 90 %, red past it). No compact/pill presence. Data: `QuotaMonitor` **watches**
-  `~/.claude/agentpace/last-status.json` (the statusline capture the user's Claude Code
-  statusline wrapper rewrites on every refresh) through `FileChangeWatcher` and re-parses only
-  when the mtime actually moves; the `rate_limits` object carries `used_percentage`/`resets_at`
-  per window. The row exists only while Claude Code is actively in use (file fresh within
-  10 min) **and** quota data is recent (30 min TTL) — quota is retained across payloads that
-  omit `rate_limits` (desktop-bridge sessions do; terminal sessions carry it). Payload is
-  parsed defensively per the untrusted-input convention. Freshness is wall-clock-derived, so
-  when Claude Code stops writing, no file event will ever arrive: a **single timer** is armed
-  for the soonest deadline that can still hide the row (and none at all once it is hidden),
-  rather than a periodic tick that exists only to notice the absence of one.
-- **GPTUsage → "GPT Usage"** (`Modules/GPTUsage`) — Codex plan-quota runway with the exact same
-  expanded-only ticker chrome, headroom colors, and reset-time formatting as Claude Usage (shared
-  in `UI/UsageTickerRowView`). `CodexQuotaMonitor` uses a recursive FSEvents watcher over
-  `~/.codex/sessions/` and reads only JSONL mtimes to determine whether Codex is active; it never
-  opens transcript contents or auth files, and sessions crossing midnight or resumed from older
-  date folders remain visible. While active, `CodexRateLimitClient` launches the installed
-  `codex app-server`, performs its initialize handshake, and reads the supported
-  `account/rateLimits/read` snapshot. Codex itself owns authentication and network access. The
-  helper is reused across activity updates, throttled to one request per 5 seconds, and stopped
-  when the same 10-minute activity window expires. Quota freshness uses the same 30-minute TTL.
+- **Usage → "AI Usage"** (`Modules/Usage`) — Claude Code and Codex plan-quota runway as two
+  tightly-stacked ticker rows at the bottom of the sheet (`CLAUDE 5h 62% · 7d 34% ↻ 4:30 PM`,
+  colored by headroom: green < 70 %, amber < 90 %, red past it; chrome shared in
+  `UI/UsageTickerRowView`). No compact/pill presence. One module (`AIUsageModule`) owns both
+  monitors; each row gates on its own product's activity, and the section exists only while at
+  least one row does.
+  - **Claude row:** `QuotaMonitor` **watches** `~/.claude/agentpace/last-status.json` (the
+    statusline capture the user's Claude Code statusline wrapper rewrites on every refresh)
+    through `FileChangeWatcher` and re-parses only when the mtime actually moves; the
+    `rate_limits` object carries `used_percentage`/`resets_at` per window. The row exists only
+    while Claude Code is actively in use (file fresh within 10 min) **and** quota data is
+    recent (30 min TTL) — quota is retained across payloads that omit `rate_limits`
+    (desktop-bridge sessions do; terminal sessions carry it). Payload is parsed defensively per
+    the untrusted-input convention. Freshness is wall-clock-derived, so when Claude Code stops
+    writing, no file event will ever arrive: a **single timer** is armed for the soonest
+    deadline that can still hide the row (and none at all once it is hidden), rather than a
+    periodic tick that exists only to notice the absence of one.
+  - **GPT row:** `CodexQuotaMonitor` uses a recursive FSEvents watcher over
+    `~/.codex/sessions/` and reads only JSONL mtimes to determine whether Codex is active; it
+    never opens transcript contents or auth files, and sessions crossing midnight or resumed
+    from older date folders remain visible. While active, `CodexRateLimitClient` launches the
+    installed `codex app-server`, performs its initialize handshake, and reads the supported
+    `account/rateLimits/read` snapshot. Codex itself owns authentication and network access.
+    The helper is reused across activity updates, throttled to one request per 5 seconds, and
+    stopped when the same 10-minute activity window expires. Quota freshness uses the same
+    30-minute TTL.
 
 **`Modules/SystemHUD/`** (volume / brightness / keyboard-backlight HUD — `VolumeController`,
 `BrightnessController`, `KeyboardBacklightController`, `MediaKeyMonitor`) is present but **NOT wired
