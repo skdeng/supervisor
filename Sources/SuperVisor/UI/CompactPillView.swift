@@ -104,7 +104,7 @@ private struct CompactEntry: Identifiable {
 /// `withAnimation` so the pill grows/shrinks smoothly when content appears, changes, or
 /// disappears: the measured width is set off-cycle by the GeometryReader, so an ancestor
 /// `.animation(value:)` doesn't reliably catch it — an explicit animation transaction does.
-private struct WidthReader: View {
+struct WidthReader: View {
     @Binding var width: CGFloat
 
     var body: some View {

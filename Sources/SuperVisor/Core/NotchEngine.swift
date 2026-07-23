@@ -41,7 +41,15 @@ public final class NotchEngine: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
     private var peekTask: Task<Void, Never>?
     /// True while a peek is forcing the compact surface to show even without live content.
-    @Published public private(set) var isPeeking: Bool = false
+    /// The hit-test and hover rects extend over a peek banner, and a peek can begin or end
+    /// without a state transition (already compact), so recompute them on every flip here
+    /// rather than relying on `transition(to:)` — which short-circuits when the state holds.
+    @Published public private(set) var isPeeking: Bool = false {
+        didSet {
+            guard oldValue != isPeeking else { return }
+            updateInteractivity()
+        }
+    }
     /// True while the cursor is hovering the notch. Drives a subtle grow affordance; the
     /// sheet itself only opens on a click.
     @Published public private(set) var isHovered: Bool = false
@@ -65,6 +73,8 @@ public final class NotchEngine: ObservableObject {
     /// Fixed width of the expanded panel that drops below the notch. Content is laid out to
     /// this width, so the sheet never scrolls horizontally.
     public let expandedPanelWidth: CGFloat = 420
+    /// Fixed height of a transient peek banner below the notch cutout.
+    public let peekBannerHeight: CGFloat = 44
     /// Measured natural height of the expanded sheet's content (excludes the notch strip the
     /// sheet grows out of). Reported by the panel view so the morphing surface sizes to fit its
     /// content exactly — the sheet never scrolls vertically. Clamped to the bounds below.
@@ -204,17 +214,23 @@ public final class NotchEngine: ObservableObject {
     }
 
     /// Briefly present the compact surface, then auto-collapse. Never steals the expanded
-    /// panel: if already expanded, a peek is a no-op.
+    /// panel: if already expanded, a peek is a no-op. A non-finite duration peeks
+    /// indefinitely — the surface holds until the peeking module resolves it
+    /// (`requestCollapse()` / `requestExpand()`) or the user opens the sheet.
     public func requestPeek(_ seconds: TimeInterval) {
         guard state != .expanded else { return }
         peekTask?.cancel()
+        peekTask = nil
         isPeeking = true
         transition(to: .compact)
+        guard seconds.isFinite else { return }
         peekTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
             guard let self, !Task.isCancelled else { return }
             self.isPeeking = false
-            self.transition(to: self.resolvedRestingState())
+            if self.state != .expanded {
+                self.transition(to: self.resolvedRestingState())
+            }
         }
     }
 
@@ -263,6 +279,8 @@ public final class NotchEngine: ObservableObject {
         if state == .expanded {
             transition(to: resolvedRestingState())
         } else {
+            peekTask?.cancel()
+            isPeeking = false
             transition(to: .expanded)
         }
     }
@@ -331,6 +349,16 @@ public final class NotchEngine: ObservableObject {
         return false
     }
 
+    /// The first banner supplied by an active module, in module display order.
+    public func activePeekBanner() -> AnyView? {
+        modules.lazy.compactMap { $0.peekBanner() }.first
+    }
+
+    /// Whether the current peek contributes a below-notch banner surface.
+    public var hasActivePeekBanner: Bool {
+        isPeeking && activePeekBanner() != nil
+    }
+
     private func transition(to newState: NotchState) {
         guard newState != state else { return }
         // The window is a constant-size canvas; only the SwiftUI content morphs, so the
@@ -392,7 +420,9 @@ public final class NotchEngine: ObservableObject {
             height = notchH + expandedSheetHeight + 12
         case .compact:
             width = geo.notchWidth * growth + 180
-            height = notchH * growth + 16
+            // Banner controls sit below the compact pill, so the hit region must cover that
+            // fixed extension as well as a small aiming margin beneath it.
+            height = notchH * growth + 16 + (hasActivePeekBanner ? peekBannerHeight + 8 : 0)
         case .idle:
             width = geo.notchWidth * growth + 28
             height = notchH * growth + 14
@@ -446,7 +476,11 @@ public final class NotchEngine: ObservableObject {
             let pad: CGFloat = hovered ? 40 : 24
             let growth = hoverGrowth(hovered: hovered, state: state, geometry: geo)
             let width = geo.notchWidth * growth + 2 * pad
-            let minY = top - (hovered ? geo.pillTopDrop : 0) - notchH * growth - (hovered ? 22 : 12)
+            let bannerExtension = hasActivePeekBanner ? peekBannerHeight + 8 : 0
+            // Keep the hover zone over the banner so moving down to its action does not dismiss
+            // or detach the active surface.
+            let minY = top - (hovered ? geo.pillTopDrop : 0) - notchH * growth
+                - (hovered ? 22 : 12) - bannerExtension
             return CGRect(x: geo.centerX - width / 2, y: minY, width: width, height: maxY - minY)
         case .expanded:
             // Exactly the open panel bounds plus a small margin.

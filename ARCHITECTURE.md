@@ -51,6 +51,8 @@ Modules can call `requestPeek(seconds)` to briefly surface a transient compact u
 without a full expansion — e.g. "AirPods connected", "Now charging", "Volume". The
 engine shows the relevant compact content for the requested duration, then auto-collapses
 back toward idle. Peek never steals the expanded panel; it is a lightweight compact nudge.
+A module that also implements `peekBanner()` presents its transient update as a banner
+extending below the notch instead of widening the pill.
 
 ### Liquid Glass theming
 All chrome — the pill body, the expanded panel, separators, and module surfaces — is
@@ -83,8 +85,10 @@ nothing about any specific feature.
 - `compactLeading() -> AnyView?` — content left of the notch in the collapsed pill.
 - `compactTrailing() -> AnyView?` — content right of the notch in the collapsed pill.
 - `expandedSection() -> AnyView?` — the module's section in the expanded panel.
+- `peekBanner() -> AnyView?` — banner below the notch while a peek this module raised is active;
+  nil falls back to the widened compact pill.
 
-All three default to `nil` (contribute nothing) via the protocol extension, so a module
+All four default to `nil` (contribute nothing) via the protocol extension, so a module
 implements only the surfaces it needs.
 
 ### Reacting via ObservableObject
@@ -116,6 +120,8 @@ pill's size and layout. For that, call `context.setNeedsCompactRefresh()`.
 - `requestExpand()` — force the notch open.
 - `requestCollapse()` — force it closed.
 - `requestPeek(seconds:)` — briefly present a transient compact update, then auto-collapse.
+  A non-finite duration peeks indefinitely: the surface holds until the module resolves it
+  (`requestCollapse()` / `requestExpand()`) or the user opens the sheet.
 - `setNeedsCompactRefresh()` — tell the pill to re-lay-out because a compact contribution
   appeared/disappeared.
 

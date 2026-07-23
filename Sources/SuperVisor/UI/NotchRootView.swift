@@ -22,6 +22,7 @@ struct NotchRootView: View {
     /// the cutout-centering offset.
     @State private var leadingWidth: CGFloat = 0
     @State private var trailingWidth: CGFloat = 0
+    @State private var peekBannerWidth: CGFloat = 0
 
     /// Debug: render the whole surface bright red so its exact bounds are visible. It overrides
     /// the glass material too, which is otherwise hard to pin down against a busy desktop.
@@ -32,6 +33,11 @@ struct NotchRootView: View {
     private var notchW: CGFloat { max(geo.notchWidth, 80) }
     private var notchH: CGFloat { max(geo.notchHeight, 32) }
     private var isExpanded: Bool { engine.state == .expanded }
+    private var peekBannerView: AnyView? {
+        guard !isExpanded, engine.isPeeking else { return nil }
+        return engine.activePeekBanner()
+    }
+    private var bannerActive: Bool { peekBannerView != nil }
 
     /// How far the surface has lifted off the screen's top edge: 0 while it is the notch, 1 once
     /// it has become a free-floating pill. A screen with a physical cutout never lifts — the
@@ -60,10 +66,17 @@ struct NotchRootView: View {
     private var compactWidth: CGFloat { notchW + 2 * sideWidth }
     /// The morphing surface's animated size. Pill and sheet are both centered on the notch. The
     /// frame grows by the drop so the body keeps its height as the shape lifts inside it.
-    private var shapeWidth: CGFloat { isExpanded ? panelW : compactWidth }
-    private var shapeHeight: CGFloat { (isExpanded ? notchH + panelH : notchH) + topDrop }
+    private var shapeWidth: CGFloat {
+        isExpanded ? panelW : (bannerActive ? max(compactWidth, peekBannerWidth + 28) : compactWidth)
+    }
+    private var shapeHeight: CGFloat {
+        (isExpanded ? notchH + panelH : notchH + (bannerActive ? engine.peekBannerHeight : 0))
+            + topDrop
+    }
     /// Tight like a pill when collapsed, rounder as the sheet opens.
-    private var radius: CGFloat { isExpanded ? NotchTheme.panelCornerRadius : NotchTheme.pillCornerRadius }
+    private var radius: CGFloat {
+        (isExpanded || bannerActive) ? NotchTheme.panelCornerRadius : NotchTheme.pillCornerRadius
+    }
 
     /// Grow affordance while hovering, before a click opens the sheet.
     private var hoverScale: CGFloat {
@@ -131,6 +144,9 @@ struct NotchRootView: View {
             // original size with no overshoot — a spring here would dip below the resting size
             // and momentarily shrink the surface inside the physical notch.
             .animation(.easeOut(duration: 0.18), value: engine.isHovered)
+            // The banner grows out below the cutout without making the compact pill flare
+            // sideways, and retracts with the same settled spring when its content clears.
+            .animation(.spring(response: 0.34, dampingFraction: 0.9), value: bannerActive)
             // Smoothly resize the open sheet when its content (and thus measured height)
             // changes — e.g. a section appears/disappears or a file drag swaps the contents.
             .animation(.spring(response: 0.34, dampingFraction: 0.9), value: engine.expandedSheetHeight)
@@ -193,6 +209,16 @@ struct NotchRootView: View {
             .frame(height: notchH)
             .offset(y: topDrop)
             .opacity(isExpanded ? 0 : 1)
+
+            if let peekBannerView {
+                peekBannerView
+                    .fixedSize()
+                    .background(WidthReader(width: $peekBannerWidth))
+                    .frame(height: engine.peekBannerHeight)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, notchH + topDrop)
+                    .opacity(isExpanded ? 0 : 1)
+            }
 
             // The sheet's content grows + fades with the surface (it inherits the body spring,
             // and scales from the notch at the top), so it expands out of the notch rather than

@@ -25,6 +25,10 @@ public protocol NotchModule: AnyObject {
 
     /// Section shown in the EXPANDED panel. nil contributes nothing.
     func expandedSection() -> AnyView?
+
+    /// Banner shown BELOW the notch while a peek this module raised is active. nil falls
+    /// back to the widened compact pill.
+    func peekBanner() -> AnyView?
 }
 
 public extension NotchModule {
@@ -32,4 +36,5 @@ public extension NotchModule {
     func compactLeading() -> AnyView? { nil }
     func compactTrailing() -> AnyView? { nil }
     func expandedSection() -> AnyView? { nil }
+    func peekBanner() -> AnyView? { nil }
 }
