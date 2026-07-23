@@ -5,7 +5,7 @@ import SwiftUI
 final class FlowModule: NotchModule {
     let moduleID = "flow"
     let displayName = "FlowVisor"
-    let order = 45
+    let order = 100
 
     private let tracker = FlowTracker()
 
@@ -25,5 +25,10 @@ final class FlowModule: NotchModule {
     func expandedSection() -> AnyView? {
         guard tracker.hasExpandedPresentation else { return nil }
         return AnyView(FlowExpandedView(tracker: tracker))
+    }
+
+    func peekBanner() -> AnyView? {
+        guard tracker.nudgeMessage != nil else { return nil }
+        return AnyView(FlowPeekBannerView(tracker: tracker))
     }
 }

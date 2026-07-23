@@ -17,7 +17,7 @@ struct FlowSegment: Identifiable, Equatable {
 }
 
 enum FlowCompactPresentation: Equatable {
-    case finalStretch(progress: Double, elapsed: TimeInterval, message: String?)
+    case finalStretch(progress: Double, elapsed: TimeInterval)
     case breakCountdown(start: Date, until: Date)
     case recharged
 }
@@ -82,6 +82,7 @@ final class FlowTracker: ObservableObject {
     private var lastIdleSampleAt: Date?
     private var idleSessionFloor: Date?
     private var compactPresence = false
+    private var bannerPresence = false
     private var dayAnchor: Date
 
     init(settings: SettingsStore = .shared) {
@@ -103,8 +104,7 @@ final class FlowTracker: ObservableObject {
         let progress = min(1, max(0, (currentWorkDuration - stretchStart) / Self.finalStretchDuration))
         return .finalStretch(
             progress: progress,
-            elapsed: currentWorkDuration,
-            message: nudgeMessage
+            elapsed: currentWorkDuration
         )
     }
 
@@ -164,20 +164,6 @@ final class FlowTracker: ObservableObject {
         return currentWorkDuration >= stretchStart
     }
 
-    /// Whole minutes until the next nudge (honouring snooze/skip deferrals), or nil once the nudge
-    /// has fired or no session is running.
-    var minutesUntilNudge: Int? {
-        let now = Date()
-        switch phase {
-        case let .working(session), let .nudgePending(session, _):
-            let remaining = effectiveNudgeDeadline(for: session, at: now).timeIntervalSince(now)
-            let minutes = Int((remaining / 60).rounded())
-            return minutes > 0 ? minutes : nil
-        case .idle, .nudged, .resting, .onBreak:
-            return nil
-        }
-    }
-
     var breakLengthMinutes: Int {
         settings.flowBreakLengthMinutes
     }
@@ -193,6 +179,7 @@ final class FlowTracker: ObservableObject {
         isActive = true
         self.context = context
         compactPresence = false
+        bannerPresence = false
         dayAnchor = Calendar.current.startOfDay(for: Date())
         installSystemObservers()
         observeSettings()
@@ -216,9 +203,16 @@ final class FlowTracker: ObservableObject {
         isSleeping = false
         isScreenLocked = false
         isActive = false
-        if compactPresence {
+        if compactPresence || bannerPresence {
+            let hadBanner = bannerPresence
             compactPresence = false
+            bannerPresence = false
             context?.setNeedsCompactRefresh()
+            // Deactivating mid-nudge abandons an indefinite peek; release it so the surface
+            // is not left pinned to the compact state.
+            if hadBanner {
+                context?.requestCollapse()
+            }
         }
         self.context = nil
     }
@@ -552,7 +546,7 @@ final class FlowTracker: ObservableObject {
                 let next = nextRepeekDate(after: nextRepeek, relativeTo: now)
                 let updatedMessage = makeNudgeMessage(elapsed: currentWorkDuration, repeated: true)
                 phase = .nudged(session, nextRepeek: next, message: updatedMessage)
-                context?.requestPeek(6)
+                context?.requestPeek(.infinity)
             } else {
                 phase = .nudged(session, nextRepeek: nextRepeek, message: message)
             }
@@ -591,7 +585,9 @@ final class FlowTracker: ObservableObject {
             nextRepeek: now.addingTimeInterval(Self.repeekDuration),
             message: message
         )
-        context?.requestPeek(6)
+        // The nudge banner holds until the user acts on it or a real break resolves it;
+        // reconcileCompactPresence ends the peek when the banner clears.
+        context?.requestPeek(.infinity)
     }
 
     private func enterRestingIfNeeded(at breakStart: Date) {
@@ -801,10 +797,18 @@ final class FlowTracker: ObservableObject {
     }
 
     private func reconcileCompactPresence() {
-        let isPresent = compactPresentation != nil
-        guard isPresent != compactPresence else { return }
-        compactPresence = isPresent
+        let compactPresent = compactPresentation != nil
+        let bannerPresent = nudgeMessage != nil
+        guard compactPresent != compactPresence || bannerPresent != bannerPresence else { return }
+        let bannerCleared = bannerPresence && !bannerPresent
+        compactPresence = compactPresent
+        bannerPresence = bannerPresent
         context?.setNeedsCompactRefresh()
+        // The nudge banner peeks indefinitely, so the peek must be released here — on Take /
+        // Snooze / Skip or a spontaneous break — or the surface would stay pinned open forever.
+        if bannerCleared {
+            context?.requestCollapse()
+        }
     }
 
     private func armNextDeadline() {

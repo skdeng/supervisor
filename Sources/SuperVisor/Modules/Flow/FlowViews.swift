@@ -6,8 +6,8 @@ struct FlowCompactView: View {
     var body: some View {
         Group {
             switch tracker.compactPresentation {
-            case let .finalStretch(progress, elapsed, message):
-                finalStretch(progress: progress, elapsed: elapsed, message: message)
+            case let .finalStretch(progress, elapsed):
+                finalStretch(progress: progress, elapsed: elapsed)
             case let .breakCountdown(start, until):
                 compactCountdown(start: start, until: until)
             case .recharged:
@@ -21,8 +21,7 @@ struct FlowCompactView: View {
 
     private func finalStretch(
         progress: Double,
-        elapsed: TimeInterval,
-        message: String?
+        elapsed: TimeInterval
     ) -> some View {
         HStack(spacing: 5) {
             ZStack {
@@ -38,7 +37,7 @@ struct FlowCompactView: View {
             }
             .frame(width: 17, height: 17)
 
-            Text(message ?? Self.compactDuration(elapsed))
+            Text(Self.compactDuration(elapsed))
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .lineLimit(1)
@@ -83,19 +82,43 @@ struct FlowCompactView: View {
     }
 }
 
+struct FlowPeekBannerView: View {
+    @ObservedObject var tracker: FlowTracker
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "bolt.fill")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(NotchTheme.brandGradient)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Color.white.opacity(0.08)))
+
+            Text(tracker.nudgeMessage ?? "")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(NotchTheme.primaryForeground)
+                .lineLimit(1)
+
+            FlowCapsuleButton(
+                title: "Take \(tracker.breakLengthMinutes)",
+                tooltip: "Start a \(tracker.breakLengthMinutes)-minute break",
+                action: tracker.takeBreak
+            )
+        }
+        .padding(.horizontal, 14)
+    }
+}
+
 struct FlowExpandedView: View {
     @ObservedObject var tracker: FlowTracker
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            header
-
             if let window = tracker.breakWindow {
                 breakContent(window)
             } else if tracker.isAcknowledgingWithoutSession {
                 rechargedContent
-            } else {
-                sessionContent
+            } else if tracker.showsBreakActions {
+                breakActions
             }
 
             let timeline = tracker.timelineSegments
@@ -103,70 +126,26 @@ struct FlowExpandedView: View {
                 FlowRhythmStrip(segments: timeline)
             }
         }
-        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .liquidGlass(cornerRadius: NotchTheme.surfaceCornerRadius)
     }
 
-    private var header: some View {
+    private var breakActions: some View {
         HStack(spacing: 8) {
-            Image(systemName: "brain.head.profile")
-                .font(.system(size: 14, weight: .semibold))
-            Text("FlowVisor")
-                .font(.headline)
-            Spacer()
-        }
-        .foregroundStyle(NotchTheme.primaryForeground)
-    }
-
-    private var sessionContent: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Image(systemName: "bolt.fill")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(NotchTheme.brandGradient)
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(Color.white.opacity(0.08)))
-
-                Text("\(Self.headsDownDuration(tracker.currentWorkDuration)) heads-down")
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(NotchTheme.primaryForeground)
-
-                Spacer(minLength: 8)
-
-                if let message = tracker.nudgeMessage {
-                    Text(message)
-                        .font(.caption)
-                        .multilineTextAlignment(.trailing)
-                        .foregroundStyle(NotchTheme.secondaryForeground)
-                } else if let minutes = tracker.minutesUntilNudge {
-                    Text("break in \(minutes)m")
-                        .font(.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(NotchTheme.secondaryForeground)
-                }
-            }
-
-            if tracker.showsBreakActions {
-                HStack(spacing: 8) {
-                    FlowCapsuleButton(
-                        title: "Take \(tracker.breakLengthMinutes)",
-                        tooltip: "Start a \(tracker.breakLengthMinutes)-minute break",
-                        action: tracker.takeBreak
-                    )
-                    FlowCapsuleButton(
-                        title: "Snooze 10",
-                        tooltip: "Delay the next break nudge by 10 minutes",
-                        action: tracker.snooze
-                    )
-                    FlowCapsuleButton(
-                        title: "Skip",
-                        tooltip: "Suppress break nudges for 60 minutes",
-                        action: tracker.skip
-                    )
-                }
-            }
+            FlowCapsuleButton(
+                title: "Take \(tracker.breakLengthMinutes)",
+                tooltip: "Start a \(tracker.breakLengthMinutes)-minute break",
+                action: tracker.takeBreak
+            )
+            FlowCapsuleButton(
+                title: "Snooze 10",
+                tooltip: "Delay the next break nudge by 10 minutes",
+                action: tracker.snooze
+            )
+            FlowCapsuleButton(
+                title: "Skip",
+                tooltip: "Suppress break nudges for 60 minutes",
+                action: tracker.skip
+            )
         }
     }
 
@@ -216,13 +195,6 @@ struct FlowExpandedView: View {
         }
     }
 
-    private static func headsDownDuration(_ duration: TimeInterval) -> String {
-        let minutes = max(0, Int(duration / 60))
-        let hours = minutes / 60
-        let remainder = minutes % 60
-        if hours == 0 { return "\(minutes)m" }
-        return String(format: "%dh %02dm", hours, remainder)
-    }
 }
 
 private struct FlowCapsuleButton: View {
