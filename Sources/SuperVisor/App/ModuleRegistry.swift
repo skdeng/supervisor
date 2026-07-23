@@ -13,8 +13,7 @@ enum ModuleRegistry {
             FileShelfModule(),
             FlowModule(),
             BatteryModule(),
-            UsageModule(),
-            GPTUsageModule(),
+            AIUsageModule(),
         ]
     }
 }

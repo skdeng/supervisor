@@ -1,14 +1,20 @@
 import SwiftUI
 
-/// The Claude usage ticker row: `CLAUDE  5h 62% · 7d 34%  ↻ 4:30 PM`.
-///
-/// The shared ticker owns all layout and styling so GPT Usage has exactly the same UX.
-struct UsageRowView: View {
-    @ObservedObject var monitor: QuotaMonitor
+/// Both product ticker rows stacked tightly, so they read as one AI-usage block rather than
+/// two separate sections. Each row gates on its own monitor's presence: a product whose CLI
+/// has gone quiet drops out while the other stays.
+struct AIUsageSectionView: View {
+    @ObservedObject var claudeMonitor: QuotaMonitor
+    @ObservedObject var codexMonitor: CodexQuotaMonitor
 
     var body: some View {
-        if let quota = monitor.quota, !quota.windows.isEmpty {
-            UsageTickerRowView(productName: "CLAUDE", windows: quota.windows)
+        VStack(alignment: .leading, spacing: 6) {
+            if claudeMonitor.showsRow, let quota = claudeMonitor.quota, !quota.windows.isEmpty {
+                UsageTickerRowView(productName: "CLAUDE", windows: quota.windows)
+            }
+            if codexMonitor.showsRow, let quota = codexMonitor.quota, !quota.windows.isEmpty {
+                UsageTickerRowView(productName: "GPT", windows: quota.windows)
+            }
         }
     }
 }

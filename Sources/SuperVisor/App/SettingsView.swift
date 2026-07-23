@@ -61,8 +61,7 @@ struct SettingsView: View {
         case "fileshelf": "tray.full.fill"
         case "flow": "brain.head.profile"
         case "battery": "battery.100"
-        case "usage": "gauge.with.needle"
-        case "gptUsage": "gauge.with.dots.needle.bottom.50percent"
+        case "aiUsage": "gauge.with.needle"
         default: "puzzlepiece.extension"
         }
     }
