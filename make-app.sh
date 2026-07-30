@@ -39,6 +39,10 @@ cp "$BIN_PATH" "${MACOS_DIR}/${APP_NAME}"
 cp Info.plist "${APP_DIR}/Contents/Info.plist"
 printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"
 
+# Bundled image assets (SwarmVisor's Claude session mark, etc). NSImage renders the SVGs as
+# vectors at runtime, so they stay crisp at any size.
+cp Resources/*.svg "$RES_DIR/"
+
 # Build the entitled now-playing adapter dylib that reads the system now-playing info dict
 # (including artwork bytes) via the private MediaRemote C function. It ships in Resources and
 # is loaded at runtime by /usr/bin/perl (an Apple-signed host that the mediaremoted

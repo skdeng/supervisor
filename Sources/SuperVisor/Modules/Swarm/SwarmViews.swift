@@ -1,0 +1,201 @@
+import AppKit
+import SwiftUI
+
+/// The Claude starburst mark (transparent background), shipped as a vector in the bundle's
+/// resources and resolved once per launch.
+@MainActor
+private let claudeSymbol: NSImage? = {
+    guard let url = Bundle.main.url(forResource: "ClaudeSymbol", withExtension: "svg") else {
+        return nil
+    }
+    return NSImage(contentsOf: url)
+}()
+
+/// Leading identity marker for swarm surfaces: the Claude mark, so an agent-session row reads
+/// as Claude at a glance. Falls back to the module glyph if the bundled asset is missing.
+@MainActor
+private struct ClaudeSessionIcon: View {
+    let size: CGFloat
+
+    var body: some View {
+        if let claudeSymbol {
+            Image(nsImage: claudeSymbol)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: size, height: size)
+        } else {
+            Image(systemName: "person.2.wave.2.fill")
+                .font(.system(size: size * 0.55, weight: .semibold))
+                .foregroundStyle(NotchTheme.brandGradient)
+                .frame(width: size, height: size)
+        }
+    }
+}
+
+@MainActor
+struct SwarmExpandedView: View {
+    @ObservedObject var center: AgentFleetCenter
+    let terminalTeleport: TerminalTeleport
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            if !center.queue.isEmpty {
+                TimelineView(.periodic(from: Date(), by: 30)) { context in
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(center.queue) { entry in
+                            SwarmAttentionRow(
+                                entry: entry,
+                                now: context.date,
+                                terminalTeleport: terminalTeleport,
+                                onDismiss: {
+                                    center.dismiss(entry.sessionPID)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            if center.workingCount > 0 {
+                Text("\(center.workingCount) working")
+                    .font(.caption)
+                    .foregroundStyle(NotchTheme.secondaryForeground)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+@MainActor
+private struct SwarmAttentionRow: View {
+    let entry: AttentionEntry
+    let now: Date
+    let terminalTeleport: TerminalTeleport
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: NotchTheme.rowMarkerGap) {
+            attentionMarker
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(entry.name)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(NotchTheme.primaryForeground)
+                        .lineLimit(1)
+
+                    Text(Self.lastPathComponent(entry.cwd))
+                        .font(.caption)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                        .lineLimit(1)
+                }
+
+                HStack(spacing: 6) {
+                    Text(Self.reasonText(entry.reason))
+                        .font(.caption)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                        .lineLimit(1)
+
+                    Text(Self.age(since: entry.since, now: now))
+                        .font(.caption)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            if let tty = entry.tty {
+                SwarmIconButton(
+                    systemName: "arrow.up.forward.square",
+                    tooltip: "Open in iTerm2"
+                ) {
+                    terminalTeleport.teleport(toTTY: tty)
+                }
+            }
+
+            SwarmIconButton(systemName: "xmark", tooltip: "Dismiss", action: onDismiss)
+        }
+    }
+
+    /// The Claude icon marks the row as an agent session at a glance — the calendar rows in
+    /// the adjacent section lead with plain accent dots. The badge dot in its corner carries
+    /// the state: brand gradient while the session waits for input, green once the turn
+    /// finished.
+    private var attentionMarker: some View {
+        ClaudeSessionIcon(size: NotchTheme.rowMarkerWidth)
+            .overlay(alignment: .bottomTrailing) {
+                Circle()
+                    .fill(statusStyle)
+                    .frame(width: 7, height: 7)
+                    .overlay(Circle().strokeBorder(NotchTheme.notchBlack, lineWidth: 1))
+                    .offset(x: 2, y: 2)
+            }
+    }
+
+    private var statusStyle: AnyShapeStyle {
+        switch entry.reason {
+        case .needsInput:
+            AnyShapeStyle(NotchTheme.brandGradient)
+        case .finished:
+            AnyShapeStyle(Color.green)
+        }
+    }
+
+    private static func lastPathComponent(_ path: String) -> String {
+        let component = (path as NSString).lastPathComponent
+        return component.isEmpty ? path : component
+    }
+
+    private static func reasonText(_ reason: AttentionReason) -> String {
+        switch reason {
+        case let .finished(duration):
+            return "Finished after \(turnDuration(duration))"
+        case let .needsInput(message):
+            guard let message else { return "Needs input" }
+            return "Needs input · \(message)"
+        }
+    }
+
+    private static func age(since: Date, now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(since)))
+        if seconds < 60 { return "now" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h" }
+        return "\(hours / 24)d"
+    }
+}
+
+@MainActor
+private struct SwarmIconButton: View {
+    let systemName: String
+    let tooltip: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 24, height: 24)
+                .background(Capsule().fill(Color.white.opacity(0.10)))
+                .foregroundStyle(NotchTheme.primaryForeground)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .notchTooltip(tooltip)
+        .help(tooltip)
+    }
+}
+
+private func turnDuration(_ duration: TimeInterval) -> String {
+    let seconds = max(0, Int(duration))
+    if seconds < 60 { return "\(seconds)s" }
+    let minutes = seconds / 60
+    if minutes < 60 { return "\(minutes)m" }
+    let hours = minutes / 60
+    let remainder = minutes % 60
+    return remainder == 0 ? "\(hours)h" : "\(hours)h \(remainder)m"
+}

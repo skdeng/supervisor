@@ -12,6 +12,7 @@ enum ModuleRegistry {
             RemindersModule(),
             FileShelfModule(),
             FlowModule(),
+            SwarmModule(),
             BatteryModule(),
             AIUsageModule(),
         ]
