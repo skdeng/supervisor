@@ -6,8 +6,6 @@ struct FlowCompactView: View {
     var body: some View {
         Group {
             switch tracker.compactPresentation {
-            case let .finalStretch(progress, elapsed):
-                finalStretch(progress: progress, elapsed: elapsed)
             case let .breakCountdown(start, until):
                 compactCountdown(start: start, until: until)
             case .recharged:
@@ -17,31 +15,6 @@ struct FlowCompactView: View {
             }
         }
         .fixedSize()
-    }
-
-    private func finalStretch(
-        progress: Double,
-        elapsed: TimeInterval
-    ) -> some View {
-        HStack(spacing: 5) {
-            ZStack {
-                Circle()
-                    .stroke(Color.white.opacity(0.18), lineWidth: 2.5)
-                Circle()
-                    .trim(from: 0, to: min(1, max(0, progress)))
-                    .stroke(
-                        NotchTheme.brandGradient,
-                        style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
-                    )
-                    .rotationEffect(.degrees(-90))
-            }
-            .frame(width: 17, height: 17)
-
-            Text(Self.compactDuration(elapsed))
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .lineLimit(1)
-        }
     }
 
     private func compactCountdown(start: Date, until: Date) -> some View {
@@ -72,14 +45,6 @@ struct FlowCompactView: View {
             .shadow(color: NotchTheme.brandColor.opacity(0.9), radius: 6)
             .accessibilityLabel("Recharged")
     }
-
-    private static func compactDuration(_ duration: TimeInterval) -> String {
-        let minutes = max(0, Int(duration / 60))
-        if minutes < 60 { return "\(minutes)m" }
-        let hours = minutes / 60
-        let remainder = minutes % 60
-        return remainder == 0 ? "\(hours)h" : "\(hours)h\(remainder)m"
-    }
 }
 
 struct FlowPeekBannerView: View {
@@ -98,13 +63,17 @@ struct FlowPeekBannerView: View {
                 .foregroundStyle(NotchTheme.primaryForeground)
                 .lineLimit(1)
 
+            // When the pill content makes the surface wider than the banner needs, the action
+            // pins to the trailing edge so both rows share the same content edges.
+            Spacer(minLength: 12)
+
             FlowCapsuleButton(
                 title: "Take \(tracker.breakLengthMinutes)",
                 tooltip: "Start a \(tracker.breakLengthMinutes)-minute break",
                 action: tracker.takeBreak
             )
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, NotchTheme.surfaceEdgePadding)
     }
 }
 

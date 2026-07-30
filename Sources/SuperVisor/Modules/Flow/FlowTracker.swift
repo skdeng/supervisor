@@ -17,7 +17,6 @@ struct FlowSegment: Identifiable, Equatable {
 }
 
 enum FlowCompactPresentation: Equatable {
-    case finalStretch(progress: Double, elapsed: TimeInterval)
     case breakCountdown(start: Date, until: Date)
     case recharged
 }
@@ -90,6 +89,8 @@ final class FlowTracker: ObservableObject {
         self.dayAnchor = Calendar.current.startOfDay(for: Date())
     }
 
+    /// The pill stays empty during a work session — the nudge banner is the only work-time
+    /// surfacing; compact presence exists solely for a running break and the recharged ack.
     var compactPresentation: FlowCompactPresentation? {
         if let window = breakWindow {
             return .breakCountdown(start: window.start, until: window.until)
@@ -97,15 +98,7 @@ final class FlowTracker: ObservableObject {
         if acknowledgementUntil != nil {
             return .recharged
         }
-        guard sessionIsActive else { return nil }
-        let interval = workInterval
-        let stretchStart = max(0, interval - Self.finalStretchDuration)
-        guard currentWorkDuration >= stretchStart else { return nil }
-        let progress = min(1, max(0, (currentWorkDuration - stretchStart) / Self.finalStretchDuration))
-        return .finalStretch(
-            progress: progress,
-            elapsed: currentWorkDuration
-        )
+        return nil
     }
 
     var hasExpandedPresentation: Bool {
@@ -208,10 +201,10 @@ final class FlowTracker: ObservableObject {
             compactPresence = false
             bannerPresence = false
             context?.setNeedsCompactRefresh()
-            // Deactivating mid-nudge abandons an indefinite peek; release it so the surface
-            // is not left pinned to the compact state.
+            // Deactivating mid-nudge abandons an indefinite peek; a zero-length peek releases
+            // the hold without forcing an open sheet closed.
             if hadBanner {
-                context?.requestCollapse()
+                context?.requestPeek(0)
             }
         }
         self.context = nil
@@ -239,6 +232,7 @@ final class FlowTracker: ObservableObject {
             start: now,
             until: now.addingTimeInterval(TimeInterval(settings.flowBreakLengthMinutes * 60))
         )
+        AppLog.notice(.flow, "break taken")
         reconcileCompactPresence()
         armNextDeadline()
     }
@@ -258,10 +252,14 @@ final class FlowTracker: ObservableObject {
     }
 
     func snooze() {
+        guard activeSessionForNudgeAction != nil else { return }
+        AppLog.notice(.flow, "break snoozed")
         deferNudge(by: Self.snoozeDuration, suppressForAtLeast: nil)
     }
 
     func skip() {
+        guard activeSessionForNudgeAction != nil else { return }
+        AppLog.notice(.flow, "break skipped")
         deferNudge(by: nil, suppressForAtLeast: Self.skipDuration)
     }
 
@@ -585,6 +583,7 @@ final class FlowTracker: ObservableObject {
             nextRepeek: now.addingTimeInterval(Self.repeekDuration),
             message: message
         )
+        AppLog.notice(.flow, "nudge fired")
         // The nudge banner holds until the user acts on it or a real break resolves it;
         // reconcileCompactPresence ends the peek when the banner clears.
         context?.requestPeek(.infinity)
@@ -630,6 +629,7 @@ final class FlowTracker: ObservableObject {
             currentWorkDuration = freshSession.workDuration(at: now)
             if shouldAcknowledge {
                 acknowledgementUntil = now.addingTimeInterval(Self.acknowledgementDuration)
+                AppLog.notice(.flow, "recharged acknowledgement shown")
             }
             advanceWorkingState(freshSession, idle: idle, at: now)
         } else {
@@ -649,6 +649,7 @@ final class FlowTracker: ObservableObject {
         currentWorkDuration = 0
         idleSessionFloor = until
         acknowledgementUntil = presentationTime.addingTimeInterval(Self.acknowledgementDuration)
+        AppLog.notice(.flow, "recharged acknowledgement shown")
     }
 
     private func deferNudge(by delay: TimeInterval?, suppressForAtLeast minimum: TimeInterval?) {
@@ -806,8 +807,11 @@ final class FlowTracker: ObservableObject {
         context?.setNeedsCompactRefresh()
         // The nudge banner peeks indefinitely, so the peek must be released here — on Take /
         // Snooze / Skip or a spontaneous break — or the surface would stay pinned open forever.
+        // A zero-length peek resolves the hold through the engine's completion path: it is a
+        // no-op while the sheet is open (never yanks it shut), and it hands the hold to any
+        // other module still supplying a banner.
         if bannerCleared {
-            context?.requestCollapse()
+            context?.requestPeek(0)
         }
     }
 
@@ -832,11 +836,6 @@ final class FlowTracker: ObservableObject {
 
         case let .working(session):
             candidates.append(nextSampleDate(cadence: Self.normalSampleCadence, now: now))
-            let stretchStart = max(0, workInterval - Self.finalStretchDuration)
-            let elapsed = session.workDuration(at: now)
-            if elapsed < stretchStart {
-                candidates.append(now.addingTimeInterval(stretchStart - elapsed))
-            }
             let nudgeDeadline = effectiveNudgeDeadline(for: session, at: now)
             if nudgeDeadline > now {
                 candidates.append(nudgeDeadline)
