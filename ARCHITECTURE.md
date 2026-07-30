@@ -120,8 +120,11 @@ pill's size and layout. For that, call `context.setNeedsCompactRefresh()`.
 - `requestExpand()` — force the notch open.
 - `requestCollapse()` — force it closed.
 - `requestPeek(seconds:)` — briefly present a transient compact update, then auto-collapse.
-  A non-finite duration peeks indefinitely: the surface holds until the module resolves it
-  (`requestCollapse()` / `requestExpand()`) or the user opens the sheet.
+  A non-finite duration peeks indefinitely: the surface holds until the module resolves it or
+  the user opens the sheet. Any peek ending while some module still supplies a `peekBanner()`
+  leaves the hold in place, so a timed peek can never tear down an unresolved banner. A
+  zero-duration peek is the release idiom: it resolves a hold through that same completion
+  path — a no-op while the sheet is open, and it hands the hold to any remaining banner.
 - `setNeedsCompactRefresh()` — tell the pill to re-lay-out because a compact contribution
   appeared/disappeared.
 

@@ -46,8 +46,8 @@ A single morphing surface, driven by a small state machine, that modules feed co
   **appears or disappears** (which changes pill size/layout) — internal value changes inside an
   already-shown compact view update automatically via `@ObservedObject`.
 - **`App/ModuleRegistry.swift`** — THE single place modules are wired in (`allModules()`).
-  Array order is irrelevant; modules sort by `order`. Currently lists 7 modules
-  (Media, Calendar, Reminders, FileShelf, Flow, Battery, AI Usage).
+  Array order is irrelevant; modules sort by `order`. Currently lists 8 modules
+  (Media, Calendar, Reminders, FileShelf, Flow, SwarmVisor, Battery, AI Usage).
 - **`Core/NotchEngine.swift`** — owns the window, geometry, hover detection, the enabled-module
   list, and the state machine: `NotchState` is `.idle` / `.compact` / `.expanded` (peek is a
   transient `.compact`). Builds the `NotchContext`, filters modules by `SettingsStore`, activates
@@ -88,15 +88,24 @@ notch** — a Mac mini/Studio, an older MacBook, or a notched MacBook in clamshe
 monitor beside a notched built-in display does *not* reach it.
 
 At rest the surface is the notch silhouette, flush with the screen's top edge. **Hovering detaches
-it into a floating pill**: it drops `pillTopDrop` (a quarter of the notch height), swells by
-`NotchTheme.pillHoverScale`, and its concave menu-bar flares curl inward into convex corners. The
-open sheet keeps that silhouette, so the pill grows rather than snapping back to the edge.
+it into a floating pill**: it drops `pillTopDrop` (a quarter of the notch height), swells —
+proportionally in height (`NotchTheme.pillHoverScale`) and by the fixed `hoverWidthPad` per side
+in width — and its concave menu-bar flares curl inward into convex corners. The
+open sheet keeps that silhouette, so the pill grows rather than snapping back to the edge. The
+hover swell is **layout growth, not a render transform**: the surface's frame widens by the
+fixed pad and both content rows re-lay-out to the grown width, so nothing rasterizes — content
+keeps its natural size and its constant edge margin, riding outward with the edges while the
+flexible gaps (the pill's cutout, the banner's internal spacer) absorb the growth. The two rows
+therefore share edge margins in every hover state; the banner strip's height never grows.
 
 - **`NotchShape`** morphs on one continuous `pillness` (0…1), animated through
   `AnimatablePair(cornerRadius, pillness)`. Each top corner is a **single** quadratic curve, not
   two: the concave flute and the convex corner share the same control point (the corner) and
   differ only in their endpoints, which slide from `-flare` outside the body to `+rounding` inside
-  it. Growing a second curve beside a shrinking first reads as a bump next to a dip. At
+  it. Growing a second curve beside a shrinking first reads as a bump next to a dip. The flare
+  doubles as the body's side inset: attached, the sides tuck `topRadius` behind the flares; as
+  the surface detaches they slide out so the floating pill fills its frame edge to edge, and
+  content padded from the frame edge keeps that full margin from the visible edge. At
   `pillness == 0` the path emits an element sequence byte-identical to the plain notch — verify
   any change to it by rasterizing both and diffing coverage.
 - **`pillTopDrop` is 0 on a hardware notch**, which is what makes nearly every downstream branch a
@@ -161,6 +170,9 @@ sink. Preserve these guards when touching the relevant code:
 - **Now-playing metadata** is set by any other running app. `mediaremote_adapter.m` drops non-finite
   numbers and validates the payload (`isValidJSONObject`) before serializing, so a malicious source
   cannot abort the entitled perl helper with an uncaught exception.
+- **Agent hook socket payloads** are arbitrary local input. Each connection is size-capped and
+  defensively parsed, and a tty must match `^/dev/ttys[0-9]+$` before it is stored or reaches
+  AppleScript interpolation.
 - **Screenshot-directory contents** are arbitrary local files. `ScreenshotMonitor` accepts only
   direct, regular, non-symlink image/PDF children carrying macOS's
   `com.apple.metadata:kMDItemIsScreenCapture` attribute, requires a non-zero size, and rejects files
@@ -176,7 +188,9 @@ sink. Preserve these guards when touching the relevant code:
   --setting-sources project`. The toolset is Read-only (no exfiltration tool), the auto-allow is
   scoped to the single copied file, MCP is disabled, and the user's own hooks/settings do not load,
   so a prompt-injection payload in the file cannot read anything but the copy. A natural-language
-  preamble marks the content as data, not instructions, as defense-in-depth.
+  preamble marks the content as data, not instructions, as defense-in-depth. The on-device path has
+  no tools, so injected instructions in file content cannot act; the same preamble still marks the
+  content as data.
 
 ## Module Roster
 
@@ -198,18 +212,27 @@ names below are the code paths.
   Settings (`media.trueSpectrum`, `media.beatAura`). Expanded: large artwork, title/artist, a live
   scrubber, transport, and an **audio-output device switcher**. Info streams from one long-lived
   perl adapter (`NowPlayingStream`), which pushes a snapshot only when the state changes; commands
-  via `MediaRemoteBridge`.
+  via `MediaRemoteBridge`. While `calls.autoPauseMusic` is on, a detected call pauses active
+  playback and resumes it only when the automatic pause claim still owns the same paused
+  now-playing session.
 - **Calendar** (`Modules/Calendar`) — next-meeting countdown chip in compact; an agenda with a
   one-tap **Join** button (Zoom / Meet / Teams / Webex link detection) in expanded. EventKit via
   `CalendarService`. **Meeting Mode:** while a meeting with a join link is in progress, Calendar
   contributes no compact mic indicator because macOS already shows microphone activity in the
-  menu bar; the sheet leads with a call HUD — elapsed timer, a system-wide **mic-mute** toggle
-  (`MicController`), an audio-output switcher, and Join. A mute applied via the notch is
-  auto-restored when the meeting ends. Any surfaced meeting can be dismissed from its agenda row
-  or Meeting HUD; the occurrence is excluded everywhere, including FlowVisor's meeting deferral.
-  Dismissals live in memory in `MeetingDismissalStore` (`Services/Meetings/`), keyed by event ID
-  plus start time and pruned when the meeting ends; an **N dismissed** Up Next footer lists them
-  for one-tap restore and keeps the section visible when every meeting is dismissed.
+  menu bar; the sheet leads with a call HUD — the meeting rendered in the agenda's row style
+  (calendar-accent dot, green elapsed/ends-in line) above a system-wide **mic-mute** toggle
+  (`MicController`), an audio-output switcher, and Join. The agenda carries no header, so the
+  in-progress row and upcoming meetings read as one list. A mute applied via the notch is
+  auto-restored when the meeting ends. CallSense also raises Meeting Mode for ad-hoc calls from
+  the public CoreMediaIO/CoreAudio "running somewhere" camera and microphone properties, with a
+  3-second start debounce, a 5-second end debounce, and the spectrum tap's aggregate/virtual
+  devices excluded. The ad-hoc HUD says **On a call** and omits the event title, Join, and dismiss;
+  a scheduled meeting wins when both signals apply, and mic auto-restore covers either call type.
+  Any surfaced meeting can be dismissed from its agenda row or Meeting HUD; the occurrence is
+  excluded everywhere, including FlowVisor's meeting deferral. Dismissals live in memory in
+  `MeetingDismissalStore` (`Services/Meetings/`), keyed by event ID plus start time and pruned when
+  the meeting ends; an **N dismissed** agenda footer lists them for one-tap restore and keeps the
+  section visible when every meeting is dismissed.
 - **Reminders → "TaskVisor"** (`Modules/Reminders`) — due-today + overdue Apple Reminders. Compact:
   a checklist count badge (red when any are overdue). Expanded: a **tap-to-complete** checklist
   with list color, live due/overdue text, and a high-priority marker. EventKit via
@@ -231,10 +254,12 @@ names below are the code paths.
   Explain / Extract Text) — plus, separated, **Remove** (off-shelf, non-destructive; a generated
   artifact's backing file is deleted) and **Move to Trash** (moves the original to the macOS Trash
   after verifying the file's recorded volume/inode identity, refusing a file swapped at the path).
-  Agent dispatch runs the file through a sandboxed headless agent (see Untrusted Input). Drag-out,
-  Quick Look, and thumbnails via `FileShelfStore`, `ThumbnailService`, `QuickLookController`,
-  `FileActionService`; agent runner + live-operation model in `Services/AgentDispatch` and
-  `Services/Operations`.
+  Agent verbs route to the on-device system language model when a file has a small plain-text or OCR
+  representation; verbatim OCR satisfies Extract Text directly. The sandboxed headless CLI remains
+  the path for large or binary content, an unavailable system model, and on-device failures (see
+  Untrusted Input). Drag-out, Quick Look, and thumbnails via `FileShelfStore`, `ThumbnailService`,
+  `QuickLookController`, `FileActionService`; agent runner + live-operation model in
+  `Services/AgentDispatch` and `Services/Operations`.
 - **Flow → "FlowVisor"** (`Modules/Flow`) — an activity-aware break coach. Derives a work/break
   state machine from ONE permissionless signal: seconds since the last user input
   (`CGEventSource.secondsSinceLastEventType`, content-blind, no TCC). At the configured work
@@ -245,16 +270,30 @@ names below are the code paths.
   Breaks are forgiving: ≥180 s away is a break and silently resets the clock, whether nudged or
   spontaneous — someone who naturally breaks never hears from it; a nudged break earns a brief
   "recharged" compact ack on return. The nudge presents as a banner extending below the notch with
-  the heads-down message and a one-tap Take action, while the compact ring shows only the arc and
-  elapsed time; the banner holds (an indefinite peek, `requestPeek(.infinity)`) until Take /
-  Snooze / Skip or a spontaneous break resolves it. Compact: a brand-gradient arc that fades in over the final 10 minutes and fills
-  toward the nudge, a break countdown ring, or the ack — nothing otherwise.
-  Expanded: a ring + honest "1h 04m heads-down" total, Take 5 / Snooze 10 / Skip, and a *today*
+  the heads-down message and a one-tap Take action; the banner holds (an indefinite peek,
+  `requestPeek(.infinity)`) until Take / Snooze / Skip or a spontaneous break resolves it.
+  Compact: a break countdown ring or the ack — nothing otherwise; a work session in progress has
+  no pill presence at all (the banner is the only work-time surfacing).
+  Expanded: Take 5 / Snooze 10 / Skip in the final stretch, and a *today*
   rhythm strip of the session-local work/break segments. Timer discipline per the idle-CPU rule: a
   single rearming deadline task fires only at the next real boundary (60 s sampler, tightening to
   5 s only while a nudge waits for a micro-pause) and is torn down entirely on screen lock / system
   sleep — that suspended time counts as break credit. Settings: `flow.workInterval` (45/60/90),
   `flow.breakLength` (3/5/10), `flow.deferDuringMeetings`.
+- **Swarm → "SwarmVisor"** (`Modules/Swarm`) — quiet-until-blocked triage for concurrent Claude
+  Code sessions. The recursive session-registry watcher is the sole truth for live
+  busy/idle/waiting state; hook-socket events provide only low-latency refreshes, validated tty
+  metadata, and explicit needs-input details, so delayed or out-of-order hook delivery can never
+  roll session state backward. A busy → idle/waiting transition enters triage only after a ≥45 s
+  turn, while `idle_prompt` and `agent_needs_input` notifications enter regardless of turn length.
+  Attention is deliberately quiet: a newly added entry raises only a rotating brand-gradient glow
+  around the notch and joins the flat sheet queue — no peek banner, no text, and no attention
+  count in the pill. Opening the sheet or emptying the queue clears the glow, and an already-seen
+  nonempty queue stays quiet until another entry is added. Queue rows (Claude-mark led) live until
+  the session resumes or the user dismisses them. A
+  validated tty teleports directly to the matching iTerm2 tab through AppleScript. The socket
+  replies `{"decision":"ask"}` immediately and unconditionally
+  to every `waiting_for_approval` message so Claude Code's normal permission prompt never stalls.
 - **Battery** (`Modules/Battery`) — power/charging status, time remaining, and connected-device
   (Bluetooth accessory) battery; peeks on plug/unplug and low battery. (`PowerSourceMonitor`,
   `BluetoothMonitor`.)
@@ -292,6 +331,12 @@ at runtime.
 
 ## Shared Services
 
+- **`Services/Logging/`** — `AppLog` sends sparse lifecycle, state-transition, helper, and failure
+  events to the unified log while `FileLogMirror` keeps a plain rotating file for direct
+  inspection. Callers log only names, states, counts, durations, and error descriptions — never
+  file, OCR, or clipboard content — and logging failures never throw or crash the app.
+- **`Services/Attention/AttentionGlowCenter.swift`** — a module-agnostic one-shot attention signal
+  read by the root view and cleared when the sheet opens.
 - **`Services/FileSystem/FileChangeWatcher.swift`** — calls back when a file or directory is
   written, created, replaced, or removed. A vnode `DispatchSource` watches an open descriptor — an
   *inode*, not a path — so a writer that updates atomically (write temp, `rename` into place)
@@ -300,11 +345,24 @@ at runtime.
   while the file is absent (so it may be started before the file exists). Callbacks are
   debounced, and fire on a private serial queue, not the main actor.
 - **`Services/FileSystem/DirectoryTreeWatcher.swift`** — a recursive, debounced FSEvents watcher
-  used for Codex's date-partitioned sessions tree. It notices nested appends with one stream,
-  including an older transcript resumed after its original date, without a discovery poll.
+  used for Codex's date-partitioned sessions tree and SwarmVisor's Claude session registry. It
+  notices nested appends and in-place child rewrites with one stream, including an older Codex
+  transcript resumed after its original date, without a discovery poll.
 - **`Services/FileSystem/ThumbnailService.swift` + `QuickLookController.swift`** — shared local-file
   previews used by FileShelf. Thumbnail generation stays in Quick Look's service;
   the main actor only materializes the resulting `NSImage`.
+- **SIGPIPE is ignored process-wide** (`AppDelegate.applicationDidFinishLaunching`). The app writes
+  to pipes/sockets whose peer can vanish at any moment (codex app-server, the headless agent CLI,
+  the perl now-playing adapter, hook clients on the swarm socket); the default signal action kills
+  the process with **no crash report and no stderr**. With it ignored, such writes fail with EPIPE
+  and flow into each client's error path — which every helper client must therefore have.
+- **`Services/LocalIntelligence/`** — the single FoundationModels touchpoint for on-device text
+  generation; routing and UI lifecycle code remain provider-agnostic.
+- **`Services/Calls/CallActivityMonitor.swift`** — the shared CallSense camera/microphone activity
+  service. Its singleton uses reference-counted start/stop so Calendar and Media share one set of
+  CoreMediaIO/CoreAudio registrations. Camera listeners use the same proc/client-data lifecycle as
+  `AudioPropertyListener`, avoiding the Swift block-identity removal failure and unregistering
+  exactly when the last client releases the monitor.
 - **`Services/Audio/`** — CoreAudio helpers shared by modules (these are plain services, not
   `NotchModule`s, so modules stay decoupled). `AudioOutputController` + `AudioOutputSelector` (the
   default-output device and its inline picker, used by Media and Meeting Mode) and `MicController`
@@ -362,6 +420,28 @@ notch. The surface renders in every state — with no compact content it rests a
 pill exactly over the cutout — so the tint is always visible. The pill is **always symmetric**:
 both sides render at the wider side's measured width (`max(leading, trailing)`), so compact
 content never shifts the pill off the notch's center.
+
+**Investigating a dead app.** Start with the structured log, then inspect process and crash
+artifacts:
+
+- The app logs lifecycle/state/helper/failure events to unified-log subsystem
+  `com.supervisor.SuperVisor` (categories: `engine`, `module`, `swarm`, `calls`, `media`, `usage`,
+  `agentDispatch`, `fileShelf`, `flow`) and mirrors notice/error lines to
+  `~/Library/Logs/SuperVisor/SuperVisor.log` (1 MiB rotation, two generations kept). Query it with
+  `/usr/bin/log show --predicate 'subsystem == "com.supervisor.SuperVisor"'`.
+- A crash (`fatalError`, force-unwrap, EXC_BAD_ACCESS) writes
+  `~/Library/Logs/DiagnosticReports/SuperVisor-*.ips` with full backtraces. **No `.ips` plus
+  empty stderr means a terminating signal** (SIGPIPE/SIGKILL class) or a clean `exit()`.
+- Pin down the signal by running the binary under a wait-status wrapper:
+  `zsh -c '<binary>; echo $?'` — 128+signal (141 = SIGPIPE, 137 = SIGKILL, 139 = SEGV).
+- In zsh, `log` is a **shell builtin**; unified-log queries must call `/usr/bin/log`
+  (`/usr/bin/log show --last 30m --predicate 'process == "SuperVisor"'`). Process names in other
+  processes' messages are often privacy-redacted, so search by PID as well.
+- `pgrep -f SuperVisor.app` and `ps | grep` also match the **perl now-playing helper** (its argv
+  contains the bundle path). Match the executable exactly (`ps -o comm | grep "MacOS/SuperVisor$"`)
+  before concluding the app is alive.
+- The swarm socket doubles as a liveness/timeline record: it exists iff an instance bound it and
+  died uncleanly since; its mtime is the moment that instance's SwarmModule activated.
 
 ## Git
 
