@@ -44,6 +44,11 @@ final class MediaRemoteBridge: @unchecked Sendable {
         DispatchQueue, @escaping @convention(block) (Bool) -> Void
     ) -> Void
 
+    /// `MRMediaRemoteGetNowPlayingApplicationPID(dispatch_queue_t, void(^)(pid_t))`.
+    private typealias GetApplicationPIDFn = @convention(c) (
+        DispatchQueue, @escaping @convention(block) (pid_t) -> Void
+    ) -> Void
+
     // MARK: Command codes (MRMediaRemoteCommand)
 
     enum Command: Int {
@@ -85,6 +90,7 @@ final class MediaRemoteBridge: @unchecked Sendable {
     private let unregisterForNotifications: UnregisterForNotificationsFn?
     private let sendCommand: SendCommandFn?
     private let getIsPlaying: GetIsPlayingFn?
+    private let getApplicationPID: GetApplicationPIDFn?
 
     /// Whether the minimum viable surface (read info) is available.
     var canSendCommands: Bool { sendCommand != nil }
@@ -121,6 +127,8 @@ final class MediaRemoteBridge: @unchecked Sendable {
             .map { unsafeBitCast($0, to: SendCommandFn.self) }
         self.getIsPlaying = resolve("MRMediaRemoteGetNowPlayingApplicationIsPlaying")
             .map { unsafeBitCast($0, to: GetIsPlayingFn.self) }
+        self.getApplicationPID = resolve("MRMediaRemoteGetNowPlayingApplicationPID")
+            .map { unsafeBitCast($0, to: GetApplicationPIDFn.self) }
     }
 
     deinit {
@@ -144,6 +152,21 @@ final class MediaRemoteBridge: @unchecked Sendable {
             return
         }
         getIsPlaying(queue, completion)
+    }
+
+    /// Fetch the process that owns the current now-playing session. A missing symbol or invalid
+    /// process id is delivered as `nil`.
+    func fetchNowPlayingApplicationPID(
+        on queue: DispatchQueue,
+        _ completion: @escaping @Sendable (pid_t?) -> Void
+    ) {
+        guard let getApplicationPID else {
+            queue.async { completion(nil) }
+            return
+        }
+        getApplicationPID(queue) { processID in
+            completion(processID > 0 ? processID : nil)
+        }
     }
 
     // MARK: Notifications

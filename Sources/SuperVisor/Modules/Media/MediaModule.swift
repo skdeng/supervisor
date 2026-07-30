@@ -93,6 +93,36 @@ final class MediaModule: NotchModule, ObservableObject {
     private var spectrumLingerTask: Task<Void, Never>?
     private var spectrumSettingCancellable: AnyCancellable?
 
+    // MARK: CallSense transport ownership
+
+    private let callMonitor = CallActivityMonitor.shared
+    private var callSettingCancellable: AnyCancellable?
+    private var callStateCancellable: AnyCancellable?
+    private var callMonitorRetained = false
+    private var lastCallActive = false
+    private var autoPauseRequestID: UUID?
+    private var autoPauseConfirmationTask: Task<Void, Never>?
+
+    private enum AutoPausePhase {
+        case awaitingPause
+        case paused
+    }
+
+    private enum AutoPauseClaimDropReason: String {
+        case manualChange = "manual change"
+        case trackChange = "track change"
+        case disabled
+    }
+
+    /// A pause this module issued, tied to both the now-playing process and track/session state.
+    private struct AutoPauseClaim {
+        let processID: pid_t?
+        let trackIdentity: String
+        var phase: AutoPausePhase
+    }
+
+    private var autoPauseClaim: AutoPauseClaim?
+
     init() {
         self.bridge = MediaRemoteBridge()
     }
@@ -125,6 +155,12 @@ final class MediaModule: NotchModule, ObservableObject {
                     self.spectrumTap.resetAvailability()
                 }
                 self.reconcileSpectrumTap(spectrumEnabled: enabled)
+            }
+
+        callSettingCancellable = SettingsStore.shared.$callAutoPausesMusic
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] enabled in
+                self?.reconcileCallMonitoring(enabled: enabled)
             }
 
         // MediaRemote still broadcasts now-playing change notifications even though info
@@ -162,6 +198,8 @@ final class MediaModule: NotchModule, ObservableObject {
         stopPolling()
         audioOutput.stop()
         spectrumSettingCancellable = nil
+        callSettingCancellable = nil
+        stopCallMonitoring()
         spectrumLingerTask?.cancel()
         spectrumLingerTask = nil
         spectrumTap.stop()
@@ -240,6 +278,7 @@ final class MediaModule: NotchModule, ObservableObject {
         }
 
         nowPlaying = reconciled
+        reconcileAutoPauseClaim(with: reconciled)
         updateArtwork(for: reconciled)
         reconcileCompactVisibility()
         reconcileSpectrumTap()
@@ -410,6 +449,217 @@ final class MediaModule: NotchModule, ObservableObject {
         }
     }
 
+    // MARK: CallSense auto-pause
+
+    private func reconcileCallMonitoring(enabled: Bool) {
+        if enabled {
+            guard !callMonitorRetained else { return }
+            callMonitorRetained = true
+            lastCallActive = false
+            callMonitor.retain()
+            callStateCancellable = Publishers.CombineLatest(
+                callMonitor.$isCameraInUse,
+                callMonitor.$isMicInUse
+            )
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.handleCallActivityChange()
+            }
+        } else {
+            stopCallMonitoring()
+        }
+    }
+
+    private func stopCallMonitoring() {
+        callStateCancellable = nil
+        clearAutoPauseClaim(droppedBecause: .disabled)
+        lastCallActive = false
+        guard callMonitorRetained else { return }
+        callMonitorRetained = false
+        callMonitor.release()
+    }
+
+    private func handleCallActivityChange() {
+        let callActive = callMonitor.isCallLikely
+        guard callActive != lastCallActive else { return }
+        lastCallActive = callActive
+        if callActive {
+            beginAutoPauseIfNeeded()
+        } else {
+            resumeAutoPausedMediaIfEligible()
+        }
+    }
+
+    private func beginAutoPauseIfNeeded() {
+        guard SettingsStore.shared.callAutoPausesMusic,
+              let bridge,
+              let snapshot = nowPlaying,
+              snapshot.isPlaying else {
+            return
+        }
+
+        let requestID = UUID()
+        let trackIdentity = snapshot.trackIdentity
+        autoPauseRequestID = requestID
+        bridge.fetchNowPlayingApplicationPID(on: .main) { [weak self] processID in
+            Task { @MainActor [weak self] in
+                self?.completeAutoPauseRequest(
+                    requestID: requestID,
+                    processID: processID,
+                    trackIdentity: trackIdentity
+                )
+            }
+        }
+    }
+
+    private func completeAutoPauseRequest(
+        requestID: UUID,
+        processID: pid_t?,
+        trackIdentity: String
+    ) {
+        guard autoPauseRequestID == requestID,
+              SettingsStore.shared.callAutoPausesMusic,
+              callMonitor.isCallLikely,
+              let bridge,
+              let snapshot = nowPlaying,
+              snapshot.trackIdentity == trackIdentity,
+              snapshot.isPlaying else {
+            if autoPauseRequestID == requestID {
+                autoPauseRequestID = nil
+            }
+            return
+        }
+
+        autoPauseRequestID = nil
+        clearExpectedPlaying()
+        guard bridge.send(.pause) else { return }
+        autoPauseClaim = AutoPauseClaim(
+            processID: processID,
+            trackIdentity: trackIdentity,
+            phase: .awaitingPause
+        )
+        AppLog.notice(.media, "auto-pause issued")
+
+        autoPauseConfirmationTask?.cancel()
+        autoPauseConfirmationTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard let self, !Task.isCancelled,
+                  self.autoPauseClaim?.phase == .awaitingPause else {
+                return
+            }
+            self.clearAutoPauseClaim(droppedBecause: .manualChange)
+        }
+        refreshAfterTransportCommand()
+    }
+
+    /// Keep the claim only while its original now-playing session reaches and remains paused.
+    private func reconcileAutoPauseClaim(with snapshot: NowPlaying?) {
+        guard var claim = autoPauseClaim else { return }
+        guard let snapshot,
+              snapshot.trackIdentity == claim.trackIdentity else {
+            clearAutoPauseClaim(droppedBecause: .trackChange)
+            return
+        }
+
+        switch claim.phase {
+        case .awaitingPause:
+            if !snapshot.isPlaying {
+                claim.phase = .paused
+                autoPauseClaim = claim
+                autoPauseConfirmationTask?.cancel()
+                autoPauseConfirmationTask = nil
+            }
+        case .paused:
+            if snapshot.isPlaying {
+                clearAutoPauseClaim(droppedBecause: .manualChange)
+            }
+        }
+    }
+
+    private func resumeAutoPausedMediaIfEligible() {
+        autoPauseRequestID = nil
+        autoPauseConfirmationTask?.cancel()
+        autoPauseConfirmationTask = nil
+
+        guard let claim = autoPauseClaim,
+              claim.phase == .paused,
+              let snapshot = nowPlaying,
+              snapshot.trackIdentity == claim.trackIdentity,
+              !snapshot.isPlaying,
+              let bridge else {
+            clearAutoPauseClaim(droppedBecause: autoPauseClaimDropReason(for: nowPlaying))
+            return
+        }
+
+        let requestID = UUID()
+        autoPauseRequestID = requestID
+        bridge.fetchNowPlayingApplicationPID(on: .main) { [weak self] processID in
+            Task { @MainActor [weak self] in
+                self?.completeAutoResumeRequest(
+                    requestID: requestID,
+                    processID: processID,
+                    bridge: bridge
+                )
+            }
+        }
+    }
+
+    private func completeAutoResumeRequest(
+        requestID: UUID,
+        processID: pid_t?,
+        bridge: MediaRemoteBridge
+    ) {
+        guard autoPauseRequestID == requestID,
+              SettingsStore.shared.callAutoPausesMusic,
+              !callMonitor.isCallLikely,
+              let claim = autoPauseClaim,
+              claim.phase == .paused,
+              claim.processID == processID,
+              let snapshot = nowPlaying,
+              snapshot.trackIdentity == claim.trackIdentity,
+              !snapshot.isPlaying else {
+            if autoPauseRequestID == requestID {
+                clearAutoPauseClaim(
+                    droppedBecause: autoPauseClaimDropReason(for: nowPlaying)
+                )
+            }
+            return
+        }
+
+        clearAutoPauseClaim()
+        if bridge.send(.play) {
+            AppLog.notice(.media, "auto-resume issued")
+            refreshAfterTransportCommand()
+        }
+    }
+
+    private func autoPauseClaimDropReason(
+        for snapshot: NowPlaying?
+    ) -> AutoPauseClaimDropReason {
+        if !SettingsStore.shared.callAutoPausesMusic {
+            return .disabled
+        }
+        guard let claim = autoPauseClaim,
+              let snapshot,
+              snapshot.trackIdentity == claim.trackIdentity else {
+            return .trackChange
+        }
+        return .manualChange
+    }
+
+    private func clearAutoPauseClaim(
+        droppedBecause reason: AutoPauseClaimDropReason? = nil
+    ) {
+        let hadClaim = autoPauseClaim != nil
+        autoPauseRequestID = nil
+        autoPauseConfirmationTask?.cancel()
+        autoPauseConfirmationTask = nil
+        autoPauseClaim = nil
+        if hadClaim, let reason {
+            AppLog.notice(.media, "auto-pause claim dropped: \(reason.rawValue)")
+        }
+    }
+
     // MARK: Transport commands
 
     /// Send a transport command (still permitted via MediaRemote), then refresh shortly after
@@ -423,7 +673,18 @@ final class MediaModule: NotchModule, ObservableObject {
         }
     }
 
+    private func refreshAfterTransportCommand() {
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            self?.refresh()
+        }
+    }
+
     func togglePlayPause() {
+        if callMonitor.isCallLikely {
+            clearAutoPauseClaim(droppedBecause: .manualChange)
+        }
         // Optimistically flip the play state so the button, scrubber, and poll respond
         // instantly; the post-command read reconciles with the daemon's actual state.
         if var snapshot = nowPlaying {
@@ -436,6 +697,15 @@ final class MediaModule: NotchModule, ObservableObject {
     }
 
     // Track changes invalidate any pending play/pause expectation (new track, new state).
-    func nextTrack() { clearExpectedPlaying(); sendCommand(.nextTrack) }
-    func previousTrack() { clearExpectedPlaying(); sendCommand(.previousTrack) }
+    func nextTrack() {
+        clearExpectedPlaying()
+        clearAutoPauseClaim(droppedBecause: .trackChange)
+        sendCommand(.nextTrack)
+    }
+
+    func previousTrack() {
+        clearExpectedPlaying()
+        clearAutoPauseClaim(droppedBecause: .trackChange)
+        sendCommand(.previousTrack)
+    }
 }

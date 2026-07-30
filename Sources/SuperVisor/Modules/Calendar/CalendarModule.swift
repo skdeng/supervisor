@@ -11,7 +11,8 @@ import SwiftUI
 ///   Webex link is detected.
 /// - **Meeting Mode:** once a meeting with a join link is in progress, the expanded panel leads
 ///   with a call HUD — elapsed timer, a global mic-mute toggle, an audio-output switcher, and
-///   Join. If you muted via the notch, the mic is automatically restored when the meeting ends.
+///   Join. Camera or microphone use raises the same controls for an unscheduled call. If you
+///   muted via the notch, the mic is automatically restored when the call context ends.
 ///
 /// Event data comes from `CalendarService` (EventKit); mic and output control come from
 /// `MicController` / `AudioOutputController` (CoreAudio).
@@ -25,6 +26,7 @@ final class CalendarModule: NotchModule, ObservableObject {
     let dismissals = MeetingDismissalStore.shared
     private let mic = MicController()
     private let audioOutput = AudioOutputController()
+    private let callMonitor = CallActivityMonitor.shared
 
     private var context: NotchContext?
     private var cancellables: Set<AnyCancellable> = []
@@ -39,9 +41,9 @@ final class CalendarModule: NotchModule, ObservableObject {
     private var lastCompactKey: String?
     private var hadExpanded = false
 
-    /// Meeting-end mic restoration: whether a meeting was active last evaluation, and whether
-    /// the current mute was applied by us (so we only auto-unmute a mute we initiated).
-    private var wasInMeeting = false
+    /// Call-end mic restoration: whether a scheduled or detected call was active at the last
+    /// evaluation, and whether the current mute was applied by this module.
+    private var wasInCallContext = false
     private var weMuted = false
 
     // MARK: NotchModule lifecycle
@@ -51,6 +53,7 @@ final class CalendarModule: NotchModule, ObservableObject {
         service.start()
         mic.start()
         audioOutput.start()
+        callMonitor.retain()
 
         // `@Published` emits during willSet, so hop to the next main-queue turn before reading
         // back the service's state — otherwise syncContributions() would observe the PREVIOUS
@@ -63,6 +66,13 @@ final class CalendarModule: NotchModule, ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.syncContributions() }
             .store(in: &cancellables)
+        Publishers.CombineLatest(
+            callMonitor.$isCameraInUse,
+            callMonitor.$isMicInUse
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _ in self?.syncContributions() }
+        .store(in: &cancellables)
         // Any unmute — ours, the user's in another app, or hardware — relinquishes our claim,
         // so meeting-end auto-restore only ever undoes a mute we still own.
         mic.$isMuted
@@ -88,8 +98,11 @@ final class CalendarModule: NotchModule, ObservableObject {
         cancellables.removeAll()
         // Don't leave the mic muted behind us if Meeting Mode muted it.
         if weMuted && mic.isMuted { mic.setMuted(false) }
+        wasInCallContext = false
+        weMuted = false
         mic.stop()
         audioOutput.stop()
+        callMonitor.release()
         service.stop()
         context = nil
     }
@@ -106,7 +119,8 @@ final class CalendarModule: NotchModule, ObservableObject {
     private func syncContributions() {
         let now = Date()
         let active = service.activeMeeting(asOf: now)
-        restoreMicIfMeetingEnded(active: active)
+        let adHocCallActive = active == nil && callMonitor.isCallLikely
+        restoreMicIfCallEnded(inCallContext: active != nil || adHocCallActive)
 
         let compactKey: String?
         if active != nil {
@@ -116,7 +130,7 @@ final class CalendarModule: NotchModule, ObservableObject {
         } else {
             compactKey = nil
         }
-        let expanded = service.isDenied || active != nil || !service.events.isEmpty
+        let expanded = service.isDenied || active != nil || adHocCallActive || !service.events.isEmpty
             || !dismissals.dismissed.isEmpty
 
         if compactKey != lastCompactKey || expanded != hadExpanded {
@@ -126,15 +140,13 @@ final class CalendarModule: NotchModule, ObservableObject {
         }
     }
 
-    /// When a meeting we muted for ends, undo our mute so the mic isn't left silenced. Only acts
-    /// on a mute we applied (not one the user set in hardware / another app).
-    private func restoreMicIfMeetingEnded(active: CalendarEvent?) {
-        let inMeeting = active != nil
-        defer { wasInMeeting = inMeeting }
-        if inMeeting && !wasInMeeting {
-            weMuted = false                       // fresh meeting; forget prior bookkeeping
+    /// Undo a mute owned by this module when the scheduled or detected call context ends.
+    private func restoreMicIfCallEnded(inCallContext: Bool) {
+        defer { wasInCallContext = inCallContext }
+        if inCallContext && !wasInCallContext {
+            weMuted = false
         }
-        if wasInMeeting && !inMeeting && weMuted && mic.isMuted {
+        if wasInCallContext && !inCallContext && weMuted && mic.isMuted {
             mic.setMuted(false)
             weMuted = false
         }
@@ -186,16 +198,18 @@ final class CalendarModule: NotchModule, ObservableObject {
     }
 
     func expandedSection() -> AnyView? {
-        if service.isDenied {
-            return AnyView(CalendarAccessPromptView())
-        }
-        guard service.activeMeeting() != nil || !service.events.isEmpty
+        let active = service.activeMeeting()
+        let adHocCallStartedAt = active == nil && callMonitor.isCallLikely
+            ? callMonitor.callStartedAt
+            : nil
+        guard service.isDenied || active != nil || adHocCallStartedAt != nil || !service.events.isEmpty
             || !dismissals.dismissed.isEmpty else { return nil }
         return AnyView(CalendarSection(
             service: service,
             dismissals: dismissals,
             mic: mic,
             audioOutput: audioOutput,
+            callMonitor: callMonitor,
             onJoin: { [weak self] url in self?.join(url) },
             onToggleMute: { [weak self] in self?.toggleMute() },
             onDismiss: { [weak self] event in self?.dismiss(event) },

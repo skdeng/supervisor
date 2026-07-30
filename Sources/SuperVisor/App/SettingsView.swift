@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The settings surface: one section per module — its enable toggle followed by its own
@@ -42,6 +43,15 @@ struct SettingsView: View {
 
             Section("Debug") {
                 Toggle("Tint notch & sheet bright red", isOn: $settings.debugTintEnabled)
+                Button("Open Log Folder") {
+                    try? FileManager.default.createDirectory(
+                        at: FileLogMirror.directoryURL,
+                        withIntermediateDirectories: true
+                    )
+                    NSWorkspace.shared.open(FileLogMirror.directoryURL)
+                }
+                .buttonStyle(.plain)
+                .font(.caption.weight(.medium))
                 Text("Colors the rendered surface red so you can see its exact bounds against the hardware notch.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -60,6 +70,7 @@ struct SettingsView: View {
         case "reminders": "checklist"
         case "fileshelf": "tray.full.fill"
         case "flow": "brain.head.profile"
+        case "swarm": "person.2.wave.2.fill"
         case "battery": "battery.100"
         case "aiUsage": "gauge.with.needle"
         default: "puzzlepiece.extension"
@@ -78,6 +89,15 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             Toggle("Beat aura", isOn: $settings.beatAuraEnabled)
             Text("Pulses a glow around the notch in the artwork's color, following the music's bass. Requires the live audio spectrum.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Toggle(
+                "Pause music when a call starts",
+                isOn: $settings.callAutoPausesMusic
+            )
+            .notchTooltip("Pause music when a call starts")
+            .help("Pause music when a call starts")
+            Text("Detects a call from system-wide camera or microphone use. Music resumes when the call ends; a manual pause is never overridden.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case "flow":

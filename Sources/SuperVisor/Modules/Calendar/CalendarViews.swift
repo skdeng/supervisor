@@ -61,7 +61,6 @@ struct CalendarAgendaView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            header
             ForEach(events) { event in
                 eventRow(event)
             }
@@ -72,24 +71,14 @@ struct CalendarAgendaView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var header: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "calendar")
-                .font(.system(size: 14, weight: .semibold))
-            Text("Up Next")
-                .font(.headline)
-            Spacer()
-        }
-        .foregroundStyle(NotchTheme.primaryForeground)
-    }
-
     private func eventRow(_ event: CalendarEvent) -> some View {
         TimelineView(.periodic(from: Date(), by: 30)) { context in
             let ongoing = event.isOngoing(asOf: context.date)
-            HStack(spacing: 10) {
+            HStack(spacing: NotchTheme.rowMarkerGap) {
                 Circle()
                     .fill(event.accent)
                     .frame(width: 8, height: 8)
+                    .frame(width: NotchTheme.rowMarkerWidth)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(event.title)

@@ -22,6 +22,7 @@ public final class SettingsStore: ObservableObject {
         static let notchOffsetX = "notch.offsetX"
         static let trueSpectrum = "media.trueSpectrum"
         static let beatAura = "media.beatAura"
+        static let callAutoPauseMusic = "calls.autoPauseMusic"
         static let flowWorkInterval = "flow.workInterval"
         static let flowBreakLength = "flow.breakLength"
         static let flowDeferDuringMeetings = "flow.deferDuringMeetings"
@@ -64,6 +65,12 @@ public final class SettingsStore: ObservableObject {
         didSet { defaults.set(beatAuraEnabled, forKey: Key.beatAura) }
     }
 
+    /// CallSense: pause active media during a detected call and resume only while the automatic
+    /// pause still owns the playback state.
+    @Published public var callAutoPausesMusic: Bool {
+        didSet { defaults.set(callAutoPausesMusic, forKey: Key.callAutoPauseMusic) }
+    }
+
     /// FlowVisor: minutes of heads-down work before break nudges become eligible.
     @Published public var flowWorkIntervalMinutes: Int {
         didSet { defaults.set(flowWorkIntervalMinutes, forKey: Key.flowWorkInterval) }
@@ -96,6 +103,8 @@ public final class SettingsStore: ObservableObject {
         self.notchOffsetX = defaults.double(forKey: Key.notchOffsetX)
         self.trueSpectrumEnabled = (defaults.object(forKey: Key.trueSpectrum) as? Bool) ?? true
         self.beatAuraEnabled = (defaults.object(forKey: Key.beatAura) as? Bool) ?? true
+        self.callAutoPausesMusic =
+            (defaults.object(forKey: Key.callAutoPauseMusic) as? Bool) ?? false
         let storedWorkInterval = defaults.integer(forKey: Key.flowWorkInterval)
         self.flowWorkIntervalMinutes = [45, 60, 90].contains(storedWorkInterval)
             ? storedWorkInterval
