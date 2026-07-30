@@ -13,6 +13,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // The app writes to pipes and sockets whose peer can vanish at any moment — the codex
+        // app-server helper, the headless agent CLI, the perl now-playing adapter, and hook
+        // clients on the swarm socket. A write after the peer closes raises SIGPIPE, whose
+        // default action kills the process with no crash report; ignoring it process-wide turns
+        // every such write into an EPIPE error that each client's failure path already handles.
+        signal(SIGPIPE, SIG_IGN)
+
+        let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleVersion"
+        ) as? String ?? "unknown"
+        AppLog.notice(
+            .engine,
+            "launch version \(version) pid \(ProcessInfo.processInfo.processIdentifier)"
+        )
+
         // Menu-bar agent: no Dock icon, never the active app's foreground UI.
         NSApp.setActivationPolicy(.accessory)
         AppManagedFileStorage.sweepOrphans()
@@ -22,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        AppLog.notice(.engine, "terminate")
         engine.shutdown()
     }
 
