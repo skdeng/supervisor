@@ -51,8 +51,10 @@ Modules can call `requestPeek(seconds)` to briefly surface a transient compact u
 without a full expansion — e.g. "AirPods connected", "Now charging", "Volume". The
 engine shows the relevant compact content for the requested duration, then auto-collapses
 back toward idle. Peek never steals the expanded panel; it is a lightweight compact nudge.
-A module that also implements `peekBanner()` presents its transient update as a banner
-extending below the notch instead of widening the pill.
+A module that also implements `peekBanner()` presents its transient update as a banner rather
+than as widened compact content: below the notch on a screen with a physical cutout, and
+centered in the pill's own gap — between the compact columns, with the pill growing around
+it — on a screen without one.
 
 ### Liquid Glass theming
 All chrome — the pill body, the expanded panel, separators, and module surfaces — is
@@ -85,8 +87,9 @@ nothing about any specific feature.
 - `compactLeading() -> AnyView?` — content left of the notch in the collapsed pill.
 - `compactTrailing() -> AnyView?` — content right of the notch in the collapsed pill.
 - `expandedSection() -> AnyView?` — the module's section in the expanded panel.
-- `peekBanner() -> AnyView?` — banner below the notch while a peek this module raised is active;
-  nil falls back to the widened compact pill.
+- `peekBanner() -> AnyView?` — banner shown while a peek this module raised is active — below the
+  notch over a physical cutout, centered in the pill's gap on a screen without one; nil falls back
+  to the widened compact pill. The view must be intrinsically sizable on both axes.
 
 All four default to `nil` (contribute nothing) via the protocol extension, so a module
 implements only the surfaces it needs.
@@ -124,7 +127,8 @@ pill's size and layout. For that, call `context.setNeedsCompactRefresh()`.
   the user opens the sheet. Any peek ending while some module still supplies a `peekBanner()`
   leaves the hold in place, so a timed peek can never tear down an unresolved banner. A
   zero-duration peek is the release idiom: it resolves a hold through that same completion
-  path — a no-op while the sheet is open, and it hands the hold to any remaining banner.
+  path — even while the sheet is open, where it clears the hold without touching the sheet —
+  and it hands the hold to any remaining banner.
 - `setNeedsCompactRefresh()` — tell the pill to re-lay-out because a compact contribution
   appeared/disappeared.
 

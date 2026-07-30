@@ -24,6 +24,12 @@ struct NotchRootView: View {
     @State private var leadingWidth: CGFloat = 0
     @State private var trailingWidth: CGFloat = 0
     @State private var peekBannerWidth: CGFloat = 0
+    /// Natural size of an inline peek's content; nil until the probe first reports, so a banner
+    /// that genuinely measures zero renders visibly broken rather than invisibly stuck. Never
+    /// reset when the peek ends: `inlinePeek` already makes a stale value inert, while clearing
+    /// it would re-run the measure on the next peek — popping the strip open on the file-drag
+    /// collapse path, and racing the new content when one peek replaces another.
+    @State private var centerSize: CGSize?
 
     /// Debug: render the whole surface bright red so its exact bounds are visible. It overrides
     /// the glass material too, which is otherwise hard to pin down against a busy desktop.
@@ -39,6 +45,11 @@ struct NotchRootView: View {
         return engine.activePeekBanner()
     }
     private var bannerActive: Bool { peekBannerView != nil }
+    /// Where an active peek banner presents. Over a physical cutout it drops below the notch as
+    /// its own strip; with no cutout to hang off, it rides in the pill's own gap and the pill
+    /// grows around it, so the surface stays a single row.
+    private var bannerBelow: Bool { bannerActive && geo.isHardwareNotch }
+    private var inlinePeek: Bool { bannerActive && !geo.isHardwareNotch }
 
     /// How far the surface has lifted off the screen's top edge: 0 while it is the notch, 1 once
     /// it has become a free-floating pill. A screen with a physical cutout never lifts — the
@@ -75,33 +86,65 @@ struct NotchRootView: View {
         return geo.isHardwareNotch ? NotchTheme.notchHoverScale : NotchTheme.pillHoverScale
     }
 
-    /// The pill strip's height under hover growth; the banner strip below it never grows.
+    /// The bare notch strip's height under hover growth — the floor `stripH` swells up from; a
+    /// banner strip below the notch never grows.
     private var grownNotchH: CGFloat { notchH * hoverGrowth }
     /// Collapsed width: the notch plus the (equal) flanking sides, plus a fixed per-side pad
     /// while hovered (see `NotchTheme.hoverWidthPad` for why width growth is additive).
     private var compactWidth: CGFloat {
         notchW + 2 * sideWidth + (hoverGrowth > 1 ? 2 * NotchTheme.hoverWidthPad : 0)
     }
+    /// The center gap an inline peek needs: its content plus a margin on each side.
+    ///
+    /// Flanked, that margin is the gap the compact columns already hold toward the cutout, so the
+    /// content sits a full 16pt clear of each neighbour — the flanks are unrelated live activities
+    /// and want more separation from the banner than the banner's own content does from the pill's
+    /// edge. Alone in a bare pill there is nothing to separate from, so the inset is
+    /// `surfaceEdgePad`: the content's horizontal margin then equals its vertical one.
+    private var centerGap: CGFloat {
+        (centerSize?.width ?? 0)
+            + 2 * (sideWidth > 0 ? NotchTheme.compactSidePadding : surfaceEdgePad)
+    }
+
     /// Collapsed surface width: the banner row's edge padding is applied here (shared with the
     /// compact row) and is included in the probe's measurement, so the measured width IS the
     /// surface width — any extra allowance would push the banner row's content out of alignment
     /// with the pill row's.
+    ///
+    /// The inline branch adds no hover term of its own: hover growth already arrives through
+    /// `surfaceEdgePad` (which widens the gap) and through the flanking columns' own padding, and
+    /// adding `hoverWidthPad` on top would stack a second swell over that one. The clamp keeps
+    /// the surface inside the fixed canvas that would otherwise clip it — and applies to the
+    /// banner's demand alone, so an oversized banner degrades by losing gap width while
+    /// `cutoutWidth` (their difference) stays non-negative.
     private var collapsedWidth: CGFloat {
-        bannerActive ? max(compactWidth, peekBannerWidth) : compactWidth
+        if inlinePeek {
+            return max(compactWidth, min(2 * sideWidth + centerGap, engine.collapsedWidthLimit))
+        }
+        return bannerBelow ? max(compactWidth, peekBannerWidth) : compactWidth
     }
 
-    /// The cutout gap `CompactPillView` reserves between its two content columns. Hover growth
-    /// and any banner-driven extra width land entirely in this gap: the columns keep their
-    /// natural size and hug the surface's outer edges at a constant margin, riding outward
-    /// with the hover swell so content hugs the sides in every state.
+    /// Height of the pill strip. An inline peek swells it to clear its content by the same margin
+    /// the pill holds at its sides, in every hover state. With no inline peek this is exactly
+    /// `grownNotchH`, so one value serves both screens everywhere the strip is laid out.
+    private var stripH: CGFloat {
+        max(grownNotchH, inlinePeek ? (centerSize?.height ?? 0) + 2 * surfaceEdgePad : 0)
+    }
+
+    /// The cutout gap `CompactPillView` reserves between its two content columns, and where an
+    /// inline peek renders. Hover growth and any banner-driven extra width land entirely in this
+    /// gap: the columns keep their natural size and hug the surface's outer edges at a constant
+    /// margin, riding outward with the hover swell so content hugs the sides in every state.
     private var cutoutWidth: CGFloat { collapsedWidth - 2 * sideWidth }
 
-    /// Horizontal inset from the surface's frame edge to its content, for both the compact row
-    /// and the peek-banner row — one value, so the two rows' content edges align by construction.
+    /// Horizontal inset from the surface's frame edge to its content. One value serves the compact
+    /// row and a peek-banner row below it, so the two rows' content edges align by construction;
+    /// it is also what an inline peek clears the strip by, top and bottom.
     ///
-    /// The VISIBLE side margin must equal the vertical margin around standard-height compact
-    /// content, `(stripHeight − compactContentHeight) / 2`, so the content sits equally far from
-    /// every edge of the pill. While the surface is attached, the shape's body sides tuck
+    /// The VISIBLE side margin must equal the vertical margin standard-height compact content
+    /// holds in the BARE notch strip, `(grownNotchH − compactContentHeight) / 2` — an inline peek
+    /// swells the strip past that floor, granting flanking content extra top/bottom clearance
+    /// while its side margin holds. While the surface is attached, the shape's body sides tuck
     /// `NotchShape.defaultTopRadius` behind the concave flares, so the frame-relative padding
     /// carries that extra inset on top; detached, the body fills the frame and the padding IS the
     /// visible margin.
@@ -122,12 +165,14 @@ struct NotchRootView: View {
         isExpanded ? panelW - 2 * NotchShape.defaultTopRadius * pillness : collapsedWidth
     }
     private var shapeHeight: CGFloat {
-        (isExpanded ? notchH + panelH : grownNotchH + (bannerActive ? engine.peekBannerHeight : 0))
+        (isExpanded ? notchH + panelH : stripH + (bannerBelow ? engine.peekBannerHeight : 0))
             + topDrop
     }
-    /// Tight like a pill when collapsed, rounder as the sheet opens.
+    /// Tight like a pill when collapsed, rounder as the sheet opens. A banner strip below the
+    /// notch is a card in its own right and takes the sheet's radius; an inline peek is still the
+    /// pill, just a taller one.
     private var radius: CGFloat {
-        (isExpanded || bannerActive) ? NotchTheme.panelCornerRadius : NotchTheme.pillCornerRadius
+        (isExpanded || bannerBelow) ? NotchTheme.panelCornerRadius : NotchTheme.pillCornerRadius
     }
 
     var body: some View {
@@ -207,6 +252,10 @@ struct NotchRootView: View {
                     AttentionGlowCenter.shared.clear()
                 }
             }
+            // Only SwiftUI's layout knows how big the collapsed surface actually got, and the
+            // engine's hit-test and hover rects have to contain it.
+            .onChange(of: collapsedWidth, initial: true) { _, _ in reportCollapsedSurface() }
+            .onChange(of: stripH) { _, _ in reportCollapsedSurface() }
 
             Spacer(minLength: 0)
         }
@@ -249,7 +298,9 @@ struct NotchRootView: View {
 
     /// The single shape that morphs from the notch into the sheet.
     private var morphingSurface: some View {
-        ZStack(alignment: .top) {
+        // Sampled once: each read walks the modules and wraps a fresh AnyView.
+        let banner = peekBannerView
+        return ZStack(alignment: .top) {
             // One surface in every state: the notch and the sheet it grows into are the same
             // material, so the open reads as the notch simply expanding.
             surfaceBackground
@@ -259,16 +310,18 @@ struct NotchRootView: View {
             // the gap the pill opens above itself.
             CompactPillView(
                 cutoutWidth: cutoutWidth,
-                stripHeight: grownNotchH,
+                stripHeight: stripH,
                 edgePadding: surfaceEdgePad,
                 leadingWidth: $leadingWidth,
-                trailingWidth: $trailingWidth
+                trailingWidth: $trailingWidth,
+                centerContent: inlinePeek ? banner : nil,
+                centerSize: $centerSize
             )
-            .frame(height: grownNotchH)
+            .frame(height: stripH)
             .offset(y: topDrop)
             .opacity(isExpanded ? 0 : 1)
 
-            if let peekBannerView {
+            if bannerBelow, let peekBannerView = banner {
                 // The visible banner spans the full surface so its internal spacer pins the
                 // actions to the trailing content edge — both rows keep the same constant
                 // edge margins at rest and under the hover swell. The hidden fixed-size probe
@@ -285,7 +338,7 @@ struct NotchRootView: View {
                             .hidden()
                             .background(WidthReader(width: $peekBannerWidth))
                     )
-                    .padding(.top, grownNotchH + topDrop)
+                    .padding(.top, stripH + topDrop)
                     .opacity(isExpanded ? 0 : 1)
             }
 
@@ -317,6 +370,9 @@ struct NotchRootView: View {
         .onTapGesture { if !isExpanded { engine.toggleSheet() } }
     }
 
+    private func reportCollapsedSurface() {
+        engine.reportCollapsedSurface(width: collapsedWidth, stripHeight: stripH)
+    }
 }
 
 /// The morphing silhouette, from the MacBook notch to a free-floating pill.

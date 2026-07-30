@@ -44,10 +44,13 @@ public final class NotchEngine: ObservableObject {
     /// The hit-test and hover rects extend over a peek banner, and a peek can begin or end
     /// without a state transition (already compact), so recompute them on every flip here
     /// rather than relying on `transition(to:)` — which short-circuits when the state holds.
+    /// The monitor refresh matters for the same reason: a peek can move the activation rect
+    /// under a stationary cursor, and only a refresh re-evaluates hover without a mouse move.
     @Published public private(set) var isPeeking: Bool = false {
         didSet {
             guard oldValue != isPeeking else { return }
             updateInteractivity()
+            hover.refresh()
         }
     }
     /// True while the cursor is hovering the notch. Drives a subtle grow affordance; the
@@ -83,6 +86,19 @@ public final class NotchEngine: ObservableObject {
     /// so the fixed-size window is always tall enough to host the tallest sheet.
     public let minExpandedSheetHeight: CGFloat = 96
     public let maxExpandedSheetHeight: CGFloat = 600
+
+    /// The collapsed surface's laid-out width and strip height, reported by the root view so the
+    /// hit-test and hover rects cover the pill as it actually renders — compact content and an
+    /// inline peek both size it beyond the bare notch.
+    ///
+    /// Deliberately NOT `@Published`: the root view is the source of these values, and
+    /// republishing them would re-render it — which rebuilds the whole `ExpandedPanelView`
+    /// whenever the surface is hovered.
+    public private(set) var collapsedSurfaceWidth: CGFloat = 0
+    public private(set) var collapsedStripHeight: CGFloat = 0
+    /// Widest the collapsed surface may render. The canvas is a fixed size derived from the
+    /// screen geometry alone, so clamping against it can never feed back into layout.
+    public var collapsedWidthLimit: CGFloat { canvasFrame(for: geometry).width - 8 }
 
     public init(settings: SettingsStore = .shared) {
         self.settings = settings
@@ -217,11 +233,24 @@ public final class NotchEngine: ObservableObject {
     }
 
     /// Briefly present the compact surface, then auto-collapse. Never steals the expanded
-    /// panel: if already expanded, a peek is a no-op. A non-finite duration peeks
-    /// indefinitely — the surface holds until the peeking module resolves it
-    /// (`requestCollapse()` / `requestExpand()`) or the user opens the sheet.
+    /// panel: while the sheet is open a peek presents nothing, and only a zero-duration
+    /// release still resolves a hold. A non-finite duration peeks indefinitely — the surface
+    /// holds until the peeking module resolves it (`requestCollapse()` / `requestExpand()`)
+    /// or the user opens the sheet.
     public func requestPeek(_ seconds: TimeInterval) {
-        guard state != .expanded else { return }
+        guard state != .expanded else {
+            // A file drag expands the sheet without cancelling a held peek, so a module can
+            // withdraw its banner while the sheet is up. Its zero-duration release must land
+            // even now: dropped, the stale hold would pin the resting state to `.compact` —
+            // and its enlarged hit region — indefinitely after the sheet closes. As on the
+            // timed path, the hold passes to any banner that remains.
+            if seconds == 0, activePeekBanner() == nil {
+                peekTask?.cancel()
+                peekTask = nil
+                isPeeking = false
+            }
+            return
+        }
         AppLog.debug(.engine, seconds.isFinite ? "peek \(seconds)s" : "peek held")
         peekTask?.cancel()
         peekTask = nil
@@ -261,6 +290,26 @@ public final class NotchEngine: ObservableObject {
         guard abs(clamped - expandedSheetHeight) > 0.5 else { return }
         expandedSheetHeight = clamped
         updateInteractivity()
+    }
+
+    /// Report the collapsed surface's laid-out width and strip height so the hit-test and hover
+    /// rects track the pill's real size. Called from the root view's layout; ignored when
+    /// effectively unchanged so it can't feed back into a layout loop.
+    ///
+    /// `hover.refresh()` is load-bearing. `HoverMonitor` re-evaluates only on
+    /// a mouse move or an explicit refresh, and an inline peek arrives precisely when the cursor is
+    /// stationary — a break nudge fires at a micro-pause, by construction. Without the refresh,
+    /// `isHovered` keeps whatever value the last mouse move left: a pill that swelled under a
+    /// resting cursor and then retracted would stay detached indefinitely, because no further event
+    /// would ever tell the monitor the cursor is now outside. Recursion is bounded by the epsilon
+    /// guard here and by the monitor's own inside/outside change guard.
+    public func reportCollapsedSurface(width: CGFloat, stripHeight: CGFloat) {
+        guard abs(width - collapsedSurfaceWidth) > 0.5 || abs(stripHeight - collapsedStripHeight) > 0.5
+        else { return }
+        collapsedSurfaceWidth = width
+        collapsedStripHeight = stripHeight
+        updateInteractivity()
+        hover.refresh()
     }
 
     // MARK: Hover / click handling
@@ -363,9 +412,16 @@ public final class NotchEngine: ObservableObject {
         modules.lazy.compactMap { $0.peekBanner() }.first
     }
 
-    /// Whether the current peek contributes a below-notch banner surface.
+    /// Whether the current peek contributes a banner surface.
     public var hasActivePeekBanner: Bool {
         isPeeking && activePeekBanner() != nil
+    }
+
+    /// Whether that banner renders centered in the pill's cutout gap rather than as a strip below
+    /// the notch. Over a physical cutout the banner drops below the hardware; with no cutout the
+    /// pill widens and swells around the banner instead, so the surface stays one row.
+    public var peekPresentsInline: Bool {
+        hasActivePeekBanner && !geometry.isHardwareNotch
     }
 
     private func transition(to newState: NotchState) {
@@ -393,16 +449,32 @@ public final class NotchEngine: ObservableObject {
         window.setFrame(canvasFrame(for: geo), display: true)
         window.interactiveRect = interactiveLocalRect()
         hover.activationRect = activationRect(for: state, hovered: isHovered, geometry: geo)
+        // A display change can move the activation rect under a stationary cursor (the surface
+        // may land on a different screen); only a refresh re-evaluates hover without a mouse move.
+        hover.refresh()
     }
 
     /// How much a hovered surface has swelled, for sizing the regions that must contain it.
     ///
     /// Only the detached pill is accounted for. The hardware notch's 6% nudge already sits well
     /// inside the aiming margins below, and inflating those by it would widen the zone enough to
-    /// arm the notch from a brush past neighbouring menu-bar items.
+    /// arm the notch from a brush past neighbouring menu-bar items. An inline peek is the one
+    /// case where the zone legitimately spans the surface's own width: the pill has grown to host
+    /// the banner, and a zone narrower than it would drop the hover mid-reach for the action.
     private func hoverGrowth(hovered: Bool, state: NotchState, geometry geo: NotchGeometry) -> CGFloat {
         guard hovered, state != .expanded, !geo.isHardwareNotch else { return 1 }
         return NotchTheme.pillHoverScale
+    }
+
+    /// How far past the notch strip an active peek reaches, for sizing the regions that must
+    /// contain it. A below-notch banner adds its own fixed strip plus an aiming margin. An inline
+    /// peek adds no second row — it swells the strip itself — so only the strip's growth beyond
+    /// the bare notch counts, and an indefinitely-held nudge leaves no click-swallowing band under
+    /// the pill.
+    private func peekHeightExtension(notchStripHeight: CGFloat) -> CGFloat {
+        guard hasActivePeekBanner else { return 0 }
+        guard peekPresentsInline else { return peekBannerHeight + 8 }
+        return max(0, collapsedStripHeight - notchStripHeight)
     }
 
     /// The clickable / droppable region in the window content's bounds coordinates (bottom-left
@@ -431,10 +503,11 @@ public final class NotchEngine: ObservableObject {
             width = expandedPanelWidth + 24
             height = notchH + expandedSheetHeight + 12
         case .compact:
-            width = geo.notchWidth * growth + 180
-            // Banner controls sit below the compact pill, so the hit region must cover that
-            // fixed extension as well as a small aiming margin beneath it.
-            height = notchH * growth + 16 + (hasActivePeekBanner ? peekBannerHeight + 8 : 0)
+            // The fixed allowance covers ordinary compact content; the measured surface covers
+            // anything that outgrows it — an inline peek, or compact contributions wide enough to
+            // push the pill's outer edges past the allowance and out of the clickable region.
+            width = max(geo.notchWidth * growth + 180, collapsedSurfaceWidth + 24)
+            height = notchH * growth + 16 + peekHeightExtension(notchStripHeight: notchH * growth)
         case .idle:
             width = geo.notchWidth * growth + 28
             height = notchH * growth + 14
@@ -487,9 +560,12 @@ public final class NotchEngine: ObservableObject {
             // the instant it began and the pill would chatter in and out.
             let pad: CGFloat = hovered ? 40 : 24
             let growth = hoverGrowth(hovered: hovered, state: state, geometry: geo)
-            let width = geo.notchWidth * growth + 2 * pad
+            let width = max(
+                geo.notchWidth * growth + 2 * pad,
+                peekPresentsInline ? collapsedSurfaceWidth + 2 * pad : 0
+            )
             let bannerActive = hasActivePeekBanner
-            let bannerExtension = bannerActive ? peekBannerHeight + 8 : 0
+            let bannerExtension = peekHeightExtension(notchStripHeight: notchH * growth)
             // Keep the hover zone over the banner so moving down to its action does not dismiss
             // or detach the active surface. A held banner also detaches the surface off a
             // notched screen, so the zone reaches down over the drop just as it does for hover.

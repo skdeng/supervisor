@@ -37,7 +37,8 @@ public enum NotchTheme {
     public static let compactSidePadding: CGFloat = 8
     /// Standard height of a compact contribution (album-art thumbnail, equalizer). The pill's
     /// horizontal edge padding is derived from it so the side margins match the vertical margin
-    /// around standard-height content; the derivation lives in `NotchRootView`.
+    /// standard-height content holds in the bare notch strip; the derivation lives in
+    /// `NotchRootView`.
     public static let compactContentHeight: CGFloat = 18
     /// Padding inside the expanded panel.
     public static let panelPadding: CGFloat = 16

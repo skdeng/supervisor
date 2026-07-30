@@ -26,8 +26,14 @@ public protocol NotchModule: AnyObject {
     /// Section shown in the EXPANDED panel. nil contributes nothing.
     func expandedSection() -> AnyView?
 
-    /// Banner shown BELOW the notch while a peek this module raised is active. nil falls
-    /// back to the widened compact pill.
+    /// Banner shown while a peek this module raised is active. nil falls back to the widened
+    /// compact pill.
+    ///
+    /// It presents below the notch on a screen with a physical cutout, and centered in the pill's
+    /// own gap — between the compact columns, with the pill growing around it — on a screen
+    /// without one. It must therefore be intrinsically sizable on BOTH axes: no `GeometryReader`
+    /// at its root, and `Spacer(minLength:)` rather than a bare `Spacer`, or its natural width
+    /// measures as zero and the pill has nothing to grow to.
     func peekBanner() -> AnyView?
 }
 

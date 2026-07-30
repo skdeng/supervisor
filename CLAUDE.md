@@ -35,8 +35,9 @@ A single morphing surface, driven by a small state machine, that modules feed co
 - **`Core/NotchModule.swift`** — the plugin contract. `@MainActor public protocol NotchModule`:
   `moduleID` / `displayName` / `order` (lower renders earlier in the expanded panel),
   `activate(_:)` / `deactivate()`, and four optional UI surfaces — `compactLeading()`,
-  `compactTrailing()`, `expandedSection()`, and `peekBanner()` (a below-the-notch banner during a
-  peek). Each returns `AnyView?` and defaults to `nil`. Modules are
+  `compactTrailing()`, `expandedSection()`, and `peekBanner()` (a banner during a peek — below the
+  notch over a physical cutout, inside the pill's gap on a screen without one; it must be
+  intrinsically sizable on both axes). Each returns `AnyView?` and defaults to `nil`. Modules are
   typically `final class … : NotchModule, ObservableObject`; the `AnyView`s they return wrap an
   `@ObservedObject` of themselves, so a module's own `@Published` changes re-render only its
   subtree. Modules never reference each other.
@@ -93,16 +94,28 @@ proportionally in height (`NotchTheme.pillHoverScale`) and by the fixed `hoverWi
 in width — and its concave menu-bar flares curl inward into convex corners. The
 open sheet keeps that silhouette, so the pill grows rather than snapping back to the edge. The
 hover swell is **layout growth, not a render transform**: the surface's frame widens by the
-fixed pad and both content rows re-lay-out to the grown width, so nothing rasterizes — content
-keeps its natural size while the flexible gaps (the pill's cutout, the banner's internal spacer)
-absorb the growth. The edge margin is derived, not a fixed token
-(`NotchRootView.surfaceEdgePad`): the visible side margin always equals the vertical margin
-around standard-height compact content — `(stripHeight − NotchTheme.compactContentHeight) / 2`,
-plus the flare inset the body sides tuck behind while attached — so the pill's side and
-top/bottom margins match in every state, through the hover swell and the detach morph alike. The
-two rows share that one padding value (applied to both by `NotchRootView`, never by a module's
-banner view), so their content edges align by construction; the banner strip's height never
-grows.
+fixed pad and the content row re-lays-out to the grown width, so nothing rasterizes — content
+keeps its natural size while the flexible gap (the pill's cutout) absorbs the growth. The edge
+margin is derived, not a fixed token (`NotchRootView.surfaceEdgePad`): the visible side margin
+equals the vertical margin standard-height compact content holds in the bare notch strip —
+`(grownNotchH − NotchTheme.compactContentHeight) / 2`, plus the flare inset the body sides tuck
+behind while attached — so the pill's side and top/bottom margins match through the hover swell
+and the detach morph alike. An inline peek swells the strip past that floor; flanking content
+then gains extra top/bottom clearance while its side margin holds.
+
+**A peek banner rides inside the pill here** (`NotchRootView.inlinePeek`), rather than as a second
+row below it: the module's `peekBanner()` renders centered in the cutout gap between the compact
+columns, and the pill grows around it on both axes. `stripH` swells so the banner clears the strip
+by `surfaceEdgePad` above and below; the gap widens by `surfaceEdgePad` per side in a bare pill —
+matching that vertical margin — or by `NotchTheme.compactSidePadding` per side when flanked, which
+with the columns' own padding leaves 16pt between the banner and each neighbouring live activity.
+Hover growth reaches the inline pill only through `surfaceEdgePad` and the columns' padding, never
+an added `hoverWidthPad`. Width is clamped to `NotchEngine.collapsedWidthLimit` (the fixed canvas
+minus 8pt), and `NotchRootView` reports the laid-out width and strip height to the engine
+(`reportCollapsedSurface`), which sizes the hit-test and hover rects from them and re-runs
+`HoverMonitor.refresh()` — a nudge arrives at a micro-pause with the cursor stationary, so absent
+that refresh no mouse event would re-evaluate hover once the pill retracts and it would stay
+detached.
 
 - **`NotchShape`** morphs on one continuous `pillness` (0…1), animated through
   `AnimatablePair(cornerRadius, pillness)`. Each top corner is a **single** quadratic curve, not
@@ -276,8 +289,9 @@ names below are the code paths.
   dismissed meetings and all-day events do not defer nudges.
   Breaks are forgiving: ≥180 s away is a break and silently resets the clock, whether nudged or
   spontaneous — someone who naturally breaks never hears from it; a nudged break earns a brief
-  "recharged" compact ack on return. The nudge presents as a banner extending below the notch with
-  the heads-down message and a one-tap Take action; the banner holds (an indefinite peek,
+  "recharged" compact ack on return. The nudge presents as a banner carrying the heads-down message
+  and a one-tap Take action — extending below the notch over a physical cutout, riding inside the
+  widened pill on a screen without one; the banner holds (an indefinite peek,
   `requestPeek(.infinity)`) until Take / Snooze / Skip or a spontaneous break resolves it.
   Compact: a break countdown ring or the ack — nothing otherwise; a work session in progress has
   no pill presence at all (the banner is the only work-time surfacing).

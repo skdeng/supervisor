@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// The compact live-activity content that flanks the notch cutout: `compactLeading()` to the
-/// left, `compactTrailing()` to the right.
+/// left, `compactTrailing()` to the right, and — on a screen with no physical cutout — a peek
+/// banner centered in the gap between them.
 ///
 /// It draws NO background or offset of its own — the single morphing surface in
 /// `NotchRootView` provides those — and reports each side's measured natural width through
@@ -26,6 +27,13 @@ struct CompactPillView: View {
     @Binding var leadingWidth: CGFloat
     @Binding var trailingWidth: CGFloat
 
+    /// A peek banner to render in the center gap; nil when nothing peeks or the banner belongs
+    /// below a physical notch instead.
+    let centerContent: AnyView?
+    /// The banner's measured natural size (nil until the probe first reports), owned by
+    /// `NotchRootView`, which sizes the surface around it.
+    @Binding var centerSize: CGSize?
+
     /// Gap between content and the notch cutout.
     private let sidePadding: CGFloat = NotchTheme.compactSidePadding
 
@@ -46,6 +54,7 @@ struct CompactPillView: View {
             // here (and the camera cap blends the hardware notch).
             Color.clear
                 .frame(width: cutoutWidth)
+                .overlay { centerBanner }
 
             trailingContent
                 .padding(.leading, hasTrailing ? sidePadding : 0)
@@ -57,6 +66,33 @@ struct CompactPillView: View {
         }
         .frame(height: stripHeight)
         .foregroundStyle(NotchTheme.primaryForeground)
+    }
+
+    /// The peek banner, centered in the gap. It rides in an OVERLAY rather than the `HStack`, so
+    /// it never feeds its own width back into the layout that sized the gap around it.
+    ///
+    /// The visible copy is given the probe's measured size as a finite proposal instead of
+    /// `.fixedSize()`: a banner built with a `Spacer` or `maxWidth: .infinity` needs a bounded
+    /// width to lay out as designed, and that bound is exactly its natural one.
+    @ViewBuilder
+    private var centerBanner: some View {
+        if let centerContent {
+            let measured = centerSize ?? .zero
+            centerContent
+                // The width bound only engages when the banner outgrows the gap the clamped
+                // surface could give it — it then squeezes rather than overlapping the flanks.
+                .frame(width: min(measured.width, cutoutWidth), height: measured.height)
+                // The one frame before the probe reports: an unmeasured banner would flash at
+                // zero size in the middle of the pill.
+                .opacity(centerSize == nil ? 0 : 1)
+                .background(
+                    centerContent
+                        .fixedSize()
+                        .hidden()
+                        .background(SizeReader(size: $centerSize))
+                )
+                .transition(.opacity.combined(with: .scale))
+        }
     }
 
     private var hasLeading: Bool { !leadingModules.isEmpty }
@@ -115,6 +151,26 @@ struct WidthReader: View {
                 .onChange(of: proxy.size.width, initial: true) { _, newWidth in
                     withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
                         width = newWidth
+                    }
+                }
+        }
+    }
+}
+
+/// Reports the natural size of the view it backs through a binding, for content the surface has
+/// to grow around on both axes. Animated on the same explicit transaction as `WidthReader`, and
+/// for the same reason. The two readers stay separate because they watch different things:
+/// `WidthReader` fires on width alone, so the hover swell's height change leaves the side
+/// columns' measurements untouched, while this one must track both axes.
+struct SizeReader: View {
+    @Binding var size: CGSize?
+
+    var body: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .onChange(of: proxy.size, initial: true) { _, newSize in
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                        size = newSize
                     }
                 }
         }
