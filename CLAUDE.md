@@ -453,5 +453,6 @@ artifacts:
 ## Git
 
 - Committing and pushing directly to this repo is fine — no need to ask first.
+- **Don't create PRs for this repo.** When asked to ship changes, push to `main` directly.
 - **Commit messages must not carry co-authorship or tooling trailers** — no `Co-Authored-By:`
   line and no `Claude-Session:` line. Keep the message to the change itself.
