@@ -205,6 +205,7 @@ final class AgentTaskService {
     private var terminateSignalSent = false
     private var scratchDirectoryURL: URL?
     private var hasRun = false
+    private var runStartedAt: Date?
 
     var hasUnresolvedTask: Bool { continuation != nil }
 
@@ -221,6 +222,7 @@ final class AgentTaskService {
             throw AgentTaskError.cancelled
         }
         guard let executableURL = Self.resolveExecutable() else {
+            AppLog.error(.agentDispatch, "agent task spawn failed: executable not found")
             throw AgentTaskError.binaryNotFound
         }
 
@@ -241,6 +243,8 @@ final class AgentTaskService {
             throw AgentTaskError.cancelled
         }
 
+        runStartedAt = Date()
+        AppLog.notice(.agentDispatch, "agent task started")
         let instruction = Self.instruction(
             request: request,
             copiedFileURL: workspace.copiedFileURL
@@ -322,6 +326,10 @@ final class AgentTaskService {
                 workingDirectory: workspace.directoryURL
             )
         } catch {
+            AppLog.error(
+                .agentDispatch,
+                "agent task spawn failed: \(error.localizedDescription)"
+            )
             resolve(.failure(.launchFailed(error.localizedDescription)))
             return
         }
@@ -522,6 +530,7 @@ final class AgentTaskService {
 
     private func resolve(_ result: Result<AgentTaskResult, AgentTaskError>) {
         guard let continuation else { return }
+        let duration = runStartedAt.map { max(0, Date().timeIntervalSince($0)) }
 
         timeoutTask?.cancel()
         timeoutTask = nil
@@ -542,6 +551,21 @@ final class AgentTaskService {
         outputOutcome = nil
         diagnosticTail = nil
         pendingStopError = nil
+        runStartedAt = nil
+
+        switch result {
+        case .failure(.cancelled):
+            AppLog.notice(.agentDispatch, "agent task cancelled")
+        case .failure(.launchFailed):
+            break
+        default:
+            if let duration {
+                AppLog.notice(
+                    .agentDispatch,
+                    "agent task finished in \(String(format: "%.2f", duration))s"
+                )
+            }
+        }
 
         switch result {
         case let .success(value):

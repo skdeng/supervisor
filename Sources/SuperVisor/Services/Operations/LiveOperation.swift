@@ -14,9 +14,9 @@ final class LiveOperation: ObservableObject, Identifiable {
 
     let id: UUID
     let title: String
-    let detail: String?
     let startedAt: Date
 
+    @Published private(set) var detail: String?
     @Published private(set) var state: State = .running
     @Published private(set) var costUSD: Double?
 
@@ -40,6 +40,11 @@ final class LiveOperation: ObservableObject, Identifiable {
         self.detail = detail
         self.startedAt = startedAt
         self.onCancel = onCancel
+    }
+
+    func setDetail(_ detail: String?) {
+        guard state == .running else { return }
+        self.detail = detail
     }
 
     func cancel() {
