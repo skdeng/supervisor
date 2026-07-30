@@ -101,7 +101,10 @@ final class SystemAudioTap: @unchecked Sendable {
         // until answered — we are on our own queue, so nothing user-visible stalls).
         let tapStatus = AudioHardwareCreateProcessTap(description, &newTap)
         guard tapStatus == noErr, newTap != kAudioObjectUnknown else {
-            NSLog("SystemAudioTap: tap creation failed (%d) — permission denied or tap unavailable", tapStatus)
+            AppLog.error(
+                .media,
+                "SystemAudioTap: tap creation failed (\(tapStatus)) — permission denied or tap unavailable"
+            )
             unavailable = true
             notifyState(.unavailable)
             return
@@ -110,7 +113,7 @@ final class SystemAudioTap: @unchecked Sendable {
 
         // 2. A private aggregate: default output as main sub-device, our tap as tap sub-device.
         guard let output = defaultOutputDevice(), let outputUID = deviceUID(of: output) else {
-            NSLog("SystemAudioTap: no default output device — cannot host the tap")
+            AppLog.error(.media, "SystemAudioTap: no default output device — cannot host the tap")
             destroyObjectsLocked()
             unavailable = true
             notifyState(.unavailable)
@@ -136,7 +139,10 @@ final class SystemAudioTap: @unchecked Sendable {
         let aggregateStatus = AudioHardwareCreateAggregateDevice(
             aggregateDescription as CFDictionary, &newAggregate)
         guard aggregateStatus == noErr, newAggregate != kAudioObjectUnknown else {
-            NSLog("SystemAudioTap: aggregate creation failed (%d)", aggregateStatus)
+            AppLog.error(
+                .media,
+                "SystemAudioTap: aggregate creation failed (\(aggregateStatus))"
+            )
             destroyObjectsLocked()
             unavailable = true
             notifyState(.unavailable)
@@ -150,7 +156,10 @@ final class SystemAudioTap: @unchecked Sendable {
         if let format,
            format.mFormatID != kAudioFormatLinearPCM
             || (format.mFormatFlags & kAudioFormatFlagIsFloat) == 0 {
-            NSLog("SystemAudioTap: unexpected tap format (%u) — not float PCM", format.mFormatID)
+            AppLog.error(
+                .media,
+                "SystemAudioTap: unexpected tap format (\(format.mFormatID)) — not float PCM"
+            )
             destroyObjectsLocked()
             unavailable = true
             notifyState(.unavailable)
@@ -177,7 +186,7 @@ final class SystemAudioTap: @unchecked Sendable {
         }
         guard procStatus == noErr, let proc = newProc,
               AudioDeviceStart(aggregateID, proc) == noErr else {
-            NSLog("SystemAudioTap: IO proc setup failed (%d)", procStatus)
+            AppLog.error(.media, "SystemAudioTap: IO proc setup failed (\(procStatus))")
             if let proc = newProc { AudioDeviceDestroyIOProcID(aggregateID, proc) }
             destroyObjectsLocked()
             unavailable = true
@@ -259,7 +268,7 @@ final class SystemAudioTap: @unchecked Sendable {
             let audibleAt = self.lastAudibleAt
             self.audibleLock.unlock()
             if now - audibleAt > 6, now - self.lastRebuildAt > 10 {
-                NSLog("SystemAudioTap: stream silent while playing — rebuilding tap")
+                AppLog.error(.media, "SystemAudioTap: stream silent while playing — rebuilding tap")
                 self.rebuildLocked()
             }
         }

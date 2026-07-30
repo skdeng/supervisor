@@ -48,7 +48,7 @@ final class CodexRateLimitClient {
     private func launch() {
         guard wantsProcess, process == nil else { return }
         guard let executableURL = Self.resolveCodexExecutable() else {
-            failCurrentAttempt()
+            failCurrentAttempt(reason: "helper executable not found")
             return
         }
 
@@ -75,15 +75,19 @@ final class CodexRateLimitClient {
             guard !chunk.isEmpty else { return }
             Task { @MainActor in self?.ingest(chunk) }
         }
-        process.terminationHandler = { [weak self] _ in
-            Task { @MainActor in self?.handleTermination() }
+        process.terminationHandler = { [weak self] process in
+            let status = process.terminationStatus
+            let reason = process.terminationReason == .exit ? "exit" : "signal"
+            Task { @MainActor in
+                self?.handleTermination(status: status, reason: reason)
+            }
         }
 
         do {
             try process.run()
         } catch {
             output.fileHandleForReading.readabilityHandler = nil
-            failCurrentAttempt()
+            failCurrentAttempt(reason: "helper spawn failed: \(error.localizedDescription)")
             return
         }
 
@@ -92,6 +96,7 @@ final class CodexRateLimitClient {
         outputPipe = output
         initialized = false
         buffer.removeAll(keepingCapacity: true)
+        AppLog.notice(.usage, "rate-limit helper spawned pid \(process.processIdentifier)")
 
         guard send([
             "method": "initialize",
@@ -123,16 +128,21 @@ final class CodexRateLimitClient {
         activeRateRequestID = nil
     }
 
-    private func handleTermination() {
+    private func handleTermination(status: Int32, reason: String) {
         let shouldNotify = wantsProcess
+        AppLog.notice(.usage, "rate-limit helper terminated \(reason) \(status)")
         teardownProcess()
         wantsProcess = false
         pendingRequest = false
         if shouldNotify { onUnavailable?() }
     }
 
-    private func failCurrentAttempt() {
+    private func failCurrentAttempt(reason: String? = nil) {
         let shouldNotify = wantsProcess
+        if shouldNotify {
+            let suffix = reason.map { ": \($0)" } ?? ""
+            AppLog.error(.usage, "rate-limit helper attempt failed\(suffix)")
+        }
         wantsProcess = false
         pendingRequest = false
         teardownProcess()
@@ -158,13 +168,20 @@ final class CodexRateLimitClient {
         guard let handle = inputPipe?.fileHandleForWriting,
               JSONSerialization.isValidJSONObject(object),
               var data = try? JSONSerialization.data(withJSONObject: object)
-        else { return false }
+        else {
+            AppLog.error(.usage, "rate-limit helper send failed: unavailable pipe or invalid message")
+            return false
+        }
 
         data.append(UInt8(ascii: "\n"))
         do {
             try handle.write(contentsOf: data)
             return true
         } catch {
+            AppLog.error(
+                .usage,
+                "rate-limit helper send failed: \(error.localizedDescription)"
+            )
             return false
         }
     }
@@ -174,6 +191,7 @@ final class CodexRateLimitClient {
     private func ingest(_ chunk: Data) {
         buffer.append(chunk)
         guard buffer.count <= Self.maxBufferedBytes else {
+            AppLog.error(.usage, "rate-limit helper oversized output buffer")
             failCurrentAttempt()
             buffer.removeAll(keepingCapacity: false)
             return

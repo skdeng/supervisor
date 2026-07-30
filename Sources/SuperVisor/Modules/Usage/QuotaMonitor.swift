@@ -128,6 +128,7 @@ final class QuotaMonitor: ObservableObject {
         let has = showsRow
         if has != hadRow {
             hadRow = has
+            AppLog.debug(.usage, "usage capture row -> \(has ? "visible" : "hidden")")
             onPresenceChange?()
         }
     }

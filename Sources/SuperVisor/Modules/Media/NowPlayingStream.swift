@@ -56,6 +56,10 @@ final class NowPlayingStream {
     func start() {
         guard !isRunning else { return }
         guard dylibPath != nil else {
+            AppLog.error(
+                .media,
+                "now-playing helper unavailable; permanent fallback to one-shot reader"
+            )
             onUnavailable?()
             return
         }
@@ -92,14 +96,19 @@ final class NowPlayingStream {
             guard !chunk.isEmpty else { return }
             Task { @MainActor in self?.ingest(chunk) }
         }
-        process.terminationHandler = { [weak self] _ in
-            Task { @MainActor in self?.handleTermination() }
+        process.terminationHandler = { [weak self] process in
+            let status = process.terminationStatus
+            Task { @MainActor in self?.handleTermination(status: status) }
         }
 
         do {
             try process.run()
         } catch {
             isRunning = false
+            AppLog.error(
+                .media,
+                "now-playing helper spawn failed: \(error.localizedDescription); permanent fallback to one-shot reader"
+            )
             onUnavailable?()
             return
         }
@@ -107,6 +116,7 @@ final class NowPlayingStream {
         self.process = process
         self.helperInput = input
         buffer.removeAll(keepingCapacity: true)
+        AppLog.notice(.media, "now-playing helper spawned pid \(process.processIdentifier)")
     }
 
     private func teardownProcess() {
@@ -121,7 +131,7 @@ final class NowPlayingStream {
         helperInput = nil
     }
 
-    private func handleTermination() {
+    private func handleTermination(status: Int32) {
         teardownProcess()
         guard isRunning else { return }   // a deliberate stop(), not a crash
 
@@ -131,12 +141,20 @@ final class NowPlayingStream {
 
         guard restartTimes.count <= Self.maxRestarts else {
             isRunning = false
+            AppLog.error(
+                .media,
+                "now-playing helper exited status \(status); permanent fallback to one-shot reader"
+            )
             onUnavailable?()
             return
         }
 
         // 1s, 2s, 4s, 8s — enough to ride out a transient failure without spinning.
         let delay = min(pow(2, Double(restartTimes.count - 1)), 30)
+        AppLog.error(
+            .media,
+            "now-playing helper exited status \(status); respawn in \(Int(delay))s"
+        )
         restartTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }

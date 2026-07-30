@@ -168,6 +168,7 @@ final class CodexQuotaMonitor: ObservableObject {
         let has = showsRow
         if has != hadRow {
             hadRow = has
+            AppLog.debug(.usage, "usage app-server row -> \(has ? "visible" : "hidden")")
             onPresenceChange?()
         }
     }

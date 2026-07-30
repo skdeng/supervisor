@@ -97,7 +97,10 @@ final class RemindersService: ObservableObject {
         do {
             try store.save(reminder, commit: true)
         } catch {
-            NSLog("SuperVisor: failed to complete reminder: \(error.localizedDescription)")
+            AppLog.error(
+                .module,
+                "SuperVisor: failed to complete reminder: \(error.localizedDescription)"
+            )
         }
     }
 
