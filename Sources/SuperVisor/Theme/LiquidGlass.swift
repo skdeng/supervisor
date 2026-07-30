@@ -35,9 +35,10 @@ public enum NotchTheme {
 
     /// Horizontal inset between the notch cutout and compact content.
     public static let compactSidePadding: CGFloat = 8
-    /// Horizontal inset between the surface's rounded outer edge and its content — shared by
-    /// the compact pill columns and peek-banner rows so their edges align by construction.
-    public static let surfaceEdgePadding: CGFloat = 17
+    /// Standard height of a compact contribution (album-art thumbnail, equalizer). The pill's
+    /// horizontal edge padding is derived from it so the side margins match the vertical margin
+    /// around standard-height content; the derivation lives in `NotchRootView`.
+    public static let compactContentHeight: CGFloat = 18
     /// Padding inside the expanded panel.
     public static let panelPadding: CGFloat = 16
     /// Vertical spacing between stacked module sections in the expanded panel. Sections carry

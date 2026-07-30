@@ -82,9 +82,10 @@ struct NotchRootView: View {
     private var compactWidth: CGFloat {
         notchW + 2 * sideWidth + (hoverGrowth > 1 ? 2 * NotchTheme.hoverWidthPad : 0)
     }
-    /// Collapsed surface width: the banner's measured width already carries the shared
-    /// `surfaceEdgePadding` on both sides, so it IS the surface width — any extra allowance
-    /// would push the banner row's content out of alignment with the pill row's.
+    /// Collapsed surface width: the banner row's edge padding is applied here (shared with the
+    /// compact row) and is included in the probe's measurement, so the measured width IS the
+    /// surface width — any extra allowance would push the banner row's content out of alignment
+    /// with the pill row's.
     private var collapsedWidth: CGFloat {
         bannerActive ? max(compactWidth, peekBannerWidth) : compactWidth
     }
@@ -94,6 +95,20 @@ struct NotchRootView: View {
     /// natural size and hug the surface's outer edges at a constant margin, riding outward
     /// with the hover swell so content hugs the sides in every state.
     private var cutoutWidth: CGFloat { collapsedWidth - 2 * sideWidth }
+
+    /// Horizontal inset from the surface's frame edge to its content, for both the compact row
+    /// and the peek-banner row — one value, so the two rows' content edges align by construction.
+    ///
+    /// The VISIBLE side margin must equal the vertical margin around standard-height compact
+    /// content, `(stripHeight − compactContentHeight) / 2`, so the content sits equally far from
+    /// every edge of the pill. While the surface is attached, the shape's body sides tuck
+    /// `NotchShape.defaultTopRadius` behind the concave flares, so the frame-relative padding
+    /// carries that extra inset on top; detached, the body fills the frame and the padding IS the
+    /// visible margin.
+    private var surfaceEdgePad: CGFloat {
+        (grownNotchH - NotchTheme.compactContentHeight) / 2
+            + NotchShape.defaultTopRadius * (1 - pillness)
+    }
 
     /// The morphing surface's animated size. Pill and sheet are both centered on the notch. The
     /// frame grows by the drop so the body keeps its height as the shape lifts inside it.
@@ -245,6 +260,7 @@ struct NotchRootView: View {
             CompactPillView(
                 cutoutWidth: cutoutWidth,
                 stripHeight: grownNotchH,
+                edgePadding: surfaceEdgePad,
                 leadingWidth: $leadingWidth,
                 trailingWidth: $trailingWidth
             )
@@ -259,10 +275,12 @@ struct NotchRootView: View {
                 // measures the banner's natural minimum width, which is what sizes the
                 // surface when the banner is the widest element.
                 peekBannerView
+                    .padding(.horizontal, surfaceEdgePad)
                     .frame(maxWidth: .infinity)
                     .frame(height: engine.peekBannerHeight)
                     .background(
                         peekBannerView
+                            .padding(.horizontal, surfaceEdgePad)
                             .fixedSize()
                             .hidden()
                             .background(WidthReader(width: $peekBannerWidth))

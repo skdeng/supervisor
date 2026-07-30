@@ -4,7 +4,7 @@ import SwiftUI
 struct MediaArtworkCompactView: View {
     @ObservedObject var module: MediaModule
 
-    private let artSize: CGFloat = 18
+    private let artSize: CGFloat = NotchTheme.compactContentHeight
 
     var body: some View {
         if module.nowPlaying != nil {
@@ -54,7 +54,7 @@ struct MediaBarsCompactView: View {
                     AudioBarsView(isPlaying: nowPlaying.isPlaying, tint: module.artworkAccent)
                 }
             }
-            .frame(width: SpectrumBarsView.naturalWidth, height: 18)
+            .frame(width: SpectrumBarsView.naturalWidth, height: NotchTheme.compactContentHeight)
             .transition(.opacity.combined(with: .scale))
         }
     }

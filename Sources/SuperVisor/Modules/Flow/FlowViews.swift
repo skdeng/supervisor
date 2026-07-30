@@ -73,7 +73,6 @@ struct FlowPeekBannerView: View {
                 action: tracker.takeBreak
             )
         }
-        .padding(.horizontal, NotchTheme.surfaceEdgePadding)
     }
 }
 

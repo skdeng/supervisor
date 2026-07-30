@@ -17,6 +17,10 @@ struct CompactPillView: View {
     let cutoutWidth: CGFloat
     /// Height of the notch / pill strip at the current hover growth.
     let stripHeight: CGFloat
+    /// Gap between content and the surface's FRAME edge, sized by `NotchRootView` so the visible
+    /// side margin matches the vertical margin around standard-height content. While the surface
+    /// is attached it additionally covers the flare inset the body sides tuck behind.
+    let edgePadding: CGFloat
 
     /// Measured natural widths of each side's content, owned by `NotchRootView`.
     @Binding var leadingWidth: CGFloat
@@ -25,18 +29,13 @@ struct CompactPillView: View {
     /// Gap between content and the notch cutout.
     private let sidePadding: CGFloat = NotchTheme.compactSidePadding
 
-    /// Gap between content and the pill's rounded outer edge, so indicators aren't flush
-    /// against the edge (and clear the concave top-corner flare). Shared with the peek-banner
-    /// rows so the two rows' content edges align.
-    private let outerPadding: CGFloat = NotchTheme.surfaceEdgePadding
-
     /// Both side slots render at the wider side's measured width, keeping the pill symmetric.
     private var sideWidth: CGFloat { max(leadingWidth, trailingWidth) }
 
     var body: some View {
         HStack(spacing: 0) {
             leadingContent
-                .padding(.leading, hasLeading ? outerPadding : 0)
+                .padding(.leading, hasLeading ? edgePadding : 0)
                 .padding(.trailing, hasLeading ? sidePadding : 0)
                 .fixedSize()
                 .background(WidthReader(width: $leadingWidth))
@@ -50,7 +49,7 @@ struct CompactPillView: View {
 
             trailingContent
                 .padding(.leading, hasTrailing ? sidePadding : 0)
-                .padding(.trailing, hasTrailing ? outerPadding : 0)
+                .padding(.trailing, hasTrailing ? edgePadding : 0)
                 .fixedSize()
                 .background(WidthReader(width: $trailingWidth))
                 .frame(width: sideWidth, alignment: .trailing)

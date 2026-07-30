@@ -94,9 +94,15 @@ in width — and its concave menu-bar flares curl inward into convex corners. Th
 open sheet keeps that silhouette, so the pill grows rather than snapping back to the edge. The
 hover swell is **layout growth, not a render transform**: the surface's frame widens by the
 fixed pad and both content rows re-lay-out to the grown width, so nothing rasterizes — content
-keeps its natural size and its constant edge margin, riding outward with the edges while the
-flexible gaps (the pill's cutout, the banner's internal spacer) absorb the growth. The two rows
-therefore share edge margins in every hover state; the banner strip's height never grows.
+keeps its natural size while the flexible gaps (the pill's cutout, the banner's internal spacer)
+absorb the growth. The edge margin is derived, not a fixed token
+(`NotchRootView.surfaceEdgePad`): the visible side margin always equals the vertical margin
+around standard-height compact content — `(stripHeight − NotchTheme.compactContentHeight) / 2`,
+plus the flare inset the body sides tuck behind while attached — so the pill's side and
+top/bottom margins match in every state, through the hover swell and the detach morph alike. The
+two rows share that one padding value (applied to both by `NotchRootView`, never by a module's
+banner view), so their content edges align by construction; the banner strip's height never
+grows.
 
 - **`NotchShape`** morphs on one continuous `pillness` (0…1), animated through
   `AnimatablePair(cornerRadius, pillness)`. Each top corner is a **single** quadratic curve, not
@@ -104,8 +110,9 @@ therefore share edge margins in every hover state; the banner strip's height nev
   differ only in their endpoints, which slide from `-flare` outside the body to `+rounding` inside
   it. Growing a second curve beside a shrinking first reads as a bump next to a dip. The flare
   doubles as the body's side inset: attached, the sides tuck `topRadius` behind the flares; as
-  the surface detaches they slide out so the floating pill fills its frame edge to edge, and
-  content padded from the frame edge keeps that full margin from the visible edge. At
+  the surface detaches they slide out so the floating pill fills its frame edge to edge. The
+  derived edge padding sheds that same flare inset as `pillness` rises, so the visible side
+  margin holds steady through the morph instead of widening as the body reaches the frame. At
   `pillness == 0` the path emits an element sequence byte-identical to the plain notch — verify
   any change to it by rasterizing both and diffing coverage.
 - **`pillTopDrop` is 0 on a hardware notch**, which is what makes nearly every downstream branch a
