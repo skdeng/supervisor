@@ -171,6 +171,7 @@ public final class NotchEngine: ObservableObject {
             .sorted { $0.order < $1.order }
         for module in enabled {
             module.activate(context)
+            AppLog.notice(.module, "activate \(module.moduleID)")
         }
         modules = enabled
     }
@@ -189,9 +190,11 @@ public final class NotchEngine: ObservableObject {
 
         for module in modules where !desiredIDs.contains(module.moduleID) {
             module.deactivate()
+            AppLog.notice(.module, "deactivate \(module.moduleID)")
         }
         for module in desired where !activeIDs.contains(module.moduleID) {
             module.activate(context)
+            AppLog.notice(.module, "activate \(module.moduleID)")
         }
         modules = desired
         // A module appearing/disappearing changes compact presence and the resting state, and
@@ -219,6 +222,7 @@ public final class NotchEngine: ObservableObject {
     /// (`requestCollapse()` / `requestExpand()`) or the user opens the sheet.
     public func requestPeek(_ seconds: TimeInterval) {
         guard state != .expanded else { return }
+        AppLog.debug(.engine, seconds.isFinite ? "peek \(seconds)s" : "peek held")
         peekTask?.cancel()
         peekTask = nil
         isPeeking = true
@@ -227,6 +231,11 @@ public final class NotchEngine: ObservableObject {
         peekTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
             guard let self, !Task.isCancelled else { return }
+            self.peekTask = nil
+            // A module supplying a banner is an unresolved hold: a timed peek that fired while
+            // (or before) the banner was up must not tear the banner down when it expires, so
+            // the surface stays held until every banner source has withdrawn.
+            if self.activePeekBanner() != nil { return }
             self.isPeeking = false
             if self.state != .expanded {
                 self.transition(to: self.resolvedRestingState())
@@ -365,6 +374,7 @@ public final class NotchEngine: ObservableObject {
         // Dynamic-Island animation is never clipped by a window resize. `NotchRootView` owns
         // the springs (keyed on the published `state`), so we just publish the new state.
         state = newState
+        AppLog.debug(.engine, "state -> \(String(describing: newState))")
         // Interactivity depends on both hover and the new state; recompute outside animation.
         updateInteractivity()
         hover.refresh()
@@ -406,10 +416,12 @@ public final class NotchEngine: ObservableObject {
         let notchH = max(geo.notchHeight, 32)
         let centerX = w / 2  // canvas is centered on the notch
 
-        // Off a notched screen the surface detaches on hover and while the sheet is open. The
-        // hit-test region drops with it, so the strip of menu bar it vacates goes back to being
-        // the menu bar rather than a dead zone that swallows clicks.
-        let drop = (isHovered || state == .expanded) ? geo.pillTopDrop : 0
+        // Off a notched screen the surface detaches on hover, while the sheet is open, and while
+        // a peek banner is held. The hit-test region drops with it, so the strip of menu bar it
+        // vacates goes back to being the menu bar rather than a dead zone that swallows clicks.
+        let drop = (isHovered || state == .expanded || hasActivePeekBanner)
+            ? geo.pillTopDrop
+            : 0
         let growth = hoverGrowth(hovered: isHovered, state: state, geometry: geo)
 
         let width: CGFloat
@@ -476,10 +488,12 @@ public final class NotchEngine: ObservableObject {
             let pad: CGFloat = hovered ? 40 : 24
             let growth = hoverGrowth(hovered: hovered, state: state, geometry: geo)
             let width = geo.notchWidth * growth + 2 * pad
-            let bannerExtension = hasActivePeekBanner ? peekBannerHeight + 8 : 0
+            let bannerActive = hasActivePeekBanner
+            let bannerExtension = bannerActive ? peekBannerHeight + 8 : 0
             // Keep the hover zone over the banner so moving down to its action does not dismiss
-            // or detach the active surface.
-            let minY = top - (hovered ? geo.pillTopDrop : 0) - notchH * growth
+            // or detach the active surface. A held banner also detaches the surface off a
+            // notched screen, so the zone reaches down over the drop just as it does for hover.
+            let minY = top - ((hovered || bannerActive) ? geo.pillTopDrop : 0) - notchH * growth
                 - (hovered ? 22 : 12) - bannerExtension
             return CGRect(x: geo.centerX - width / 2, y: minY, width: width, height: maxY - minY)
         case .expanded:

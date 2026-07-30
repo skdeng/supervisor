@@ -10,6 +10,7 @@ struct OutputRouteButton: View {
     let action: () -> Void
 
     var body: some View {
+        let tooltip = "Audio output: \(controller.currentName.isEmpty ? "Unknown" : controller.currentName)"
         Button(action: action) {
             Image(systemName: AudioOutputDeviceList.icon(for: controller.currentName))
                 .font(.system(size: 16, weight: .semibold))
@@ -22,7 +23,8 @@ struct OutputRouteButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .help("Audio output: \(controller.currentName.isEmpty ? "Unknown" : controller.currentName)")
+        .notchTooltip(tooltip)
+        .help(tooltip)
     }
 }
 

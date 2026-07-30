@@ -26,16 +26,28 @@ public enum NotchTheme {
     /// sizes its hit-test and hover rects from the same numbers.
     public static let notchHoverScale: CGFloat = 1.06
     public static let pillHoverScale: CGFloat = 1.2
+    /// Horizontal hover swell, per side. Width growth is additive where the height swell is
+    /// proportional: content rows hold their resting position under the swell, so scaling the
+    /// width would turn the entire growth into empty margin on a wide pill.
+    public static let hoverWidthPad: CGFloat = 10
 
     // MARK: Spacing
 
     /// Horizontal inset between the notch cutout and compact content.
     public static let compactSidePadding: CGFloat = 8
+    /// Horizontal inset between the surface's rounded outer edge and its content — shared by
+    /// the compact pill columns and peek-banner rows so their edges align by construction.
+    public static let surfaceEdgePadding: CGFloat = 17
     /// Padding inside the expanded panel.
     public static let panelPadding: CGFloat = 16
     /// Vertical spacing between stacked module sections in the expanded panel. Sections carry
     /// no card chrome of their own, so this gap alone is what separates them visually.
     public static let sectionSpacing: CGFloat = 20
+    /// Width of the leading marker column in sheet rows (status dot, session icon) and the gap
+    /// between it and the row's text. Markers of different sizes center in the same column, so
+    /// adjacent sections' markers and text columns sit on one shared axis.
+    public static let rowMarkerWidth: CGFloat = 18
+    public static let rowMarkerGap: CGFloat = 8
 
     // MARK: Colors
 

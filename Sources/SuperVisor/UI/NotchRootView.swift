@@ -17,6 +17,7 @@ struct NotchRootView: View {
     @ObservedObject private var settings = SettingsStore.shared
     /// Whether the system-audio tap is live (gates the beat aura) and the artwork accent color.
     @ObservedObject private var spectrum = SpectrumCenter.shared
+    @ObservedObject private var attentionGlow = AttentionGlowCenter.shared
 
     /// Measured natural widths of each side's compact content; drive the collapsed width and
     /// the cutout-centering offset.
@@ -45,10 +46,12 @@ struct NotchRootView: View {
     ///
     /// Off a notched screen there is nothing to be welded to, so pointing at it detaches it: the
     /// concave menu-bar flares unwind into round corners and it drops clear of the menu bar. The
-    /// open sheet keeps that silhouette, so the pill simply grows rather than snapping back up.
+    /// open sheet and a peek banner keep that silhouette — both are floating cards, and a wide
+    /// banner surface left flush at the top edge would poke its concave flares into the menu bar
+    /// as stray curls.
     private var pillness: CGFloat {
         guard !geo.isHardwareNotch else { return 0 }
-        return (engine.isHovered || isExpanded) ? 1 : 0
+        return (engine.isHovered || isExpanded || bannerActive) ? 1 : 0
     }
 
     /// Distance the surface has actually dropped right now.
@@ -62,36 +65,54 @@ struct NotchRootView: View {
     /// sides always match, so the pill is symmetric around the cutout and never lopsided —
     /// the shorter side simply carries black slack at its outer edge.
     private var sideWidth: CGFloat { max(leadingWidth, trailingWidth) }
-    /// Collapsed width: the notch plus the (equal) flanking sides.
-    private var compactWidth: CGFloat { notchW + 2 * sideWidth }
+
+    /// Grow affordance while hovering, before a click opens the sheet. Applied as LAYOUT
+    /// growth — a larger frame the vector shape redraws into — never a render transform:
+    /// `scaleEffect` would rasterize the compact and banner content along with the surface
+    /// and blur every glyph.
+    private var hoverGrowth: CGFloat {
+        guard engine.isHovered, !isExpanded else { return 1 }
+        return geo.isHardwareNotch ? NotchTheme.notchHoverScale : NotchTheme.pillHoverScale
+    }
+
+    /// The pill strip's height under hover growth; the banner strip below it never grows.
+    private var grownNotchH: CGFloat { notchH * hoverGrowth }
+    /// Collapsed width: the notch plus the (equal) flanking sides, plus a fixed per-side pad
+    /// while hovered (see `NotchTheme.hoverWidthPad` for why width growth is additive).
+    private var compactWidth: CGFloat {
+        notchW + 2 * sideWidth + (hoverGrowth > 1 ? 2 * NotchTheme.hoverWidthPad : 0)
+    }
+    /// Collapsed surface width: the banner's measured width already carries the shared
+    /// `surfaceEdgePadding` on both sides, so it IS the surface width — any extra allowance
+    /// would push the banner row's content out of alignment with the pill row's.
+    private var collapsedWidth: CGFloat {
+        bannerActive ? max(compactWidth, peekBannerWidth) : compactWidth
+    }
+
+    /// The cutout gap `CompactPillView` reserves between its two content columns. Hover growth
+    /// and any banner-driven extra width land entirely in this gap: the columns keep their
+    /// natural size and hug the surface's outer edges at a constant margin, riding outward
+    /// with the hover swell so content hugs the sides in every state.
+    private var cutoutWidth: CGFloat { collapsedWidth - 2 * sideWidth }
+
     /// The morphing surface's animated size. Pill and sheet are both centered on the notch. The
     /// frame grows by the drop so the body keeps its height as the shape lifts inside it.
+    ///
+    /// The expanded frame subtracts the flare gutters the shape's body cedes at low pillness
+    /// (`topRadius` per side attached, none detached), so the sheet's VISIBLE body is
+    /// `panelW − 2·topRadius` wide on every screen — the panel content, laid out at `panelW`
+    /// with its own padding, lands at the same margins whether the sheet is welded to a
+    /// hardware notch or floating as glass.
     private var shapeWidth: CGFloat {
-        isExpanded ? panelW : (bannerActive ? max(compactWidth, peekBannerWidth + 28) : compactWidth)
+        isExpanded ? panelW - 2 * NotchShape.defaultTopRadius * pillness : collapsedWidth
     }
     private var shapeHeight: CGFloat {
-        (isExpanded ? notchH + panelH : notchH + (bannerActive ? engine.peekBannerHeight : 0))
+        (isExpanded ? notchH + panelH : grownNotchH + (bannerActive ? engine.peekBannerHeight : 0))
             + topDrop
     }
     /// Tight like a pill when collapsed, rounder as the sheet opens.
     private var radius: CGFloat {
         (isExpanded || bannerActive) ? NotchTheme.panelCornerRadius : NotchTheme.pillCornerRadius
-    }
-
-    /// Grow affordance while hovering, before a click opens the sheet.
-    private var hoverScale: CGFloat {
-        guard engine.isHovered, !isExpanded else { return 1 }
-        return geo.isHardwareNotch ? NotchTheme.notchHoverScale : NotchTheme.pillHoverScale
-    }
-
-    /// Grow from the surface's own top edge, never the screen's.
-    ///
-    /// A hardware notch starts at the screen's top edge, so the two coincide. A detached pill
-    /// starts `topDrop` below it, and scaling about the screen edge would multiply that gap —
-    /// the pill would slide further down the more it grew, instead of swelling in place.
-    private var scaleAnchor: UnitPoint {
-        guard shapeHeight > 0, topDrop > 0 else { return .top }
-        return UnitPoint(x: 0.5, y: topDrop / shapeHeight)
     }
 
     var body: some View {
@@ -109,7 +130,23 @@ struct NotchRootView: View {
                         accent: spectrum.accent
                     )
                     .frame(width: shapeWidth, height: shapeHeight)
-                    .scaleEffect(hoverScale, anchor: scaleAnchor)
+                    .allowsHitTesting(false)
+                }
+
+                if attentionGlow.isRaised && !isExpanded {
+                    // Sized `spill` beyond the surface on every side (and re-centered on it,
+                    // since the ZStack top-aligns) so the glow ring is never cut at its own
+                    // frame where the silhouette touches the frame's edges.
+                    AttentionGlowView(
+                        cornerRadius: radius,
+                        pillness: pillness,
+                        topDrop: geo.pillTopDrop
+                    )
+                    .frame(
+                        width: shapeWidth + 2 * AttentionGlowView.spill,
+                        height: shapeHeight + 2 * AttentionGlowView.spill
+                    )
+                    .offset(y: -AttentionGlowView.spill)
                     .allowsHitTesting(false)
                 }
 
@@ -150,6 +187,11 @@ struct NotchRootView: View {
             // Smoothly resize the open sheet when its content (and thus measured height)
             // changes — e.g. a section appears/disappears or a file drag swaps the contents.
             .animation(.spring(response: 0.34, dampingFraction: 0.9), value: engine.expandedSheetHeight)
+            .onChange(of: isExpanded) { _, expanded in
+                if expanded {
+                    AttentionGlowCenter.shared.clear()
+                }
+            }
 
             Spacer(minLength: 0)
         }
@@ -201,22 +243,31 @@ struct NotchRootView: View {
             // rides down with the surface so it stays centered in the body, never stranded in
             // the gap the pill opens above itself.
             CompactPillView(
-                notchWidth: notchW,
-                notchHeight: notchH,
+                cutoutWidth: cutoutWidth,
+                stripHeight: grownNotchH,
                 leadingWidth: $leadingWidth,
                 trailingWidth: $trailingWidth
             )
-            .frame(height: notchH)
+            .frame(height: grownNotchH)
             .offset(y: topDrop)
             .opacity(isExpanded ? 0 : 1)
 
             if let peekBannerView {
+                // The visible banner spans the full surface so its internal spacer pins the
+                // actions to the trailing content edge — both rows keep the same constant
+                // edge margins at rest and under the hover swell. The hidden fixed-size probe
+                // measures the banner's natural minimum width, which is what sizes the
+                // surface when the banner is the widest element.
                 peekBannerView
-                    .fixedSize()
-                    .background(WidthReader(width: $peekBannerWidth))
-                    .frame(height: engine.peekBannerHeight)
                     .frame(maxWidth: .infinity)
-                    .padding(.top, notchH + topDrop)
+                    .frame(height: engine.peekBannerHeight)
+                    .background(
+                        peekBannerView
+                            .fixedSize()
+                            .hidden()
+                            .background(WidthReader(width: $peekBannerWidth))
+                    )
+                    .padding(.top, grownNotchH + topDrop)
                     .opacity(isExpanded ? 0 : 1)
             }
 
@@ -240,7 +291,6 @@ struct NotchRootView: View {
         .frame(width: shapeWidth, height: shapeHeight, alignment: .top)
         .clipShape(NotchShape(cornerRadius: radius, pillness: pillness, topDrop: geo.pillTopDrop))
         .contentShape(NotchShape(cornerRadius: radius, pillness: pillness, topDrop: geo.pillTopDrop))
-        .scaleEffect(hoverScale, anchor: scaleAnchor)
         // A detached pill casts a shadow so it reads as hovering over the desktop rather than
         // painted onto it. A surface welded to the top edge casts none: there is nothing behind
         // it to fall on but the bezel.
@@ -257,8 +307,10 @@ struct NotchRootView: View {
 /// the body through small CONCAVE fillets at the top corners, so it blends into the menu bar,
 /// while the bottom corners are CONVEX rounded.
 ///
-/// At `pillness == 1` it is a pill: the shape drops `topDrop` clear of the screen's top edge and
-/// the flares have curled inward into CONVEX rounded corners.
+/// At `pillness == 1` it is a pill: the shape drops `topDrop` clear of the screen's top edge, the
+/// flares have curled inward into CONVEX rounded corners, and the body's sides — tucked behind
+/// the flares while attached — have slid out to span the full rect, so the floating pill fills
+/// its frame edge to edge.
 ///
 /// Each top corner is a single quadratic curve throughout, never two. Both the concave flare and
 /// the convex corner share the same control point — the corner itself — and differ only in where
@@ -269,7 +321,10 @@ struct NotchShape: Shape {
     /// Bottom corner radius (convex). Animatable so it can round out as the sheet opens.
     var cornerRadius: CGFloat
     /// Size of the concave flare where the notch meets the screen's top edge, at `pillness == 0`.
-    var topRadius: CGFloat = 10
+    /// Also the body's per-side inset behind those flares, which callers sizing a frame around
+    /// the VISIBLE body need to account for.
+    static let defaultTopRadius: CGFloat = 10
+    var topRadius: CGFloat = NotchShape.defaultTopRadius
     /// 0 = notch flush with the screen's top edge, 1 = pill floating below it.
     var pillness: CGFloat = 0
     /// How far the shape's top edge sits below the rect's top edge at `pillness == 1`.
@@ -287,17 +342,20 @@ struct NotchShape: Shape {
         let pill = min(max(pillness, 0), 1)
         let top = max(0, min(topRadius, rect.width / 2, rect.height))
 
-        // The body's sides never move; only the flare above them retracts. That keeps the pill
-        // concentric with the notch it grew out of.
-        let left = rect.minX + top
-        let right = rect.maxX - top
-        let topY = rect.minY + topDrop * pill
-        guard right > left, rect.maxY > topY else { return Path() }
-
         // How far the corner curve reaches OUTSIDE the body (the flare) and INSIDE it (the
         // rounding). They trade places across the morph, so their sum is how far down the side
         // the curve lands, and their difference is where along the top edge it starts.
         let flare = top * (1 - pill)
+
+        // The flare doubles as the body's side inset: at `pillness == 0` the top edge spans the
+        // full rect and the sides tuck in behind the flares. As the surface detaches, the flares
+        // unwind and the sides slide out to the rect's edges, so the floating pill fills its
+        // frame — content padded from the frame edge keeps that margin from the VISIBLE edge,
+        // instead of losing `topRadius` of it to a phantom gutter the clip then cuts into.
+        let left = rect.minX + flare
+        let right = rect.maxX - flare
+        let topY = rect.minY + topDrop * pill
+        guard right > left, rect.maxY > topY else { return Path() }
         let rounding = max(0, min(cornerRadius * pill, (right - left) / 2, (rect.maxY - topY) / 2))
         let cornerY = topY + flare + rounding
         let bottom = max(0, min(cornerRadius, (right - left) / 2, rect.maxY - cornerY))

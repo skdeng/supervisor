@@ -11,10 +11,12 @@ import SwiftUI
 struct CompactPillView: View {
     @EnvironmentObject private var engine: NotchEngine
 
-    /// Width of the physical notch cutout that compact content must avoid.
-    let notchWidth: CGFloat
-    /// Height of the notch / pill body.
-    let notchHeight: CGFloat
+    /// Width of the reserved center gap the content flanks: the notch cutout, plus the hover
+    /// swell and any banner-driven extra width — the gap flexes so the content columns keep
+    /// their natural, unscaled size and hug the surface's outer edges at a constant margin.
+    let cutoutWidth: CGFloat
+    /// Height of the notch / pill strip at the current hover growth.
+    let stripHeight: CGFloat
 
     /// Measured natural widths of each side's content, owned by `NotchRootView`.
     @Binding var leadingWidth: CGFloat
@@ -24,8 +26,9 @@ struct CompactPillView: View {
     private let sidePadding: CGFloat = NotchTheme.compactSidePadding
 
     /// Gap between content and the pill's rounded outer edge, so indicators aren't flush
-    /// against the edge (and clear the concave top-corner flare).
-    private let outerPadding: CGFloat = 17
+    /// against the edge (and clear the concave top-corner flare). Shared with the peek-banner
+    /// rows so the two rows' content edges align.
+    private let outerPadding: CGFloat = NotchTheme.surfaceEdgePadding
 
     /// Both side slots render at the wider side's measured width, keeping the pill symmetric.
     private var sideWidth: CGFloat { max(leadingWidth, trailingWidth) }
@@ -40,10 +43,10 @@ struct CompactPillView: View {
                 .frame(width: sideWidth, alignment: .leading)
                 .clipped()
 
-            // Reserve the physical notch cutout so content flanks it; the surface behind
-            // shows through here (and the camera cap blends the hardware notch).
+            // Reserve the center gap so content flanks it; the surface behind shows through
+            // here (and the camera cap blends the hardware notch).
             Color.clear
-                .frame(width: notchWidth)
+                .frame(width: cutoutWidth)
 
             trailingContent
                 .padding(.leading, hasTrailing ? sidePadding : 0)
@@ -53,7 +56,7 @@ struct CompactPillView: View {
                 .frame(width: sideWidth, alignment: .trailing)
                 .clipped()
         }
-        .frame(height: notchHeight)
+        .frame(height: stripHeight)
         .foregroundStyle(NotchTheme.primaryForeground)
     }
 
