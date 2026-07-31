@@ -128,7 +128,8 @@ pill's size and layout. For that, call `context.setNeedsCompactRefresh()`.
   leaves the hold in place, so a timed peek can never tear down an unresolved banner. A
   zero-duration peek is the release idiom: it resolves a hold through that same completion
   path — even while the sheet is open, where it clears the hold without touching the sheet —
-  and it hands the hold to any remaining banner.
+  and it hands the hold to any remaining banner. A release only ever resolves: with no hold
+  it does nothing, and it never shortens a pending timed peek's own deadline.
 - `setNeedsCompactRefresh()` — tell the pill to re-lay-out because a compact contribution
   appeared/disappeared.
 

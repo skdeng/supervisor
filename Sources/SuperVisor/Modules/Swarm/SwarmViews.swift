@@ -66,6 +66,50 @@ struct SwarmExpandedView: View {
     }
 }
 
+/// The banner a session raises for a few seconds as it enters the attention queue: who it is,
+/// why it stopped, and a way straight into its terminal.
+@MainActor
+struct SwarmPeekBannerView: View {
+    @ObservedObject var module: SwarmModule
+
+    var body: some View {
+        if let entry = module.announcedEntry {
+            HStack(spacing: 10) {
+                SwarmAttentionMarker(entry: entry, size: 26)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.name)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(NotchTheme.primaryForeground)
+                        .lineLimit(1)
+
+                    Text(reasonText(entry.reason))
+                        .font(.caption)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                        .lineLimit(1)
+                }
+                // A needs-input message runs to 200 characters, and the banner's measured width
+                // is what the surface grows to; the cap keeps one long message from stretching
+                // the pill across the screen.
+                .frame(maxWidth: 280, alignment: .leading)
+
+                // The pill can be wider than the banner needs (compact content on the flanks, a
+                // longer row above), so the action pins to the trailing content edge.
+                Spacer(minLength: 12)
+
+                if let tty = entry.tty {
+                    SwarmIconButton(
+                        systemName: "arrow.up.forward.square",
+                        tooltip: "Open in iTerm2"
+                    ) {
+                        module.jump(toTTY: tty)
+                    }
+                }
+            }
+        }
+    }
+}
+
 @MainActor
 private struct SwarmAttentionRow: View {
     let entry: AttentionEntry
@@ -75,7 +119,7 @@ private struct SwarmAttentionRow: View {
 
     var body: some View {
         HStack(spacing: NotchTheme.rowMarkerGap) {
-            attentionMarker
+            SwarmAttentionMarker(entry: entry, size: NotchTheme.rowMarkerWidth)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -91,7 +135,7 @@ private struct SwarmAttentionRow: View {
                 }
 
                 HStack(spacing: 6) {
-                    Text(Self.reasonText(entry.reason))
+                    Text(reasonText(entry.reason))
                         .font(.caption)
                         .foregroundStyle(NotchTheme.secondaryForeground)
                         .lineLimit(1)
@@ -119,12 +163,32 @@ private struct SwarmAttentionRow: View {
         }
     }
 
-    /// The Claude icon marks the row as an agent session at a glance — the calendar rows in
-    /// the adjacent section lead with plain accent dots. The badge dot in its corner carries
-    /// the state: brand gradient while the session waits for input, green once the turn
-    /// finished.
-    private var attentionMarker: some View {
-        ClaudeSessionIcon(size: NotchTheme.rowMarkerWidth)
+    private static func lastPathComponent(_ path: String) -> String {
+        let component = (path as NSString).lastPathComponent
+        return component.isEmpty ? path : component
+    }
+
+    private static func age(since: Date, now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(since)))
+        if seconds < 60 { return "now" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h" }
+        return "\(hours / 24)d"
+    }
+}
+
+/// The Claude icon marks an agent session at a glance — the calendar rows in the adjacent section
+/// lead with plain accent dots. The badge dot in its corner carries the state: brand gradient
+/// while the session waits for input, green once the turn finished.
+@MainActor
+private struct SwarmAttentionMarker: View {
+    let entry: AttentionEntry
+    let size: CGFloat
+
+    var body: some View {
+        ClaudeSessionIcon(size: size)
             .overlay(alignment: .bottomTrailing) {
                 Circle()
                     .fill(statusStyle)
@@ -141,31 +205,6 @@ private struct SwarmAttentionRow: View {
         case .finished:
             AnyShapeStyle(Color.green)
         }
-    }
-
-    private static func lastPathComponent(_ path: String) -> String {
-        let component = (path as NSString).lastPathComponent
-        return component.isEmpty ? path : component
-    }
-
-    private static func reasonText(_ reason: AttentionReason) -> String {
-        switch reason {
-        case let .finished(duration):
-            return "Finished after \(turnDuration(duration))"
-        case let .needsInput(message):
-            guard let message else { return "Needs input" }
-            return "Needs input · \(message)"
-        }
-    }
-
-    private static func age(since: Date, now: Date) -> String {
-        let seconds = max(0, Int(now.timeIntervalSince(since)))
-        if seconds < 60 { return "now" }
-        let minutes = seconds / 60
-        if minutes < 60 { return "\(minutes)m" }
-        let hours = minutes / 60
-        if hours < 24 { return "\(hours)h" }
-        return "\(hours / 24)d"
     }
 }
 
@@ -187,6 +226,16 @@ private struct SwarmIconButton: View {
         .buttonStyle(.plain)
         .notchTooltip(tooltip)
         .help(tooltip)
+    }
+}
+
+private func reasonText(_ reason: AttentionReason) -> String {
+    switch reason {
+    case let .finished(duration):
+        return "Finished after \(turnDuration(duration))"
+    case let .needsInput(message):
+        guard let message else { return "Needs input" }
+        return "Needs input · \(message)"
     }
 }
 

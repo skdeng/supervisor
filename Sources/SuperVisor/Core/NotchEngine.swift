@@ -238,6 +238,12 @@ public final class NotchEngine: ObservableObject {
     /// holds until the peeking module resolves it (`requestCollapse()` / `requestExpand()`)
     /// or the user opens the sheet.
     public func requestPeek(_ seconds: TimeInterval) {
+        // Zero duration is the release idiom, and a release only ever resolves: with no hold
+        // there is nothing to resolve (a module may release a toast whose hold the sheet-open
+        // already cleared — acquiring here would resurrect a banner the user dismissed), and a
+        // pending TIMED peek carries its own deadline, which a release from another module
+        // must not shorten — that deadline's completion hands the hold off correctly.
+        if seconds == 0, !isPeeking || peekTask != nil { return }
         guard state != .expanded else {
             // A file drag expands the sheet without cancelling a held peek, so a module can
             // withdraw its banner while the sheet is up. Its zero-duration release must land
@@ -245,8 +251,6 @@ public final class NotchEngine: ObservableObject {
             // and its enlarged hit region — indefinitely after the sheet closes. As on the
             // timed path, the hold passes to any banner that remains.
             if seconds == 0, activePeekBanner() == nil {
-                peekTask?.cancel()
-                peekTask = nil
                 isPeeking = false
             }
             return

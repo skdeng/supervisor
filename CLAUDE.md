@@ -307,11 +307,16 @@ names below are the code paths.
   metadata, and explicit needs-input details, so delayed or out-of-order hook delivery can never
   roll session state backward. A busy → idle/waiting transition enters triage only after a ≥45 s
   turn, while `idle_prompt` and `agent_needs_input` notifications enter regardless of turn length.
-  Attention is deliberately quiet: a newly added entry raises only a rotating brand-gradient glow
-  around the notch and joins the flat sheet queue — no peek banner, no text, and no attention
-  count in the pill. Opening the sheet or emptying the queue clears the glow, and an already-seen
-  nonempty queue stays quiet until another entry is added. Queue rows (Claude-mark led) live until
-  the session resumes or the user dismisses them. A
+  Attention stays quiet: a newly added entry raises a rotating brand-gradient glow around the
+  notch, joins the flat sheet queue, and announces itself for five seconds through the peek banner
+  (Claude mark, session name, reason, one-tap Jump) — below the notch on a cutout screen, inline
+  in the pill on a flat one. The toast then retreats and leaves the glow and the queue as the
+  lasting signal; there is no persistent pill presence and no attention count. Only a genuinely new
+  session PID announces — an entry rewritten in place (a late tty, refreshed metadata) updates the
+  toast where it stands. SwarmVisor's `order` of 15 puts its toast ahead of FlowVisor's break
+  nudge when both want the banner. Opening the sheet or emptying the queue clears the glow, and an
+  already-seen nonempty queue stays quiet until another entry is added. Queue rows (Claude-mark
+  led) live until the session resumes or the user dismisses them. A
   validated tty teleports directly to the matching iTerm2 tab through AppleScript. The socket
   replies `{"decision":"ask"}` immediately and unconditionally
   to every `waiting_for_approval` message so Claude Code's normal permission prompt never stalls.
