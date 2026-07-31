@@ -177,9 +177,14 @@ public extension View {
     }
 }
 
-private struct NotchTooltipPreference {
+/// The name of the coordinate space a tooltip host owns. Hovered controls report their frame in
+/// this space as a plain rect, which the host can use directly — its overlay spans exactly the
+/// view that declares the space, so overlay-local coordinates and reported frames coincide.
+private let notchTooltipSpace = "notchTooltipHost"
+
+private struct NotchTooltipPreference: Equatable {
     let text: String
-    let anchor: Anchor<CGRect>
+    let frame: CGRect
 }
 
 private struct NotchTooltipPreferenceKey: PreferenceKey {
@@ -222,8 +227,18 @@ private struct NotchTooltipModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .anchorPreference(key: NotchTooltipPreferenceKey.self, value: .bounds) { anchor in
-                isPresented ? [NotchTooltipPreference(text: text, anchor: anchor)] : []
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: NotchTooltipPreferenceKey.self,
+                        value: isPresented
+                            ? [NotchTooltipPreference(
+                                text: text,
+                                frame: proxy.frame(in: .named(notchTooltipSpace))
+                            )]
+                            : []
+                    )
+                }
             }
             .onHover { hovering in
                 revealTask?.cancel()
@@ -248,46 +263,42 @@ private struct NotchTooltipModifier: ViewModifier {
 }
 
 private struct NotchTooltipHostModifier: ViewModifier {
-    private static let verticalOffset: CGFloat = 30
+    /// Visual gap between the label's near edge and the control.
+    private static let gap: CGFloat = 10
+    /// Nominal single-line label height, used only to decide whether the label fits above.
+    private static let nominalLabelHeight: CGFloat = 22
 
     func body(content: Content) -> some View {
-        content.overlayPreferenceValue(NotchTooltipPreferenceKey.self) { tooltips in
-            GeometryReader { proxy in
-                if let tooltip = tooltips.last {
-                    let anchorRect = proxy[tooltip.anchor]
-                    let surfaceSize = proxy.size
-                    let verticalOffset = Self.verticalOffset
-                    ZStack(alignment: .topLeading) {
-                        NotchTooltipLabel(text: tooltip.text)
-                            .alignmentGuide(.leading) { dimensions in
-                                let halfWidth = dimensions.width / 2
-                                let centerX: CGFloat
-                                if dimensions.width <= surfaceSize.width {
-                                    centerX = min(
-                                        max(anchorRect.midX, halfWidth),
-                                        surfaceSize.width - halfWidth
-                                    )
-                                } else {
-                                    centerX = surfaceSize.width / 2
-                                }
-                                return halfWidth - centerX
-                            }
-                            .alignmentGuide(.top) { dimensions in
-                                let aboveY = anchorRect.minY - verticalOffset
-                                if aboveY >= 0 {
-                                    return -aboveY
-                                }
-                                // The window canvas is pinned to the screen's top edge, leaving no room above pill-row controls.
-                                let belowY = anchorRect.maxY + verticalOffset - dimensions.height
-                                return -belowY
-                            }
-                            .allowsHitTesting(false)
-                            .transition(.opacity)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .allowsHitTesting(false)
+        content
+            .coordinateSpace(name: notchTooltipSpace)
+            .overlayPreferenceValue(NotchTooltipPreferenceKey.self) { tooltips in
+                ZStack {
+                    tooltipLabel(for: tooltips.last)
                 }
+                .animation(.snappy(duration: 0.12), value: tooltips)
             }
+    }
+
+    @ViewBuilder
+    private func tooltipLabel(for tooltip: NotchTooltipPreference?) -> some View {
+        if let tooltip {
+            // The label hangs off a zero-size point placed at the attachment spot, so its own
+            // size never needs measuring: overlay alignment pins its bottom (or top, flipped)
+            // to the point and centers it horizontally.
+            let showAbove = tooltip.frame.minY - Self.gap - Self.nominalLabelHeight >= 0
+            Color.clear
+                .frame(width: 1, height: 1)
+                .position(
+                    x: tooltip.frame.midX,
+                    y: showAbove
+                        ? tooltip.frame.minY - Self.gap
+                        : tooltip.frame.maxY + Self.gap
+                )
+                .overlay(alignment: showAbove ? .bottom : .top) {
+                    NotchTooltipLabel(text: tooltip.text)
+                }
+                .allowsHitTesting(false)
+                .transition(.opacity)
         }
     }
 }
