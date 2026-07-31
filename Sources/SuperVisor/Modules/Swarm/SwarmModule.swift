@@ -8,10 +8,6 @@ final class SwarmModule: NotchModule, ObservableObject {
     let displayName = "SwarmVisor"
     let order = 15
 
-    /// How long a freshly queued session announces itself before the toast retreats and the
-    /// glow plus the sheet queue carry the signal alone.
-    private static let announcementDuration: TimeInterval = 5
-
     /// The entry the peek banner is currently announcing.
     @Published private(set) var announcedEntry: AttentionEntry?
 
@@ -23,8 +19,8 @@ final class SwarmModule: NotchModule, ObservableObject {
     private var context: NotchContext?
     private var queueSubscription: AnyCancellable?
     private var sessionsSubscription: AnyCancellable?
+    private var glowSubscription: AnyCancellable?
     private var expandedPresence = false
-    private var announcementTask: Task<Void, Never>?
     /// The queue's PIDs as of the previous emission, so an emission can be split into sessions
     /// that just entered the queue and entries that were rewritten where they stood.
     private var queuedPIDs: Set<Int32> = []
@@ -47,13 +43,21 @@ final class SwarmModule: NotchModule, ObservableObject {
 
         fleetCenter.start()
         // Attention stays quiet: a new queue entry raises the attention glow (the fleet center's
-        // doing), joins the sheet queue, and announces itself through a banner that retreats on
-        // its own — no pill presence outlives it.
+        // doing), joins the sheet queue, and announces itself through a banner that holds until
+        // the attention is acknowledged — no pill presence outlives the glow.
         queueSubscription = fleetCenter.$queue.sink { [weak self] queue in
             self?.receive(queue: queue)
         }
         sessionsSubscription = fleetCenter.$sessions.sink { [weak self] _ in
             self?.reconcileExpandedPresence()
+        }
+        // The toast lives exactly as long as the glow: both are renderings of the same
+        // unresolved-attention state, and the glow is what the root view clears when the user
+        // opens the sheet. Its clearing is the module's only signal that the user looked.
+        glowSubscription = AttentionGlowCenter.shared.$isRaised.sink { [weak self] raised in
+            if !raised {
+                self?.retireAnnouncement()
+            }
         }
 
         // Hooks can begin waiting for a permission decision at any time, so the listener is
@@ -71,12 +75,12 @@ final class SwarmModule: NotchModule, ObservableObject {
         queueSubscription = nil
         sessionsSubscription?.cancel()
         sessionsSubscription = nil
+        glowSubscription?.cancel()
+        glowSubscription = nil
         eventSocket.stop()
         sessionMonitor.stop()
         fleetCenter.stop()
 
-        announcementTask?.cancel()
-        announcementTask = nil
         announcedEntry = nil
         queuedPIDs = []
         expandedPresence = false
@@ -144,21 +148,12 @@ final class SwarmModule: NotchModule, ObservableObject {
         reconcileExpandedPresence()
     }
 
-    /// Presents `entry` for `announcementDuration`, replacing whatever the banner already shows.
-    ///
-    /// The module holds the surface with an indefinite peek and owns the only timer over the
-    /// toast's life, `retireAnnouncement` being its single exit. A peek timed by the engine would
-    /// add a second timer whose expiry check races this one, leaving the banner's fate to
-    /// whichever fires first.
+    /// Presents `entry`, replacing whatever the banner already shows, and holds the surface with
+    /// an indefinite peek. `retireAnnouncement` is the single exit, reached when the user opens
+    /// the sheet (the glow clearing), jumps to the terminal, the session leaves the queue, or the
+    /// module deactivates.
     private func announce(_ entry: AttentionEntry) {
         announcedEntry = entry
-        announcementTask?.cancel()
-        announcementTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(Self.announcementDuration))
-            guard let self, !Task.isCancelled else { return }
-            self.announcementTask = nil
-            self.retireAnnouncement()
-        }
         context?.requestPeek(.infinity)
         // With another module's banner already holding the peek, the request publishes no engine
         // change at all — the refresh is what makes the root view re-pick the banner slot's
@@ -170,8 +165,6 @@ final class SwarmModule: NotchModule, ObservableObject {
     /// no longer counts this module's banner as an unresolved hold.
     private func retireAnnouncement() {
         guard announcedEntry != nil else { return }
-        announcementTask?.cancel()
-        announcementTask = nil
         announcedEntry = nil
         context?.requestPeek(0)
         // A release that hands the hold to a surviving banner publishes no engine change; the
