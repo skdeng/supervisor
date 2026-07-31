@@ -368,6 +368,8 @@ struct NotchRootView: View {
         .shadow(color: .black.opacity(isExpanded ? 0.45 : 0.3 * pillness), radius: 22, y: 12)
         // Click the notch to open/close the sheet (hover only previews the grow).
         .onTapGesture { if !isExpanded { engine.toggleSheet() } }
+        // The tooltip host lives outside the surface clip so labels can extend beyond the silhouette.
+        .notchTooltipHost()
     }
 
     private func reportCollapsedSurface() {

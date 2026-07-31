@@ -177,6 +177,43 @@ public extension View {
     }
 }
 
+private struct NotchTooltipPreference {
+    let text: String
+    let anchor: Anchor<CGRect>
+}
+
+private struct NotchTooltipPreferenceKey: PreferenceKey {
+    static let defaultValue: [NotchTooltipPreference] = []
+
+    static func reduce(
+        value: inout [NotchTooltipPreference],
+        nextValue: () -> [NotchTooltipPreference]
+    ) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
+private struct NotchTooltipLabel: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.black.opacity(0.85))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(NotchTheme.separator, lineWidth: 0.5)
+                    }
+            }
+            .fixedSize()
+    }
+}
+
 private struct NotchTooltipModifier: ViewModifier {
     let text: String
 
@@ -185,26 +222,8 @@ private struct NotchTooltipModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .overlay(alignment: .top) {
-                if isPresented {
-                    Text(text)
-                        .font(.caption2)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 4)
-                        .background {
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(Color.black.opacity(0.85))
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                        .strokeBorder(NotchTheme.separator, lineWidth: 0.5)
-                                }
-                        }
-                        .fixedSize()
-                        .offset(y: -30)
-                        .allowsHitTesting(false)
-                        .transition(.opacity)
-                }
+            .anchorPreference(key: NotchTooltipPreferenceKey.self, value: .bounds) { anchor in
+                isPresented ? [NotchTooltipPreference(text: text, anchor: anchor)] : []
             }
             .onHover { hovering in
                 revealTask?.cancel()
@@ -228,8 +247,57 @@ private struct NotchTooltipModifier: ViewModifier {
     }
 }
 
+private struct NotchTooltipHostModifier: ViewModifier {
+    private static let verticalOffset: CGFloat = 30
+
+    func body(content: Content) -> some View {
+        content.overlayPreferenceValue(NotchTooltipPreferenceKey.self) { tooltips in
+            GeometryReader { proxy in
+                if let tooltip = tooltips.last {
+                    let anchorRect = proxy[tooltip.anchor]
+                    let surfaceSize = proxy.size
+                    let verticalOffset = Self.verticalOffset
+                    ZStack(alignment: .topLeading) {
+                        NotchTooltipLabel(text: tooltip.text)
+                            .alignmentGuide(.leading) { dimensions in
+                                let halfWidth = dimensions.width / 2
+                                let centerX: CGFloat
+                                if dimensions.width <= surfaceSize.width {
+                                    centerX = min(
+                                        max(anchorRect.midX, halfWidth),
+                                        surfaceSize.width - halfWidth
+                                    )
+                                } else {
+                                    centerX = surfaceSize.width / 2
+                                }
+                                return halfWidth - centerX
+                            }
+                            .alignmentGuide(.top) { dimensions in
+                                let aboveY = anchorRect.minY - verticalOffset
+                                if aboveY >= 0 {
+                                    return -aboveY
+                                }
+                                // The window canvas is pinned to the screen's top edge, leaving no room above pill-row controls.
+                                let belowY = anchorRect.maxY + verticalOffset - dimensions.height
+                                return -belowY
+                            }
+                            .allowsHitTesting(false)
+                            .transition(.opacity)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .allowsHitTesting(false)
+                }
+            }
+        }
+    }
+}
+
 extension View {
     func notchTooltip(_ text: String) -> some View {
         modifier(NotchTooltipModifier(text: text))
+    }
+
+    func notchTooltipHost() -> some View {
+        modifier(NotchTooltipHostModifier())
     }
 }

@@ -75,7 +75,7 @@ struct SwarmPeekBannerView: View {
     var body: some View {
         if let entry = module.announcedEntry {
             HStack(spacing: 10) {
-                SwarmAttentionMarker(entry: entry, size: 26)
+                SwarmAttentionMarker(entry: entry, size: NotchTheme.compactContentHeight)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(entry.name)

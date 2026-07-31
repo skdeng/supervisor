@@ -59,6 +59,9 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 380, height: 680)
+        // Tooltips render through a per-window host; this window is its own hierarchy, so it
+        // carries one of its own.
+        .notchTooltipHost()
     }
 
     /// The glyph each module's section header carries, matching the symbol the module shows
