@@ -99,7 +99,7 @@ struct SwarmPeekBannerView: View {
 
                 if let tty = entry.tty {
                     SwarmIconButton(
-                        systemName: "arrow.up.forward.square",
+                        systemName: "apple.terminal",
                         tooltip: "Open in iTerm2"
                     ) {
                         module.jump(toTTY: tty)
@@ -152,7 +152,7 @@ private struct SwarmAttentionRow: View {
 
             if let tty = entry.tty {
                 SwarmIconButton(
-                    systemName: "arrow.up.forward.square",
+                    systemName: "apple.terminal",
                     tooltip: "Open in iTerm2"
                 ) {
                     terminalTeleport.teleport(toTTY: tty)
