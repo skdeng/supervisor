@@ -23,7 +23,7 @@ struct NotchRootView: View {
     /// the cutout-centering offset.
     @State private var leadingWidth: CGFloat = 0
     @State private var trailingWidth: CGFloat = 0
-    @State private var peekBannerWidth: CGFloat = 0
+    @State private var peekBannerContentWidth: CGFloat = 0
     /// Natural size of an inline peek's content; nil until the probe first reports, so a banner
     /// that genuinely measures zero renders visibly broken rather than invisibly stuck. Never
     /// reset when the peek ends: `inlinePeek` already makes a stale value inert, while clearing
@@ -106,10 +106,16 @@ struct NotchRootView: View {
             + 2 * (sideWidth > 0 ? NotchTheme.compactSidePadding : surfaceEdgePad)
     }
 
-    /// Collapsed surface width: the banner row's edge padding is applied here (shared with the
-    /// compact row) and is included in the probe's measurement, so the measured width IS the
-    /// surface width — any extra allowance would push the banner row's content out of alignment
-    /// with the pill row's.
+    /// The below-notch banner's natural surface width. The probe measures only intrinsic content;
+    /// adding the current edge padding here keeps the surface demand synchronized with the visible
+    /// row while hover animates that padding.
+    private var peekBannerWidth: CGFloat {
+        peekBannerContentWidth + 2 * surfaceEdgePad
+    }
+
+    /// Collapsed surface width: the banner demand already includes the shared edge padding, so it
+    /// IS the required surface width — any extra allowance would push the banner row's content out
+    /// of alignment with the pill row's.
     ///
     /// The inline branch adds no hover term of its own: hover growth already arrives through
     /// `surfaceEdgePad` (which widens the gap) and through the flanking columns' own padding, and
@@ -322,21 +328,20 @@ struct NotchRootView: View {
             .opacity(isExpanded ? 0 : 1)
 
             if bannerBelow, let peekBannerView = banner {
-                // The visible banner spans the full surface so its internal spacer pins the
-                // actions to the trailing content edge — both rows keep the same constant
-                // edge margins at rest and under the hover swell. The hidden fixed-size probe
-                // measures the banner's natural minimum width, which is what sizes the
-                // surface when the banner is the widest element.
+                // The visible banner is explicitly bounded to the surface so the prebuilt
+                // expanded panel cannot widen this flexible row behind the collapsed clip. Its
+                // internal spacer absorbs any surface growth and pins the actions to the trailing
+                // content edge. The hidden fixed-size probe measures intrinsic content only;
+                // `peekBannerWidth` adds the live edge padding in the same layout pass.
                 peekBannerView
                     .padding(.horizontal, surfaceEdgePad)
-                    .frame(maxWidth: .infinity)
+                    .frame(width: shapeWidth)
                     .frame(height: engine.peekBannerHeight)
                     .background(
                         peekBannerView
-                            .padding(.horizontal, surfaceEdgePad)
                             .fixedSize()
                             .hidden()
-                            .background(WidthReader(width: $peekBannerWidth))
+                            .background(WidthReader(width: $peekBannerContentWidth))
                     )
                     .padding(.top, stripH + topDrop)
                     .opacity(isExpanded ? 0 : 1)
