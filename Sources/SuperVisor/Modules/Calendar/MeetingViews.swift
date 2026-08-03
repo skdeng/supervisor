@@ -57,7 +57,6 @@ struct MeetingHUDView: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 10, weight: .bold))
                         .frame(width: 24, height: 24)
-                        .background(Capsule().fill(Color.white.opacity(0.10)))
                         .foregroundStyle(NotchTheme.secondaryForeground)
                         .contentShape(Capsule())
                 }
