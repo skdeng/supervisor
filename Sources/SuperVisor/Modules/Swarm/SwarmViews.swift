@@ -101,7 +101,8 @@ struct SwarmPeekBannerView: View {
                     SwarmIconButton(
                         systemName: "apple.terminal",
                         tooltip: "Open in iTerm2",
-                        fillsBackground: false
+                        fillsBackground: false,
+                        showsHoverLabel: false
                     ) {
                         module.jump(toTTY: tty)
                     }
@@ -155,7 +156,8 @@ private struct SwarmAttentionRow: View {
                 SwarmIconButton(
                     systemName: "apple.terminal",
                     tooltip: "Open in iTerm2",
-                    fillsBackground: false
+                    fillsBackground: false,
+                    showsHoverLabel: false
                 ) {
                     terminalTeleport.teleport(toTTY: tty)
                 }
@@ -216,10 +218,13 @@ private struct SwarmIconButton: View {
     let tooltip: String
     /// The jump button renders as a bare glyph; the capsule fill marks destructive dismissal.
     var fillsBackground = true
+    /// The jump button's glyph names its destination, so it carries no hover label; `tooltip`
+    /// still voices it for accessibility.
+    var showsHoverLabel = true
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
+        let button = Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 10, weight: .semibold))
                 .frame(width: 24, height: 24)
@@ -232,8 +237,13 @@ private struct SwarmIconButton: View {
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .notchTooltip(tooltip)
         .help(tooltip)
+
+        if showsHoverLabel {
+            button.notchTooltip(tooltip)
+        } else {
+            button
+        }
     }
 }
 

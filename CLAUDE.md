@@ -311,8 +311,8 @@ names below are the code paths.
   notch, joins the flat sheet queue, and announces itself through the peek banner (Claude mark,
   session name, reason, one-tap Jump) — below the notch on a cutout screen, inline in the pill on
   a flat one. The toast lives exactly as long as the glow: it holds until the user opens the
-  sheet (which clears the glow), jumps to the terminal, or the session leaves the queue, and the
-  glow's clearing is the module's only signal that the user looked. There is no other pill
+  sheet or jumps to the terminal (either clears the glow) or the session leaves the queue, and
+  the glow's clearing is the module's only signal that the user looked. There is no other pill
   presence and no attention count. Only a genuinely new session PID announces — an entry
   rewritten in place (a late tty, refreshed metadata) updates the toast where it stands.
   SwarmVisor's `order` of 15 puts its toast ahead of FlowVisor's break nudge when both want the

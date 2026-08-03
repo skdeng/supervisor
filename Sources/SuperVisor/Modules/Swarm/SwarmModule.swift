@@ -115,11 +115,12 @@ final class SwarmModule: NotchModule, ObservableObject {
         return AnyView(SwarmPeekBannerView(module: self))
     }
 
-    /// Teleports to the session's terminal and retires the toast. The queue entry stays: it is
-    /// cleared only by the session resuming or by an explicit dismissal, exactly as when Jump is
-    /// pressed on the sheet row.
+    /// Teleports to the session's terminal and acknowledges the attention: the glow clears, and
+    /// the toast retires with it. The queue entry stays: it is cleared only by the session
+    /// resuming or by an explicit dismissal, exactly as when Jump is pressed on the sheet row.
     func jump(toTTY tty: String) {
         terminalTeleport.teleport(toTTY: tty)
+        AttentionGlowCenter.shared.clear()
         retireAnnouncement()
     }
 
