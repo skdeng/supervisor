@@ -223,7 +223,7 @@ private struct SwarmIconButton: View {
         let button = Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 10, weight: .semibold))
-                .frame(width: 24, height: 24)
+                .frame(width: NotchTheme.rowActionSize, height: NotchTheme.rowActionSize)
                 .foregroundStyle(NotchTheme.primaryForeground)
                 .contentShape(Capsule())
         }

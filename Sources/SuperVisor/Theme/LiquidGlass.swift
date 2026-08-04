@@ -50,6 +50,10 @@ public enum NotchTheme {
     /// adjacent sections' markers and text columns sit on one shared axis.
     public static let rowMarkerWidth: CGFloat = 18
     public static let rowMarkerGap: CGFloat = 8
+    /// Square slot every trailing action glyph in a sheet row occupies. Glyphs of different
+    /// widths center in the same slot, so the action columns of adjacent sections' rows sit on
+    /// one shared axis — the trailing counterpart to the leading marker column.
+    public static let rowActionSize: CGFloat = 24
 
     // MARK: Colors
 

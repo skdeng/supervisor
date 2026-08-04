@@ -107,7 +107,7 @@ struct CalendarAgendaView: View {
         } label: {
             Image(systemName: "video.fill")
                 .font(.system(size: 11, weight: .bold))
-                .frame(width: 30, height: 24)
+                .frame(width: NotchTheme.rowActionSize, height: NotchTheme.rowActionSize)
                 .foregroundStyle(NotchTheme.primaryForeground)
                 .contentShape(Capsule())
         }
@@ -122,7 +122,7 @@ struct CalendarAgendaView: View {
         } label: {
             Image(systemName: "xmark")
                 .font(.system(size: 10, weight: .bold))
-                .frame(width: 24, height: 24)
+                .frame(width: NotchTheme.rowActionSize, height: NotchTheme.rowActionSize)
                 .foregroundStyle(NotchTheme.secondaryForeground)
                 .contentShape(Capsule())
         }
@@ -174,7 +174,7 @@ struct CalendarAgendaView: View {
         } label: {
             Image(systemName: "arrow.uturn.backward")
                 .font(.system(size: 10, weight: .bold))
-                .frame(width: 24, height: 24)
+                .frame(width: NotchTheme.rowActionSize, height: NotchTheme.rowActionSize)
                 .foregroundStyle(NotchTheme.secondaryForeground)
                 .contentShape(Capsule())
         }
