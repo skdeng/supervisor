@@ -105,8 +105,10 @@ struct CalendarAgendaView: View {
         Button {
             onJoin(url)
         } label: {
-            Image(systemName: "video.fill")
-                .font(.system(size: 11, weight: .bold))
+            // An outline glyph carries less ink than a filled one at the same point size, so it
+            // runs a size larger to hold equal visual weight beside the row's other actions.
+            Image(systemName: "video")
+                .font(.system(size: 12, weight: .bold))
                 .frame(width: NotchTheme.rowActionSize, height: NotchTheme.rowActionSize)
                 .foregroundStyle(NotchTheme.primaryForeground)
                 .contentShape(Capsule())
