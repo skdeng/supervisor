@@ -22,6 +22,8 @@ struct AttentionEntry: Identifiable, Equatable, Sendable {
 final class AgentFleetCenter: ObservableObject {
     @Published private(set) var sessions: [FleetSession] = []
     @Published private(set) var ttyBySessionPID: [Int32: String] = [:]
+    /// Sessions awaiting attention, most recent first: the session that stopped last is the one
+    /// the user is most likely still thinking about.
     @Published private(set) var queue: [AttentionEntry] = []
 
     var workingCount: Int {
@@ -210,6 +212,10 @@ final class AgentFleetCenter: ObservableObject {
             }
         } else {
             queue.append(entry)
+            // An entry rewritten in place keeps its `since`, so ordering only needs restoring
+            // where one enters — a hook event can surface a session that stopped before one
+            // already queued.
+            queue.sort { $0.since > $1.since }
             AttentionGlowCenter.shared.raise()
             AppLog.notice(
                 .swarm,

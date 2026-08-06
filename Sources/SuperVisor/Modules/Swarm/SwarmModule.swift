@@ -126,13 +126,14 @@ final class SwarmModule: NotchModule, ObservableObject {
 
     /// Splits an emission into sessions that just entered the queue and entries rewritten in
     /// place, so late-arriving metadata — a tty landing after the hook event, a refreshed name or
-    /// cwd — updates the toast rather than raising a second one for the same session.
+    /// cwd — updates the toast rather than raising a second one for the same session. When
+    /// several enter at once the most recent announces, which the queue's ordering puts first.
     private func receive(queue: [AttentionEntry]) {
         let currentPIDs = Set(queue.map(\.sessionPID))
         let addedPIDs = currentPIDs.subtracting(queuedPIDs)
         queuedPIDs = currentPIDs
 
-        if let newest = queue.last(where: { addedPIDs.contains($0.sessionPID) }) {
+        if let newest = queue.first(where: { addedPIDs.contains($0.sessionPID) }) {
             announce(newest)
         } else if let announced = announcedEntry {
             if let refreshed = queue.first(where: { $0.sessionPID == announced.sessionPID }) {

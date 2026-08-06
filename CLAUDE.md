@@ -318,7 +318,7 @@ names below are the code paths.
   SwarmVisor's `order` of 15 puts its toast ahead of FlowVisor's break nudge when both want the
   banner. Opening the sheet or emptying the queue clears the glow, and an
   already-seen nonempty queue stays quiet until another entry is added. Queue rows (Claude-mark
-  led) live until the session resumes or the user dismisses them. A
+  led) sort most-recent-first and live until the session resumes or the user dismisses them. A
   validated tty teleports directly to the matching iTerm2 tab through AppleScript. The socket
   replies `{"decision":"ask"}` immediately and unconditionally
   to every `waiting_for_approval` message so Claude Code's normal permission prompt never stalls.
