@@ -120,6 +120,13 @@ struct SettingsView: View {
             Text("Uses the existing Calendar permission and reads only event start and end times.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        case "swarm":
+            AgentHookSettingsView()
+
+            Toggle("Show what a session said", isOn: $settings.swarmShowsMessages)
+            Text("Adds the question a session asked, its closing summary, or an error's detail text to each row; hover a row for the full text. Off keeps rows to a state and a tool name, so no session content sits on screen during a screen share.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         default:
             EmptyView()
         }

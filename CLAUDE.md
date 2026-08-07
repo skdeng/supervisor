@@ -21,6 +21,11 @@ them.
   (`.accessory` activation policy): no Dock icon, no main window. A status-bar item
   (`visionpro` glyph) hosts the **Settings…** and **Quit** menu.
 - **Quit** via the status-bar menu, or `pkill -f SuperVisor.app`.
+- **`swift test`** runs the suite in `Tests/SuperVisorTests` (Swift Testing). The test target
+  depends on the executable target and reaches internals through `@testable import SuperVisor`,
+  so logic can be tested without a second library target. Tests that need a session registry
+  write real records to a temp directory using the test process's own pid, which is what makes
+  them pass the registry's liveness check.
 - **`swift build`** alone compiles the binary but does *not* produce the bundle. The bundle is
   required because TCC permission grants (Location, Calendar, Reminders, Accessibility, Bluetooth) and the
   now-playing read only persist for a **stable, signed bundle identity** — a bare `swift run`
@@ -192,7 +197,13 @@ sink. Preserve these guards when touching the relevant code:
   cannot abort the entitled perl helper with an uncaught exception.
 - **Agent hook socket payloads** are arbitrary local input. Each connection is size-capped and
   defensively parsed, and a tty must match `^/dev/ttys[0-9]+$` before it is stored or reaches
-  AppleScript interpolation.
+  AppleScript interpolation. The text fields (`message`, `last_assistant_message`,
+  `error_details`) carry model-generated prose that reaches a view: the hook truncates at the
+  source, `FleetHookEvent.isValid` rejects a payload whose fields exceed the cap rather than
+  trimming it, and `AgentFleetCenter.displayMessage` collapses whitespace and strips control
+  characters — an ANSI escape or a newline in a summary would otherwise redraw a notch row.
+  Registry `waitingFor` is bounded the same way in `ClaudeSessionMonitor`. None of this text is
+  ever logged; `AppLog` records the reason's name only.
 - **Screenshot-directory contents** are arbitrary local files. `ScreenshotMonitor` accepts only
   direct, regular, non-symlink image/PDF children carrying macOS's
   `com.apple.metadata:kMDItemIsScreenCapture` attribute, requires a non-zero size, and rejects files
@@ -304,9 +315,19 @@ names below are the code paths.
 - **Swarm → "SwarmVisor"** (`Modules/Swarm`) — quiet-until-blocked triage for concurrent Claude
   Code sessions. The recursive session-registry watcher is the sole truth for live
   busy/idle/waiting state; hook-socket events provide only low-latency refreshes, validated tty
-  metadata, and explicit needs-input details, so delayed or out-of-order hook delivery can never
-  roll session state backward. A busy → idle/waiting transition enters triage only after a ≥45 s
-  turn, while `idle_prompt` and `agent_needs_input` notifications enter regardless of turn length.
+  metadata, and the text of a finished or failed turn, so delayed or out-of-order hook delivery
+  can never roll session state backward.
+  **Why a session is blocked** comes from `AttentionReason`, ranked so a specific reason is never
+  replaced by a vaguer one for the same session: `.failed` (a `StopFailure` error — `rate_limit`,
+  `billing_error`, `authentication_failed`) › `.waiting` (the registry's own `waitingFor` phrase:
+  `approve <Tool>`, `worker request`, `sandbox request`, `dialog open`, `input needed`) ›
+  `.asked` (the final assistant message ends in `?`) › `.finished` (turn length plus that
+  message) › `.needsInput`. That ranking is load-bearing: the `idle_prompt` notification fires a
+  minute after a turn ends carrying a *fixed* sentence, so without it the generic reason would
+  overwrite what the session actually said — and reset the row's age with it. `.needsInput`
+  carries no text for the same reason. A busy → idle transition enters triage only after a ≥45 s
+  turn; `idle_prompt` enters regardless of turn length, and a session blocked on a prompt
+  (`waiting`) enters immediately however short the turn, because it cannot proceed at all.
   Attention stays quiet: a newly added entry raises a rotating brand-gradient glow around the
   notch, joins the flat sheet queue, and announces itself through the peek banner (Claude mark,
   session name, reason, one-tap Jump) — below the notch on a cutout screen, inline in the pill on
@@ -318,10 +339,25 @@ names below are the code paths.
   SwarmVisor's `order` of 15 puts its toast ahead of FlowVisor's break nudge when both want the
   banner. Opening the sheet or emptying the queue clears the glow, and an
   already-seen nonempty queue stays quiet until another entry is added. Queue rows (Claude-mark
-  led) sort most-recent-first and live until the session resumes or the user dismisses them. A
-  validated tty teleports directly to the matching iTerm2 tab through AppleScript. The socket
-  replies `{"decision":"ask"}` immediately and unconditionally
-  to every `waiting_for_approval` message so Claude Code's normal permission prompt never stalls.
+  led) put blocked sessions first, then most-recent, and live until the session resumes or the
+  user dismisses them. A validated tty teleports directly to the matching iTerm2 tab through
+  AppleScript. `swarm.showMessages` (**default off**) gates session *content* — the question, the
+  closing summary, an error's detail text, each truncated to one line with the whole of it on
+  hover; labels, tool names, and error codes are fixed vocabulary and always show. The sheet
+  floats above every window, so content is opt-in rather than on by default.
+  **The hooks are the app's own** (`Services/AgentFleet/AgentHookInstaller.swift`,
+  `Resources/supervisor-agent-hook.py`, installed from Settings › SwarmVisor). The installer
+  copies the script to `~/.claude/hooks/` and merges entries into `~/.claude/settings.json`,
+  preserving every unrelated key and every other tool's hooks, backing the file up once to
+  `settings.json.pre-supervisor.bak`, and evicting any entry left by ClaudeIsland (a separate
+  app this signal was once borrowed from). Six events are wired —
+  `UserPromptSubmit`, `Notification`, `Stop`, `StopFailure`, `SessionStart`, `SessionEnd`.
+  Per-tool events are deliberately absent (they would spawn a process per tool call to report
+  what the registry already publishes), and so is `PermissionRequest`: its only possible answer
+  is the pass-through that not wiring it produces, at no latency and with no risk of stalling a
+  prompt. The socket still replies `{"decision":"ask"}` to any `waiting_for_approval` message,
+  since it is reachable by any local client. Without hooks the module still lists sessions and
+  tracks state from the registry; it loses Jump, turn text, and failure reasons.
 - **Battery** (`Modules/Battery`) — power/charging status, time remaining, and connected-device
   (Bluetooth accessory) battery; peeks on plug/unplug and low battery. (`PowerSourceMonitor`,
   `BluetoothMonitor`.)
@@ -468,7 +504,8 @@ artifacts:
 - `pgrep -f SuperVisor.app` and `ps | grep` also match the **perl now-playing helper** (its argv
   contains the bundle path). Match the executable exactly (`ps -o comm | grep "MacOS/SuperVisor$"`)
   before concluding the app is alive.
-- The swarm socket doubles as a liveness/timeline record: it exists iff an instance bound it and
+- The swarm socket (`~/Library/Application Support/SuperVisor/agent-hooks.sock`) doubles as a
+  liveness/timeline record: it exists iff an instance bound it and
   died uncleanly since; its mtime is the moment that instance's SwarmModule activated.
 
 ## Git

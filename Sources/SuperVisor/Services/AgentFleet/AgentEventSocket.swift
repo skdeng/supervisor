@@ -7,12 +7,18 @@ enum FleetHookStatus: String, Decodable, Sendable {
     case waitingForInput = "waiting_for_input"
     case waitingForApproval = "waiting_for_approval"
     case notification
+    case sessionStart = "session_start"
+    case error
     case compacting
     case ended
     case unknown
 }
 
 struct FleetHookEvent: Decodable, Sendable {
+    /// The longest a text field may be before the payload is rejected. The hook truncates well
+    /// below this; the cap bounds what an arbitrary local writer to the socket can hand over.
+    static let maximumTextLength = 1_024
+
     let sessionID: String
     let cwd: String
     let event: String
@@ -21,6 +27,13 @@ struct FleetHookEvent: Decodable, Sendable {
     let status: FleetHookStatus
     let notificationType: String?
     let message: String?
+    /// Text of the last assistant message of a finished turn. Model-generated, so it is
+    /// length-checked here and sanitized again before it reaches a view.
+    let lastAssistantMessage: String?
+    /// Why a turn ended abnormally — `rate_limit`, `billing_error`, `authentication_failed`,
+    /// and the rest of Claude Code's assistant-error cases.
+    let error: String?
+    let errorDetails: String?
 
     enum CodingKeys: String, CodingKey {
         case sessionID = "session_id"
@@ -31,6 +44,9 @@ struct FleetHookEvent: Decodable, Sendable {
         case status
         case notificationType = "notification_type"
         case message
+        case lastAssistantMessage = "last_assistant_message"
+        case error
+        case errorDetails = "error_details"
     }
 
     var isValid: Bool {
@@ -41,6 +57,10 @@ struct FleetHookEvent: Decodable, Sendable {
             && event.count <= 128
             && (tty?.count ?? 0) <= 64
             && (notificationType?.count ?? 0) <= 128
+            && (message?.count ?? 0) <= Self.maximumTextLength
+            && (lastAssistantMessage?.count ?? 0) <= Self.maximumTextLength
+            && (error?.count ?? 0) <= 128
+            && (errorDetails?.count ?? 0) <= Self.maximumTextLength
     }
 }
 
@@ -49,7 +69,15 @@ struct FleetHookEvent: Decodable, Sendable {
 final class AgentEventSocket {
     var onEvent: ((FleetHookEvent) -> Void)?
 
-    static let defaultSocketPath = "/tmp/claude-island.sock"
+    /// Lives beside the app's other managed state rather than in `/tmp`, so the path belongs to
+    /// SuperVisor and cannot collide with another tool's socket. `sun_path` holds 104 bytes; a
+    /// home directory long enough to overrun that fails the bind and is logged.
+    static let defaultSocketPath = FileManager.default
+        .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        .first!
+        .appendingPathComponent("SuperVisor", isDirectory: true)
+        .appendingPathComponent("agent-hooks.sock", isDirectory: false)
+        .path
 
     private let socketPath: String
     private var worker: Worker?
@@ -126,6 +154,13 @@ private final class Worker: @unchecked Sendable {
     }
 
     private func openListener() {
+        // The socket lives under Application Support, which need not exist on a fresh install;
+        // bind fails with ENOENT rather than creating the path itself.
+        try? FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: socketPath).deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
         unlink(socketPath)
 
         let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -201,10 +236,11 @@ private final class Worker: @unchecked Sendable {
     private func handle(_ connection: Int32) {
         defer { close(connection) }
         var repliedToApproval = false
-        // Every exit path answers an unanswered connection with the pass-through decision. A
-        // blocked PermissionRequest hook waits minutes for a reply, so even a payload whose
-        // status field never arrived (truncation, the size cap, a malformed tail) must get the
-        // answer; fire-and-forget clients have already closed and the write fails silently.
+        // Every exit path answers an unanswered connection with the pass-through decision. The
+        // hooks this app installs never block, but the socket is reachable by any local client:
+        // one that announces `waiting_for_approval` is waiting on a reply, so even a payload
+        // whose status field never arrived (truncation, the size cap, a malformed tail) must get
+        // the answer. Fire-and-forget clients have already closed and the write fails silently.
         defer {
             if !repliedToApproval {
                 Self.writeApprovalReply(to: connection)

@@ -100,6 +100,7 @@ final class SwarmModule: NotchModule, ObservableObject {
         return AnyView(
             SwarmExpandedView(
                 center: fleetCenter,
+                settings: SettingsStore.shared,
                 terminalTeleport: terminalTeleport
             )
         )
@@ -112,7 +113,7 @@ final class SwarmModule: NotchModule, ObservableObject {
     /// keeps its own indefinite hold while it is covered and returns once this toast retires.
     func peekBanner() -> AnyView? {
         guard announcedEntry != nil else { return nil }
-        return AnyView(SwarmPeekBannerView(module: self))
+        return AnyView(SwarmPeekBannerView(module: self, settings: SettingsStore.shared))
     }
 
     /// Teleports to the session's terminal and acknowledges the attention: the glow clears, and

@@ -43,6 +43,11 @@ printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"
 # vectors at runtime, so they stay crisp at any size.
 cp Resources/*.svg "$RES_DIR/"
 
+# SwarmVisor's Claude Code session hook. Settings copies it into ~/.claude/hooks and wires it
+# into settings.json; the app compares this shipped copy against the installed one to detect a
+# stale install, so it has to be present in the bundle for that check to pass.
+cp Resources/supervisor-agent-hook.py "$RES_DIR/"
+
 # Build the entitled now-playing adapter dylib that reads the system now-playing info dict
 # (including artwork bytes) via the private MediaRemote C function. It ships in Resources and
 # is loaded at runtime by /usr/bin/perl (an Apple-signed host that the mediaremoted

@@ -25,6 +25,11 @@ let package = Package(
                     "-Xlinker", "Info.plist"
                 ])
             ]
+        ),
+        .testTarget(
+            name: "SuperVisorTests",
+            dependencies: ["SuperVisor"],
+            path: "Tests/SuperVisorTests"
         )
     ]
 )

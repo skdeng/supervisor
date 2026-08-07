@@ -16,8 +16,24 @@ struct FleetSession: Identifiable, Equatable, Sendable {
     let status: FleetSessionStatus
     let statusUpdatedAt: Date
     let kind: String
+    /// What a `waiting` session is blocked on, as Claude Code records it: `approve <ToolName>`,
+    /// `worker request`, `sandbox request`, `dialog open`, or `input needed`. Absent in every
+    /// other status. This is the only blocked-reason signal that needs no hook.
+    let waitingFor: String?
 
     var id: Int32 { pid }
+
+    /// The tool a pending approval is for, when the session is blocked on one.
+    var pendingApprovalTool: String? {
+        guard status == .waiting,
+              let waitingFor,
+              waitingFor.hasPrefix(Self.approvalPrefix)
+        else { return nil }
+        let tool = waitingFor.dropFirst(Self.approvalPrefix.count)
+        return tool.isEmpty ? nil : String(tool)
+    }
+
+    private static let approvalPrefix = "approve "
 }
 
 /// Publishes the live interactive sessions recorded by Claude Code's session registry.
@@ -191,6 +207,7 @@ private struct RegistryRecord: Decodable {
     let name: String
     let status: String
     let statusUpdatedAt: Int64
+    let waitingFor: String?
 
     enum CodingKeys: String, CodingKey {
         case pid
@@ -201,6 +218,7 @@ private struct RegistryRecord: Decodable {
         case name
         case status
         case statusUpdatedAt
+        case waitingFor
     }
 
     var session: FleetSession? {
@@ -224,7 +242,17 @@ private struct RegistryRecord: Decodable {
             statusUpdatedAt: Date(
                 timeIntervalSince1970: TimeInterval(statusUpdatedAt) / 1_000
             ),
-            kind: kind
+            kind: kind,
+            waitingFor: Self.sanitizedWaitingFor(waitingFor)
         )
+    }
+
+    /// The field is written by Claude Code from a fixed set of phrases, one of which embeds a
+    /// tool name; bounding it keeps a malformed registry file from reaching a view.
+    private static func sanitizedWaitingFor(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 128 else { return nil }
+        return trimmed
     }
 }

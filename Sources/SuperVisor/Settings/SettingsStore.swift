@@ -26,6 +26,7 @@ public final class SettingsStore: ObservableObject {
         static let flowWorkInterval = "flow.workInterval"
         static let flowBreakLength = "flow.breakLength"
         static let flowDeferDuringMeetings = "flow.deferDuringMeetings"
+        static let swarmShowMessages = "swarm.showMessages"
     }
 
     /// Hover sensitivity in the range 0...1. Higher means a larger activation rect and a
@@ -86,6 +87,13 @@ public final class SettingsStore: ObservableObject {
         didSet { defaults.set(flowDeferDuringMeetings, forKey: Key.flowDeferDuringMeetings) }
     }
 
+    /// SwarmVisor: show what a session actually said — the question it asked, its closing
+    /// summary, an error's detail text. Off by default: the sheet floats above every other
+    /// window, so session content would otherwise be on screen during a screen share.
+    @Published public var swarmShowsMessages: Bool {
+        didSet { defaults.set(swarmShowsMessages, forKey: Key.swarmShowMessages) }
+    }
+
     /// Per-module enabled flags, keyed by `moduleID`. Absent ids default to enabled.
     @Published public private(set) var moduleEnabled: [String: Bool]
 
@@ -115,6 +123,8 @@ public final class SettingsStore: ObservableObject {
             : 5
         self.flowDeferDuringMeetings =
             (defaults.object(forKey: Key.flowDeferDuringMeetings) as? Bool) ?? true
+        self.swarmShowsMessages =
+            (defaults.object(forKey: Key.swarmShowMessages) as? Bool) ?? false
 
         // Reconstruct the per-module map from any persisted keys.
         var map: [String: Bool] = [:]

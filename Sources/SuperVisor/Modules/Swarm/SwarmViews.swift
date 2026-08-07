@@ -35,17 +35,31 @@ private struct ClaudeSessionIcon: View {
 @MainActor
 struct SwarmExpandedView: View {
     @ObservedObject var center: AgentFleetCenter
+    @ObservedObject var settings: SettingsStore
     let terminalTeleport: TerminalTeleport
+
+    /// Sessions that cannot proceed lead: a prompt frozen on screen costs more than a finished
+    /// turn sitting at an idle prompt. Within each group the most recent leads, so the session
+    /// the user last stepped away from stays at hand.
+    private var orderedQueue: [AttentionEntry] {
+        center.queue.sorted { first, second in
+            if first.reason.isBlocking != second.reason.isBlocking {
+                return first.reason.isBlocking
+            }
+            return first.since > second.since
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             if !center.queue.isEmpty {
                 TimelineView(.periodic(from: Date(), by: 30)) { context in
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(center.queue) { entry in
+                        ForEach(orderedQueue) { entry in
                             SwarmAttentionRow(
                                 entry: entry,
                                 now: context.date,
+                                showsMessages: settings.swarmShowsMessages,
                                 terminalTeleport: terminalTeleport,
                                 onDismiss: {
                                     center.dismiss(entry.sessionPID)
@@ -71,9 +85,15 @@ struct SwarmExpandedView: View {
 @MainActor
 struct SwarmPeekBannerView: View {
     @ObservedObject var module: SwarmModule
+    @ObservedObject var settings: SettingsStore
 
     var body: some View {
         if let entry = module.announcedEntry {
+            let parts = SwarmReason.parts(
+                of: entry.reason,
+                showsMessages: settings.swarmShowsMessages
+            )
+
             HStack(spacing: 10) {
                 SwarmAttentionMarker(entry: entry, size: NotchTheme.compactContentHeight)
 
@@ -83,12 +103,9 @@ struct SwarmPeekBannerView: View {
                         .foregroundStyle(NotchTheme.primaryForeground)
                         .lineLimit(1)
 
-                    Text(reasonText(entry.reason))
-                        .font(.caption)
-                        .foregroundStyle(NotchTheme.secondaryForeground)
-                        .lineLimit(1)
+                    SwarmReasonLine(parts: parts)
                 }
-                // A needs-input message runs to 200 characters, and the banner's measured width
+                // A message runs to several hundred characters, and the banner's measured width
                 // is what the surface grows to; the cap keeps one long message from stretching
                 // the pill across the screen.
                 .frame(maxWidth: 280, alignment: .leading)
@@ -115,10 +132,13 @@ struct SwarmPeekBannerView: View {
 private struct SwarmAttentionRow: View {
     let entry: AttentionEntry
     let now: Date
+    let showsMessages: Bool
     let terminalTeleport: TerminalTeleport
     let onDismiss: () -> Void
 
     var body: some View {
+        let parts = SwarmReason.parts(of: entry.reason, showsMessages: showsMessages)
+
         HStack(spacing: NotchTheme.rowMarkerGap) {
             SwarmAttentionMarker(entry: entry, size: NotchTheme.rowMarkerWidth)
 
@@ -136,10 +156,7 @@ private struct SwarmAttentionRow: View {
                 }
 
                 HStack(spacing: 6) {
-                    Text(reasonText(entry.reason))
-                        .font(.caption)
-                        .foregroundStyle(NotchTheme.secondaryForeground)
-                        .lineLimit(1)
+                    SwarmReasonLine(parts: parts)
 
                     Text(Self.age(since: entry.since, now: now))
                         .font(.caption)
@@ -181,9 +198,44 @@ private struct SwarmAttentionRow: View {
     }
 }
 
+/// The reason line: a short label naming the state, and the detail that earns the row its place.
+/// The detail truncates to one line, and hovering reveals it whole — a final message can be a
+/// paragraph, and the sheet has room for a clause of it.
+@MainActor
+private struct SwarmReasonLine: View {
+    let parts: SwarmReason.Parts
+
+    var body: some View {
+        let line = HStack(spacing: 4) {
+            Text(parts.label)
+                .font(.caption)
+                .foregroundStyle(NotchTheme.secondaryForeground)
+                .lineLimit(1)
+                .layoutPriority(1)
+
+            if let detail = parts.detail {
+                Text("·")
+                    .font(.caption)
+                    .foregroundStyle(NotchTheme.separator)
+
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(NotchTheme.secondaryForeground)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+
+        if let detail = parts.detail, parts.isTruncatable {
+            line.notchTooltip(detail).help(detail)
+        } else {
+            line
+        }
+    }
+}
+
 /// The Claude icon marks an agent session at a glance — the calendar rows in the adjacent section
-/// lead with plain accent dots. The badge dot in its corner carries the state: brand gradient
-/// while the session waits for input, green once the turn finished.
+/// lead with plain accent dots. The badge dot in its corner carries the state.
 @MainActor
 private struct SwarmAttentionMarker: View {
     let entry: AttentionEntry
@@ -202,7 +254,11 @@ private struct SwarmAttentionMarker: View {
 
     private var statusStyle: AnyShapeStyle {
         switch entry.reason {
-        case .needsInput:
+        case .failed:
+            AnyShapeStyle(Color.red)
+        case .waiting:
+            AnyShapeStyle(Color.orange)
+        case .asked, .needsInput:
             AnyShapeStyle(NotchTheme.brandGradient)
         case .finished:
             AnyShapeStyle(Color.green)
@@ -238,22 +294,73 @@ private struct SwarmIconButton: View {
     }
 }
 
-private func reasonText(_ reason: AttentionReason) -> String {
-    switch reason {
-    case let .finished(duration):
-        return "Finished after \(turnDuration(duration))"
-    case let .needsInput(message):
-        guard let message else { return "Needs input" }
-        return "Needs input · \(message)"
+/// Turns a reason into the two strings a row shows.
+enum SwarmReason {
+    struct Parts: Equatable {
+        let label: String
+        let detail: String?
+        /// Whether `detail` is model-generated text that can run past the row's width, and so
+        /// earns a hover tooltip carrying it whole.
+        let isTruncatable: Bool
     }
-}
 
-private func turnDuration(_ duration: TimeInterval) -> String {
-    let seconds = max(0, Int(duration))
-    if seconds < 60 { return "\(seconds)s" }
-    let minutes = seconds / 60
-    if minutes < 60 { return "\(minutes)m" }
-    let hours = minutes / 60
-    let remainder = minutes % 60
-    return remainder == 0 ? "\(hours)h" : "\(hours)h \(remainder)m"
+    /// `showsMessages` gates only session content — a question, a closing summary, an error's
+    /// detail text. Labels, tool names, and error codes are fixed vocabulary and always show.
+    static func parts(of reason: AttentionReason, showsMessages: Bool) -> Parts {
+        switch reason {
+        case let .waiting(detail):
+            if let tool = approvalTool(in: detail) {
+                return Parts(label: "Approve", detail: tool, isTruncatable: false)
+            }
+            return Parts(label: sentenceCased(detail), detail: nil, isTruncatable: false)
+
+        case let .failed(error, details):
+            return Parts(
+                label: sentenceCased(error.replacingOccurrences(of: "_", with: " ")),
+                detail: showsMessages ? details : nil,
+                isTruncatable: true
+            )
+
+        case let .asked(question):
+            return Parts(
+                label: "Asked",
+                detail: showsMessages ? question : nil,
+                isTruncatable: true
+            )
+
+        case let .finished(turnDuration, summary):
+            let label = turnDuration.map { "Done \(turnLength($0))" } ?? "Done"
+            return Parts(
+                label: label,
+                detail: showsMessages ? summary : nil,
+                isTruncatable: true
+            )
+
+        case .needsInput:
+            return Parts(label: "Needs input", detail: nil, isTruncatable: false)
+        }
+    }
+
+    private static let approvalPrefix = "approve "
+
+    private static func approvalTool(in detail: String) -> String? {
+        guard detail.hasPrefix(approvalPrefix) else { return nil }
+        let tool = detail.dropFirst(approvalPrefix.count)
+        return tool.isEmpty ? nil : String(tool)
+    }
+
+    private static func sentenceCased(_ text: String) -> String {
+        guard let first = text.first else { return text }
+        return first.uppercased() + text.dropFirst()
+    }
+
+    static func turnLength(_ duration: TimeInterval) -> String {
+        let seconds = max(0, Int(duration))
+        if seconds < 60 { return "\(seconds)s" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        let remainder = minutes % 60
+        return remainder == 0 ? "\(hours)h" : "\(hours)h \(remainder)m"
+    }
 }
