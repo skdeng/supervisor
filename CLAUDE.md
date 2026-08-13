@@ -537,5 +537,9 @@ artifacts:
 
 - Committing and pushing directly to this repo is fine — no need to ask first.
 - **Don't create PRs for this repo.** When asked to ship changes, push to `main` directly.
+- **Always push to `main` directly; don't create worktrees or branches.** Work in the main
+  checkout at `/Users/sdeng/code/notch`. `.claude/settings.json` sets
+  `worktree.bgIsolation: "none"` so a background session edits there rather than isolating
+  itself in a worktree first.
 - **Commit messages must not carry co-authorship or tooling trailers** — no `Co-Authored-By:`
   line and no `Claude-Session:` line. Keep the message to the change itself.
