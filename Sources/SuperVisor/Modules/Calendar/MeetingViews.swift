@@ -237,7 +237,7 @@ struct CalendarSection: View {
     var body: some View {
         TimelineView(.periodic(from: Date(), by: 5)) { context in
             let active = service.activeMeeting(asOf: context.date)
-            let upcoming = Array(service.events.filter { $0.id != active?.id }.prefix(6))
+            let upcoming = service.events.filter { $0.id != active?.id }
             VStack(spacing: 10) {
                 if let active {
                     MeetingHUDView(

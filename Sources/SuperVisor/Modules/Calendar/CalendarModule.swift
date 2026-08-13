@@ -100,6 +100,7 @@ final class CalendarModule: NotchModule, ObservableObject {
         if weMuted && mic.isMuted { mic.setMuted(false) }
         wasInCallContext = false
         weMuted = false
+        SectionUrgencyCenter.shared.set(false, for: moduleID)
         mic.stop()
         audioOutput.stop()
         callMonitor.release()
@@ -120,7 +121,12 @@ final class CalendarModule: NotchModule, ObservableObject {
         let now = Date()
         let active = service.activeMeeting(asOf: now)
         let adHocCallActive = active == nil && callMonitor.isCallLikely
-        restoreMicIfCallEnded(inCallContext: active != nil || adHocCallActive)
+        let inCallContext = active != nil || adHocCallActive
+        restoreMicIfCallEnded(inCallContext: inCallContext)
+
+        // A call in progress floats this section to the top of the sheet: the mic toggle and
+        // Join are what the sheet is being opened for.
+        SectionUrgencyCenter.shared.set(inCallContext, for: moduleID)
 
         let compactKey: String?
         if active != nil {

@@ -52,6 +52,12 @@ struct CalendarAgendaView: View {
     let onRestore: (String) -> Void
 
     @State private var showsDismissed = false
+    @State private var showsLater = false
+
+    /// How many upcoming meetings the agenda shows outright. Three carries the rest of a working
+    /// morning at a glance; past that the agenda is a calendar app, and the height it costs
+    /// belongs to whatever else the sheet has to say.
+    private static let visibleLimit = 3
 
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -60,15 +66,48 @@ struct CalendarAgendaView: View {
     }()
 
     var body: some View {
+        let later = Array(events.dropFirst(Self.visibleLimit))
+
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(events) { event in
+            ForEach(events.prefix(Self.visibleLimit)) { event in
                 eventRow(event)
+            }
+            if !later.isEmpty {
+                laterFooter(later)
             }
             if !dismissals.dismissed.isEmpty {
                 dismissedFooter
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Meetings beyond the agenda's horizon, folded behind a count and opened in the same row
+    /// style, so a full day is one tap away rather than a wall of rows by default.
+    private func laterFooter(_ events: [CalendarEvent]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                showsLater.toggle()
+            } label: {
+                HStack(spacing: 5) {
+                    Text("\(events.count) later")
+                        .font(.caption)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                    Image(systemName: showsLater ? "chevron.up" : "chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if showsLater {
+                ForEach(events) { event in
+                    eventRow(event)
+                }
+            }
+        }
     }
 
     private func eventRow(_ event: CalendarEvent) -> some View {

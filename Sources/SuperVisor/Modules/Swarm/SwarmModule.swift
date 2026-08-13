@@ -84,6 +84,7 @@ final class SwarmModule: NotchModule, ObservableObject {
         announcedEntry = nil
         queuedPIDs = []
         expandedPresence = false
+        SectionUrgencyCenter.shared.set(false, for: moduleID)
         if hadExpandedSection {
             context.setNeedsCompactRefresh()
         }
@@ -133,6 +134,13 @@ final class SwarmModule: NotchModule, ObservableObject {
         let currentPIDs = Set(queue.map(\.sessionPID))
         let addedPIDs = currentPIDs.subtracting(queuedPIDs)
         queuedPIDs = currentPIDs
+
+        // A session that cannot proceed floats this section to the top of the sheet, ahead of
+        // whatever is merely playing or scheduled.
+        SectionUrgencyCenter.shared.set(
+            queue.contains { $0.reason.isBlocking },
+            for: moduleID
+        )
 
         if let newest = queue.first(where: { addedPIDs.contains($0.sessionPID) }) {
             announce(newest)

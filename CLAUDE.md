@@ -74,6 +74,18 @@ A single morphing surface, driven by a small state machine, that modules feed co
   black and the corner radius interpolates so the open reads as the notch itself expanding, not a
   separate panel dropping down. A solid black "camera cap" always covers the physical cutout. Hosts
   `CompactPillView` (fades out on expand) and `ExpandedPanelView` (fades in after the grow).
+- **`UI/ExpandedPanelView.swift`** — the sheet's section stack, and where the sheet's finite height
+  is rationed. Sections whose module has raised `SectionUrgencyCenter` lead; module `order` sorts
+  within the urgent group and within the quiet one, and `moduleID` breaks a remaining tie so a
+  rebuild never reshuffles the sheet. The panel measures its natural height and reports it to the
+  engine, which grows the surface to fit up to `maxExpandedSheetHeight`; content past that is
+  clipped by the surface shape, so the panel masks its bottom `SheetOverflowFade.bandHeight` into a
+  dissolve at the cut — a full sheet reads as continuing rather than as a rendering fault. The mask
+  is applied unconditionally (fully opaque while the content fits) so crossing the ceiling never
+  swaps view identity and tears down the live section views and their timers. **Sections curate
+  themselves**: each keeps its own list short by default and folds the remainder behind a count
+  (SwarmVisor's **N idle**, the agenda's **N later** and **N dismissed**), because a fixed budget
+  spent by whoever renders first is what overflows in the first place.
 
 ## Geometry
 
@@ -263,7 +275,10 @@ names below are the code paths.
   excluded everywhere, including FlowVisor's meeting deferral. Dismissals live in memory in
   `MeetingDismissalStore` (`Services/Meetings/`), keyed by event ID plus start time and pruned when
   the meeting ends; an **N dismissed** agenda footer lists them for one-tap restore and keeps the
-  section visible when every meeting is dismissed.
+  section visible when every meeting is dismissed. The agenda shows three upcoming meetings and
+  folds the rest behind an **N later** footer that opens them in the same row style. A call in
+  progress — scheduled or ad-hoc — raises `SectionUrgencyCenter`, floating the HUD to the top of
+  the sheet, since the mic toggle and Join are what the sheet is being opened for.
 - **Reminders → "TaskVisor"** (`Modules/Reminders`) — due-today + overdue Apple Reminders. Compact:
   a checklist count badge (red when any are overdue). Expanded: a **tap-to-complete** checklist
   with list color, live due/overdue text, and a high-priority marker. EventKit via
@@ -339,8 +354,13 @@ names below are the code paths.
   SwarmVisor's `order` of 15 puts its toast ahead of FlowVisor's break nudge when both want the
   banner. Opening the sheet or emptying the queue clears the glow, and an
   already-seen nonempty queue stays quiet until another entry is added. Queue rows (Claude-mark
-  led) put blocked sessions first, then most-recent, and live until the session resumes or the
-  user dismisses them. A validated tty teleports directly to the matching iTerm2 tab through
+  led) put blocked sessions first, then most-recent (session PID settling a tie so a retick never
+  reshuffles them), and live until the session resumes or the user dismisses them. A session that
+  merely stopped folds into an **N idle** disclosure once it is an hour old
+  (`SwarmQueuePresentation.idleFoldAge`) — inside that hour its closing summary is still what the
+  user stepped away from, past it the row is history competing for sheet height. A blocked session
+  never folds however long it has waited, and any blocked session raises `SectionUrgencyCenter`, so
+  the queue outranks whatever is merely playing or scheduled. A validated tty teleports directly to the matching iTerm2 tab through
   AppleScript. `swarm.showMessages` (**default off**) gates session *content* — the question, the
   closing summary, an error's detail text, each truncated to one line with the whole of it on
   hover; labels, tool names, and error codes are fixed vocabulary and always show. The sheet
@@ -401,6 +421,11 @@ at runtime.
   file, OCR, or clipboard content — and logging failures never throw or crash the app.
 - **`Services/Attention/AttentionGlowCenter.swift`** — a module-agnostic one-shot attention signal
   read by the root view and cleared when the sheet opens.
+- **`Services/Attention/SectionUrgencyCenter.swift`** — a module-agnostic flag a module raises while
+  its expanded section carries something to act on now (a blocked agent session, a call in
+  progress). `ExpandedPanelView` floats every raised section above the quiet ones, so the sheet's
+  finite height goes to what cannot wait. Setting an unchanged flag publishes nothing, so a module
+  may raise it from a periodic tick; a module clears its own flag on `deactivate`.
 - **`Services/FileSystem/FileChangeWatcher.swift`** — calls back when a file or directory is
   written, created, replaced, or removed. A vnode `DispatchSource` watches an open descriptor — an
   *inode*, not a path — so a writer that updates atomically (write temp, `rename` into place)

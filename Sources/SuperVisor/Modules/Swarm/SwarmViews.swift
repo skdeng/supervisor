@@ -38,45 +38,131 @@ struct SwarmExpandedView: View {
     @ObservedObject var settings: SettingsStore
     let terminalTeleport: TerminalTeleport
 
-    /// Sessions that cannot proceed lead: a prompt frozen on screen costs more than a finished
-    /// turn sitting at an idle prompt. Within each group the most recent leads, so the session
-    /// the user last stepped away from stays at hand.
-    private var orderedQueue: [AttentionEntry] {
-        center.queue.sorted { first, second in
-            if first.reason.isBlocking != second.reason.isBlocking {
-                return first.reason.isBlocking
-            }
-            return first.since > second.since
-        }
-    }
+    /// Whether the folded group of long-idle sessions is open. Resets with the sheet, which is
+    /// built only while it is expanded or hovered, so the queue opens folded every time.
+    @State private var showsIdle = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            if !center.queue.isEmpty {
-                TimelineView(.periodic(from: Date(), by: 30)) { context in
+        TimelineView(.periodic(from: Date(), by: 30)) { context in
+            let split = SwarmQueuePresentation.split(center.queue, now: context.date)
+
+            VStack(alignment: .leading, spacing: 9) {
+                if !split.current.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(orderedQueue) { entry in
-                            SwarmAttentionRow(
-                                entry: entry,
-                                now: context.date,
-                                showsMessages: settings.swarmShowsMessages,
-                                terminalTeleport: terminalTeleport,
-                                onDismiss: {
-                                    center.dismiss(entry.sessionPID)
-                                }
-                            )
+                        ForEach(split.current) { entry in
+                            row(entry, now: context.date)
                         }
                     }
                 }
-            }
 
-            if center.workingCount > 0 {
-                Text("\(center.workingCount) working")
-                    .font(.caption)
-                    .foregroundStyle(NotchTheme.secondaryForeground)
+                if !split.idle.isEmpty {
+                    idleGroup(split.idle, now: context.date)
+                }
+
+                if center.workingCount > 0 {
+                    Text("\(center.workingCount) working")
+                        .font(.caption)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// Sessions that stopped long enough ago to be history rather than triage, folded behind a
+    /// count. They keep their full rows once opened: a session is still dismissible and still
+    /// worth jumping to, it just no longer earns sheet height unprompted.
+    private func idleGroup(_ entries: [AttentionEntry], now: Date) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                showsIdle.toggle()
+            } label: {
+                HStack(spacing: 5) {
+                    Text("\(entries.count) idle")
+                        .font(.caption)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                    Image(systemName: showsIdle ? "chevron.up" : "chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if showsIdle {
+                ForEach(entries) { entry in
+                    row(entry, now: now)
+                }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func row(_ entry: AttentionEntry, now: Date) -> some View {
+        SwarmAttentionRow(
+            entry: entry,
+            now: now,
+            showsMessages: settings.swarmShowsMessages,
+            terminalTeleport: terminalTeleport,
+            onDismiss: {
+                center.dismiss(entry.sessionPID)
+            }
+        )
+    }
+}
+
+/// How the sheet arranges the attention queue.
+enum SwarmQueuePresentation {
+    /// How long a session that merely stopped — its turn over, nothing blocking it — keeps a row
+    /// of its own. Inside that window its closing summary is still what the user stepped away
+    /// from; past it the row is history, competing for sheet height with sessions that are
+    /// genuinely stuck.
+    static let idleFoldAge: TimeInterval = 3600
+
+    struct Split: Equatable {
+        /// Sessions worth a row unprompted: anything blocked, plus recently-stopped sessions.
+        let current: [AttentionEntry]
+        /// Long-stopped sessions, folded behind a count.
+        let idle: [AttentionEntry]
+    }
+
+    /// Sessions that cannot proceed lead: a prompt frozen on screen costs more than a finished
+    /// turn sitting at an idle prompt. Within each group the most recent leads, so the session
+    /// the user last stepped away from stays at hand, and the session PID settles a remaining tie
+    /// — `sorted(by:)` gives no stability guarantee, and rows that swapped places between the
+    /// 30-second reticks would be unreadable.
+    ///
+    /// A blocked session never folds however long it has waited: it is stopped until the user
+    /// deals with it, and time only makes that more true.
+    static func split(_ queue: [AttentionEntry], now: Date) -> Split {
+        let ordered = queue.sorted { first, second in
+            if first.reason.isBlocking != second.reason.isBlocking {
+                return first.reason.isBlocking
+            }
+            if first.since != second.since { return first.since > second.since }
+            return first.sessionPID < second.sessionPID
+        }
+        let folded = ordered.partitioned { entry in
+            !entry.reason.isBlocking && now.timeIntervalSince(entry.since) >= idleFoldAge
+        }
+        return Split(current: folded.unmatched, idle: folded.matched)
+    }
+}
+
+private extension Array {
+    /// Split into the elements satisfying `predicate` and those that do not, each keeping the
+    /// receiver's order.
+    func partitioned(by predicate: (Element) -> Bool) -> (matched: [Element], unmatched: [Element]) {
+        var matched: [Element] = []
+        var unmatched: [Element] = []
+        for element in self {
+            if predicate(element) {
+                matched.append(element)
+            } else {
+                unmatched.append(element)
+            }
+        }
+        return (matched, unmatched)
     }
 }
 

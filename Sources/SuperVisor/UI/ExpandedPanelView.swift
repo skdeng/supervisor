@@ -1,19 +1,26 @@
 import SwiftUI
 
 /// The expanded panel that drops below the notch. Stacks each enabled module's
-/// `expandedSection()` vertically, sorted by `order` (the engine already keeps `modules`
-/// sorted), inside the Liquid Glass panel chrome.
+/// `expandedSection()` vertically — sections a module has marked urgent lead, and module `order`
+/// decides within each group — inside the Liquid Glass panel chrome.
 ///
 /// The panel sizes itself to its content — it never scrolls. Content is laid out at a fixed
 /// width (so nothing overflows horizontally) and adopts its natural height; that height is
-/// measured and reported to the engine, which grows the morphing surface to fit exactly. When
-/// no module contributes a section it shows a quiet empty state so the surface is never blank.
+/// measured and reported to the engine, which grows the morphing surface to fit exactly, up to
+/// the tallest surface it will render. Content past that height dissolves into the sheet's bottom
+/// edge rather than ending on a hard cut. When no module contributes a section it shows a quiet
+/// empty state so the surface is never blank.
 struct ExpandedPanelView: View {
     @EnvironmentObject private var engine: NotchEngine
+    @ObservedObject private var urgency = SectionUrgencyCenter.shared
 
     /// Fixed sheet width. Content is laid out to this width, so the sheet never scrolls
     /// horizontally; overflow (there should be none) is clipped by the surface shape.
     let width: CGFloat
+
+    /// The content's natural height, which exceeds what the surface renders once the sheet is
+    /// fuller than the engine's ceiling. Drives the bottom dissolve.
+    @State private var contentHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: NotchTheme.sectionSpacing) {
@@ -39,11 +46,18 @@ struct ExpandedPanelView: View {
             }
         )
         .onPreferenceChange(SheetHeightKey.self) { height in
+            contentHeight = height
             engine.reportExpandedSheetHeight(height)
         }
         // No chrome of its own: the Liquid Glass panel behind it is the surface.
         // Module sections add their own cards.
         .foregroundStyle(NotchTheme.primaryForeground)
+        // Applied unconditionally — the gradient is fully opaque while the content fits — so a
+        // sheet that grows past the ceiling does not swap view identity and tear down the live
+        // section views (and their timers) underneath it.
+        .mask(
+            LinearGradient(stops: overflowFadeStops, startPoint: .top, endPoint: .bottom)
+        )
     }
 
     private var emptyState: some View {
@@ -66,15 +80,82 @@ struct ExpandedPanelView: View {
         let visible = engine.isFileDragging
             ? engine.modules.filter { $0 is FileShelfModule }
             : engine.modules
-        return visible.compactMap { module in
+        let entries = visible.compactMap { module -> SectionEntry? in
             guard let view = module.expandedSection() else { return nil }
-            return SectionEntry(moduleID: module.moduleID, view: view)
+            return SectionEntry(
+                moduleID: module.moduleID,
+                order: module.order,
+                isUrgent: urgency.urgentModuleIDs.contains(module.moduleID),
+                view: view
+            )
+        }
+        return SheetSectionOrdering.sorted(entries)
+    }
+
+    private var overflowFadeStops: [Gradient.Stop] {
+        // The surface renders exactly `expandedSheetHeight` of the panel, which is the measured
+        // height until the content outgrows the engine's ceiling and stops there.
+        guard let band = SheetOverflowFade.band(
+            contentHeight: contentHeight,
+            visibleHeight: engine.expandedSheetHeight
+        ) else {
+            return [
+                Gradient.Stop(color: .black, location: 0),
+                Gradient.Stop(color: .black, location: 1),
+            ]
+        }
+        return [
+            Gradient.Stop(color: .black, location: 0),
+            Gradient.Stop(color: .black, location: band.start),
+            Gradient.Stop(color: .clear, location: band.end),
+            Gradient.Stop(color: .clear, location: 1),
+        ]
+    }
+}
+
+/// A section as the sheet orders it.
+protocol SheetSection {
+    var moduleID: String { get }
+    var order: Int { get }
+    var isUrgent: Bool { get }
+}
+
+enum SheetSectionOrdering {
+    /// Urgent sections lead, so the content that cannot wait is never the content that runs off
+    /// the bottom of a full sheet. Module `order` decides within each group, and `moduleID`
+    /// breaks a remaining tie — `sorted(by:)` gives no stability guarantee, and a sheet whose
+    /// sections swapped places between builds would be unreadable.
+    static func sorted<S: SheetSection>(_ sections: [S]) -> [S] {
+        sections.sorted { first, second in
+            if first.isUrgent != second.isUrgent { return first.isUrgent }
+            if first.order != second.order { return first.order < second.order }
+            return first.moduleID < second.moduleID
         }
     }
 }
 
-private struct SectionEntry: Identifiable {
+/// The dissolve at the bottom of a sheet holding more content than the surface renders.
+enum SheetOverflowFade {
+    /// Depth of the dissolve. Deep enough to read as a fade rather than a soft edge, shallow
+    /// enough that the last fully-legible row still sits above it.
+    static let bandHeight: CGFloat = 44
+
+    /// Where the dissolve begins and ends, as fractions of the content's own height — the mask
+    /// spans the full natural content, of which only the top `visibleHeight` is ever on screen.
+    /// `nil` when the content fits and nothing is cut off.
+    static func band(contentHeight: CGFloat, visibleHeight: CGFloat) -> (start: CGFloat, end: CGFloat)? {
+        guard visibleHeight > 0, contentHeight > visibleHeight else { return nil }
+        return (
+            start: max(0, (visibleHeight - bandHeight) / contentHeight),
+            end: min(1, visibleHeight / contentHeight)
+        )
+    }
+}
+
+private struct SectionEntry: Identifiable, SheetSection {
     let moduleID: String
+    let order: Int
+    let isUrgent: Bool
     let view: AnyView
     var id: String { moduleID }
 }
