@@ -75,9 +75,11 @@ A single morphing surface, driven by a small state machine, that modules feed co
   separate panel dropping down. A solid black "camera cap" always covers the physical cutout. Hosts
   `CompactPillView` (fades out on expand) and `ExpandedPanelView` (fades in after the grow).
 - **`UI/ExpandedPanelView.swift`** — the sheet's section stack, and where the sheet's finite height
-  is rationed. Sections whose module has raised `SectionUrgencyCenter` lead; module `order` sorts
-  within the urgent group and within the quiet one, and `moduleID` breaks a remaining tie so a
-  rebuild never reshuffles the sheet. The panel measures its natural height and reports it to the
+  is rationed. **The media section anchors the top and is never displaced** — it is a tall,
+  distinctive shape the eye expects there, and moving it costs more legibility than any reordering
+  below it wins back. Beneath it, sections whose module has raised `SectionUrgencyCenter` lead;
+  module `order` sorts within the urgent group and within the quiet one, and `moduleID` breaks a
+  remaining tie so a rebuild never reshuffles the sheet. The panel measures its natural height and reports it to the
   engine, which grows the surface to fit up to `maxExpandedSheetHeight`; content past that is
   clipped by the surface shape, so the panel masks its bottom `SheetOverflowFade.bandHeight` into a
   dissolve at the cut — a full sheet reads as continuing rather than as a rendering fault. The mask
@@ -277,8 +279,9 @@ names below are the code paths.
   the meeting ends; an **N dismissed** agenda footer lists them for one-tap restore and keeps the
   section visible when every meeting is dismissed. The agenda shows three upcoming meetings and
   folds the rest behind an **N later** footer that opens them in the same row style. A call in
-  progress — scheduled or ad-hoc — raises `SectionUrgencyCenter`, floating the HUD to the top of
-  the sheet, since the mic toggle and Join are what the sheet is being opened for.
+  progress — scheduled or ad-hoc — raises `SectionUrgencyCenter`, floating the HUD above the other
+  sections, since the mic toggle and Join are what the sheet is being opened for. It still sits
+  below the pinned media section.
 - **Reminders → "TaskVisor"** (`Modules/Reminders`) — due-today + overdue Apple Reminders. Compact:
   a checklist count badge (red when any are overdue). Expanded: a **tap-to-complete** checklist
   with list color, live due/overdue text, and a high-priority marker. EventKit via
@@ -360,7 +363,7 @@ names below are the code paths.
   (`SwarmQueuePresentation.idleFoldAge`) — inside that hour its closing summary is still what the
   user stepped away from, past it the row is history competing for sheet height. A blocked session
   never folds however long it has waited, and any blocked session raises `SectionUrgencyCenter`, so
-  the queue outranks whatever is merely playing or scheduled. A validated tty teleports directly to the matching iTerm2 tab through
+  the queue leads every section but the pinned media one. A validated tty teleports directly to the matching iTerm2 tab through
   AppleScript. `swarm.showMessages` (**default off**) gates session *content* — the question, the
   closing summary, an error's detail text, each truncated to one line with the whole of it on
   hover; labels, tool names, and error codes are fixed vocabulary and always show. The sheet
@@ -423,8 +426,9 @@ at runtime.
   read by the root view and cleared when the sheet opens.
 - **`Services/Attention/SectionUrgencyCenter.swift`** — a module-agnostic flag a module raises while
   its expanded section carries something to act on now (a blocked agent session, a call in
-  progress). `ExpandedPanelView` floats every raised section above the quiet ones, so the sheet's
-  finite height goes to what cannot wait. Setting an unchanged flag publishes nothing, so a module
+  progress). `ExpandedPanelView` floats every raised section above the quiet ones — below the
+  pinned media section, which urgency never displaces — so the sheet's finite height goes to what
+  cannot wait. Setting an unchanged flag publishes nothing, so a module
   may raise it from a periodic tick; a module clears its own flag on `deactivate`.
 - **`Services/FileSystem/FileChangeWatcher.swift`** — calls back when a file or directory is
   written, created, replaced, or removed. A vnode `DispatchSource` watches an open descriptor — an

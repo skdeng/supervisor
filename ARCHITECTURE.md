@@ -39,9 +39,9 @@ pill to fit. Compact views are deliberately tiny: a glyph, a waveform, a short l
 On **hover-to-expand** (pointer enters the notch region) or on an explicit
 `requestExpand()`, the pill animates open into a full **expanded panel** that drops
 below the menu bar. The panel stacks every module's `expandedSection()` vertically,
-sorted by each module's `order` (lower first) — except that a module raising
-`SectionUrgencyCenter` floats its section ahead of the quiet ones, `order` still deciding
-within each group. This is the rich, interactive surface:
+sorted by each module's `order` (lower first) — except that the media section is pinned to
+the top, and below it a module raising `SectionUrgencyCenter` floats its section ahead of the
+quiet ones, `order` still deciding within each group. This is the rich, interactive surface:
 media transport controls, the file shelf, system HUD detail, glance widgets, timer
 lists, the notification feed, and the unit converter.
 

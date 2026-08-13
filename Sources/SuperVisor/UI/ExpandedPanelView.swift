@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// The expanded panel that drops below the notch. Stacks each enabled module's
-/// `expandedSection()` vertically — sections a module has marked urgent lead, and module `order`
-/// decides within each group — inside the Liquid Glass panel chrome.
+/// `expandedSection()` vertically — the media section anchors the top, then sections a module has
+/// marked urgent, with module `order` deciding within each group — inside the Liquid Glass panel
+/// chrome.
 ///
 /// The panel sizes itself to its content — it never scrolls. Content is laid out at a fixed
 /// width (so nothing overflows horizontally) and adopts its natural height; that height is
@@ -85,6 +86,7 @@ struct ExpandedPanelView: View {
             return SectionEntry(
                 moduleID: module.moduleID,
                 order: module.order,
+                isPinned: module is MediaModule,
                 isUrgent: urgency.urgentModuleIDs.contains(module.moduleID),
                 view: view
             )
@@ -117,16 +119,23 @@ struct ExpandedPanelView: View {
 protocol SheetSection {
     var moduleID: String { get }
     var order: Int { get }
+    /// Whether the section anchors the top of the sheet, ahead of urgency.
+    var isPinned: Bool { get }
     var isUrgent: Bool { get }
 }
 
 enum SheetSectionOrdering {
-    /// Urgent sections lead, so the content that cannot wait is never the content that runs off
-    /// the bottom of a full sheet. Module `order` decides within each group, and `moduleID`
-    /// breaks a remaining tie — `sorted(by:)` gives no stability guarantee, and a sheet whose
-    /// sections swapped places between builds would be unreadable.
+    /// A pinned section leads unconditionally: the media block is the sheet's anchor, a tall
+    /// distinctive shape the eye expects at the top, and moving it costs more legibility than any
+    /// reordering below it can win back.
+    ///
+    /// Among the rest, urgent sections lead, so the content that cannot wait is never the content
+    /// that runs off the bottom of a full sheet. Module `order` decides within each group, and
+    /// `moduleID` breaks a remaining tie — `sorted(by:)` gives no stability guarantee, and a sheet
+    /// whose sections swapped places between builds would be unreadable.
     static func sorted<S: SheetSection>(_ sections: [S]) -> [S] {
         sections.sorted { first, second in
+            if first.isPinned != second.isPinned { return first.isPinned }
             if first.isUrgent != second.isUrgent { return first.isUrgent }
             if first.order != second.order { return first.order < second.order }
             return first.moduleID < second.moduleID
@@ -155,6 +164,7 @@ enum SheetOverflowFade {
 private struct SectionEntry: Identifiable, SheetSection {
     let moduleID: String
     let order: Int
+    let isPinned: Bool
     let isUrgent: Bool
     let view: AnyView
     var id: String { moduleID }

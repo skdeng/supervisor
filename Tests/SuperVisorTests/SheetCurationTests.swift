@@ -9,6 +9,7 @@ struct SheetSectionOrderingTests {
     private struct Section: SheetSection, Equatable {
         let moduleID: String
         let order: Int
+        var isPinned = false
         var isUrgent = false
     }
 
@@ -43,6 +44,27 @@ struct SheetSectionOrderingTests {
         ])
 
         #expect(sorted.map(\.moduleID) == ["swarm", "calendar", "media"])
+    }
+
+    @Test("The pinned section leads even while another section is urgent")
+    func pinnedSectionOutranksUrgency() {
+        let sorted = SheetSectionOrdering.sorted([
+            Section(moduleID: "calendar", order: 20, isUrgent: true),
+            Section(moduleID: "media", order: 10, isPinned: true),
+            Section(moduleID: "swarm", order: 15, isUrgent: true),
+        ])
+
+        #expect(sorted.map(\.moduleID) == ["media", "swarm", "calendar"])
+    }
+
+    @Test("A pinned section leads from any module order")
+    func pinnedSectionIgnoresModuleOrder() {
+        let sorted = SheetSectionOrdering.sorted([
+            Section(moduleID: "swarm", order: 15),
+            Section(moduleID: "usage", order: 90, isPinned: true),
+        ])
+
+        #expect(sorted.map(\.moduleID) == ["usage", "swarm"])
     }
 
     @Test("Sections sharing an order sort deterministically")
