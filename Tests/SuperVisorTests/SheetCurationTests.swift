@@ -122,13 +122,14 @@ struct SwarmQueuePresentationTests {
     private func entry(
         pid: Int32,
         reason: AttentionReason,
-        secondsAgo: TimeInterval
+        secondsAgo: TimeInterval,
+        tty: String? = nil
     ) -> AttentionEntry {
         AttentionEntry(
             sessionPID: pid,
             name: "session-\(pid)",
             cwd: "/tmp/session-\(pid)",
-            tty: nil,
+            tty: tty,
             reason: reason,
             since: now.addingTimeInterval(-secondsAgo)
         )
@@ -224,6 +225,57 @@ struct SwarmQueuePresentationTests {
         #expect(SwarmQueuePresentation.split(entries, now: now).current.map(\.sessionPID) == [3, 7, 9])
         #expect(
             SwarmQueuePresentation.split(entries.reversed(), now: now).current.map(\.sessionPID) == [3, 7, 9]
+        )
+    }
+
+    @Test("The jump target is the announced session")
+    func announcedSessionIsTheJumpTarget() {
+        let announced = entry(pid: 5, reason: .needsInput, secondsAgo: 10, tty: "/dev/ttys005")
+        let target = SwarmQueuePresentation.pressingSession(
+            announced: announced,
+            queue: [
+                entry(pid: 1, reason: .waiting(detail: "dialog open"), secondsAgo: 300, tty: "/dev/ttys001"),
+                announced,
+            ]
+        )
+
+        #expect(target?.sessionPID == 5)
+    }
+
+    @Test("With no banner the jump target is the queue's first entry")
+    func queueLeadIsTheFallbackJumpTarget() {
+        let target = SwarmQueuePresentation.pressingSession(
+            announced: nil,
+            queue: [
+                entry(pid: 1, reason: .waiting(detail: "dialog open"), secondsAgo: 300, tty: "/dev/ttys001"),
+                entry(pid: 2, reason: .needsInput, secondsAgo: 10, tty: "/dev/ttys002"),
+            ]
+        )
+
+        #expect(target?.sessionPID == 1)
+    }
+
+    @Test("A session with no terminal is skipped for the next that has one")
+    func sessionsWithoutATTYAreSkipped() {
+        let target = SwarmQueuePresentation.pressingSession(
+            announced: entry(pid: 5, reason: .needsInput, secondsAgo: 10, tty: nil),
+            queue: [
+                entry(pid: 1, reason: .waiting(detail: "dialog open"), secondsAgo: 300, tty: nil),
+                entry(pid: 2, reason: .needsInput, secondsAgo: 10, tty: "/dev/ttys002"),
+            ]
+        )
+
+        #expect(target?.sessionPID == 2)
+    }
+
+    @Test("Nothing reachable yields no jump target, so the shortcut stays unclaimed")
+    func noReachableSessionYieldsNoTarget() {
+        #expect(SwarmQueuePresentation.pressingSession(announced: nil, queue: []) == nil)
+        #expect(
+            SwarmQueuePresentation.pressingSession(
+                announced: nil,
+                queue: [entry(pid: 1, reason: .needsInput, secondsAgo: 10, tty: nil)]
+            ) == nil
         )
     }
 

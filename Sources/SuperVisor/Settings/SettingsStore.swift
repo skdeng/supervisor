@@ -27,6 +27,7 @@ public final class SettingsStore: ObservableObject {
         static let flowBreakLength = "flow.breakLength"
         static let flowDeferDuringMeetings = "flow.deferDuringMeetings"
         static let swarmShowMessages = "swarm.showMessages"
+        static let swarmJumpHotKey = "swarm.jumpHotKey"
     }
 
     /// Hover sensitivity in the range 0...1. Higher means a larger activation rect and a
@@ -94,6 +95,13 @@ public final class SettingsStore: ObservableObject {
         didSet { defaults.set(swarmShowsMessages, forKey: Key.swarmShowMessages) }
     }
 
+    /// SwarmVisor: whether ⌘⇧⎋ jumps to the session that most needs attention. The shortcut is
+    /// claimed only while some session is actually reachable, so the rest of the time the
+    /// keystroke belongs to whatever app is frontmost.
+    @Published public var swarmJumpHotKeyEnabled: Bool {
+        didSet { defaults.set(swarmJumpHotKeyEnabled, forKey: Key.swarmJumpHotKey) }
+    }
+
     /// Per-module enabled flags, keyed by `moduleID`. Absent ids default to enabled.
     @Published public private(set) var moduleEnabled: [String: Bool]
 
@@ -125,6 +133,8 @@ public final class SettingsStore: ObservableObject {
             (defaults.object(forKey: Key.flowDeferDuringMeetings) as? Bool) ?? true
         self.swarmShowsMessages =
             (defaults.object(forKey: Key.swarmShowMessages) as? Bool) ?? false
+        self.swarmJumpHotKeyEnabled =
+            (defaults.object(forKey: Key.swarmJumpHotKey) as? Bool) ?? true
 
         // Reconstruct the per-module map from any persisted keys.
         var map: [String: Bool] = [:]

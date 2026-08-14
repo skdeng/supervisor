@@ -123,6 +123,11 @@ struct SettingsView: View {
         case "swarm":
             AgentHookSettingsView()
 
+            Toggle("Jump to the waiting session with ⌘⇧⎋", isOn: $settings.swarmJumpHotKeyEnabled)
+            Text("Focuses the iTerm2 tab of the session that most needs attention — the one the banner is announcing, otherwise the first blocked session in the queue. The shortcut is claimed only while a session is reachable; the rest of the time ⌘⇧⎋ goes to the app you are using.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             Toggle("Show what a session said", isOn: $settings.swarmShowsMessages)
             Text("Adds the question a session asked, its closing summary, or an error's detail text to each row; hover a row for the full text. Off keeps rows to a state and a tool name, so no session content sits on screen during a screen share.")
                 .font(.caption)

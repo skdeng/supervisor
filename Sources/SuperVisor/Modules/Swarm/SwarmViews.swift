@@ -134,6 +134,18 @@ enum SwarmQueuePresentation {
     ///
     /// A blocked session never folds however long it has waited: it is stopped until the user
     /// deals with it, and time only makes that more true.
+    /// The session a jump goes to: the one the banner is announcing, else the queue's first —
+    /// its most pressing, the queue being ordered blocked-first then most-recent. Entries with no
+    /// validated tty are skipped, since nothing can focus a session whose terminal was never
+    /// identified.
+    static func pressingSession(
+        announced: AttentionEntry?,
+        queue: [AttentionEntry]
+    ) -> AttentionEntry? {
+        if let announced, announced.tty != nil { return announced }
+        return queue.first { $0.tty != nil }
+    }
+
     static func split(_ queue: [AttentionEntry], now: Date) -> Split {
         let ordered = queue.sorted { first, second in
             if first.reason.isBlocking != second.reason.isBlocking {

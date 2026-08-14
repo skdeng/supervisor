@@ -20,6 +20,12 @@ final class SwarmModule: NotchModule, ObservableObject {
     private var queueSubscription: AnyCancellable?
     private var sessionsSubscription: AnyCancellable?
     private var glowSubscription: AnyCancellable?
+    private var hotKeySubscription: AnyCancellable?
+    /// Jumps to the session that most needs attention without the sheet being open. Claimed only
+    /// while some session is reachable, so ⌘⇧⎋ stays available to other apps the rest of the time.
+    private lazy var jumpHotKey = GlobalHotKey(combination: .commandShiftEscape) { [weak self] in
+        self?.jumpToPressingSession()
+    }
     private var expandedPresence = false
     /// The queue's PIDs as of the previous emission, so an emission can be split into sessions
     /// that just entered the queue and entries that were rewritten where they stood.
@@ -48,6 +54,9 @@ final class SwarmModule: NotchModule, ObservableObject {
         queueSubscription = fleetCenter.$queue.sink { [weak self] queue in
             self?.receive(queue: queue)
         }
+        hotKeySubscription = SettingsStore.shared.$swarmJumpHotKeyEnabled
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.reconcileJumpHotKey() }
         sessionsSubscription = fleetCenter.$sessions.sink { [weak self] _ in
             self?.reconcileExpandedPresence()
         }
@@ -77,6 +86,9 @@ final class SwarmModule: NotchModule, ObservableObject {
         sessionsSubscription = nil
         glowSubscription?.cancel()
         glowSubscription = nil
+        hotKeySubscription?.cancel()
+        hotKeySubscription = nil
+        jumpHotKey.unregister()
         eventSocket.stop()
         sessionMonitor.stop()
         fleetCenter.stop()
@@ -157,6 +169,28 @@ final class SwarmModule: NotchModule, ObservableObject {
         }
 
         reconcileExpandedPresence()
+        reconcileJumpHotKey()
+    }
+
+    private func pressingSession() -> AttentionEntry? {
+        SwarmQueuePresentation.pressingSession(
+            announced: announcedEntry,
+            queue: fleetCenter.queue
+        )
+    }
+
+    private func jumpToPressingSession() {
+        guard let tty = pressingSession()?.tty else { return }
+        AppLog.debug(.swarm, "hot key jump")
+        jump(toTTY: tty)
+    }
+
+    /// Hold the shortcut only while it would do something. With no reachable session the
+    /// registration is released, so ⌘⇧⎋ reaches whatever app the user is actually in.
+    private func reconcileJumpHotKey() {
+        let wanted = SettingsStore.shared.swarmJumpHotKeyEnabled && pressingSession() != nil
+        guard wanted != jumpHotKey.isRegistered else { return }
+        jumpHotKey.setRegistered(wanted)
     }
 
     /// Presents `entry`, replacing whatever the banner already shows, and holds the surface with

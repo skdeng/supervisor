@@ -364,7 +364,10 @@ names below are the code paths.
   user stepped away from, past it the row is history competing for sheet height. A blocked session
   never folds however long it has waited, and any blocked session raises `SectionUrgencyCenter`, so
   the queue leads every section but the pinned media one. A validated tty teleports directly to the matching iTerm2 tab through
-  AppleScript. `swarm.showMessages` (**default off**) gates session *content* — the question, the
+  AppleScript, from the row, the banner, or **⌘⇧⎋** without the sheet open (`swarm.jumpHotKey`,
+  default on). The shortcut goes to the session the banner is announcing, else the queue's first;
+  entries with no tty are skipped, and it is claimed only while some session is reachable, so the
+  rest of the time ⌘⇧⎋ belongs to the frontmost app. `swarm.showMessages` (**default off**) gates session *content* — the question, the
   closing summary, an error's detail text, each truncated to one line with the whole of it on
   hover; labels, tool names, and error codes are fixed vocabulary and always show. The sheet
   floats above every window, so content is opt-in rather than on by default.
@@ -424,6 +427,16 @@ at runtime.
   file, OCR, or clipboard content — and logging failures never throw or crash the app.
 - **`Services/Attention/AttentionGlowCenter.swift`** — a module-agnostic one-shot attention signal
   read by the root view and cleared when the sheet opens.
+- **`Services/Hotkeys/GlobalHotKey.swift`** — a system-wide shortcut over Carbon's
+  `RegisterEventHotKey`. It needs no Accessibility grant, fires while another app owns the
+  keyboard, and **consumes** the keystroke — `NSEvent.addGlobalMonitorForEvents` (what the dormant
+  `MediaKeyMonitor` uses) can only observe, so the key would also reach the frontmost app; and
+  `NotchWindow` never becomes key, so no responder-chain mechanism sees a keystroke at all. Carbon
+  dispatches every hot key to one process-wide handler carrying only an id, hence the id→action
+  map. Registration returns false when the combination is already held; the failure is reported
+  once per shortcut, since arming retries whenever the owning state changes. Callers arm it only
+  while it would do something — a permanently held combination is one the rest of the system can
+  never use.
 - **`Services/Attention/SectionUrgencyCenter.swift`** — a module-agnostic flag a module raises while
   its expanded section carries something to act on now (a blocked agent session, a call in
   progress). `ExpandedPanelView` floats every raised section above the quiet ones — below the
