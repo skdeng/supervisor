@@ -303,14 +303,18 @@ struct NotchRootView: View {
     }
 
     /// The single shape that morphs from the notch into the sheet.
+    ///
+    /// The material is the stack's `background`, never a stack member. A background is laid out
+    /// to the frame the stack is held at, whereas a ZStack proposes its own union size to a
+    /// flexible member. The pre-built sheet overflows that frame while the pill is hovered, so a
+    /// member `Color.clear` would take the sheet's size and hand the glass a sheet-sized shape:
+    /// the visible pill would be a cutout from a pane whose refraction rims lie well outside it,
+    /// and every hover morph would slide those rims off the pill and back onto it in its last
+    /// frame.
     private var morphingSurface: some View {
         // Sampled once: each read walks the modules and wraps a fresh AnyView.
         let banner = peekBannerView
         return ZStack(alignment: .top) {
-            // One surface in every state: the notch and the sheet it grows into are the same
-            // material, so the open reads as the notch simply expanding.
-            surfaceBackground
-
             // Compact content flanks the notch while collapsed; fades out as it expands. It
             // rides down with the surface so it stays centered in the body, never stranded in
             // the gap the pill opens above itself.
@@ -361,10 +365,18 @@ struct NotchRootView: View {
                     .scaleEffect(isExpanded ? 1 : 0.88, anchor: .top)
                     .opacity(isExpanded ? 1 : 0)
                     .allowsHitTesting(isExpanded)
-                    .transition(.identity)
+                    // A hover-exit close removes the panel in the transaction that starts the
+                    // close, so its exit transition carries the fade-and-shrink the modifiers
+                    // above animate when the sheet closes under a still-hovering cursor; both
+                    // closes look alike. On insertion the transition starts where those
+                    // modifiers already hold a hidden panel, so a hover shows nothing.
+                    .transition(.opacity.combined(with: .scale(scale: 0.88, anchor: .top)))
             }
         }
         .frame(width: shapeWidth, height: shapeHeight, alignment: .top)
+        // One surface in every state: the notch and the sheet it grows into are the same
+        // material, so the open reads as the notch simply expanding.
+        .background(alignment: .top) { surfaceBackground }
         .clipShape(NotchShape(cornerRadius: radius, pillness: pillness, topDrop: geo.pillTopDrop))
         .contentShape(NotchShape(cornerRadius: radius, pillness: pillness, topDrop: geo.pillTopDrop))
         // A detached pill casts a shadow so it reads as hovering over the desktop rather than

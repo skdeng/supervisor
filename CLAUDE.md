@@ -73,7 +73,13 @@ A single morphing surface, driven by a small state machine, that modules feed co
   (width + height spring) from the notch-hugging pill into the expanded sheet; the fill stays
   black and the corner radius interpolates so the open reads as the notch itself expanding, not a
   separate panel dropping down. A solid black "camera cap" always covers the physical cutout. Hosts
-  `CompactPillView` (fades out on expand) and `ExpandedPanelView` (fades in after the grow).
+  `CompactPillView` (fades out on expand) and `ExpandedPanelView` (fades in after the grow). **The
+  material is the stack's `.background`, sized by the surface's frame** — a ZStack proposes its
+  union size to a flexible member, and the sheet pre-built during hover overflows the frame, so a
+  member `Color.clear` would hand the glass a sheet-sized shape whose refraction rims sit outside
+  the visible pill; every hover morph would then pop as the rims slide back onto it. The panel's
+  exit transition mirrors its hidden-state modifiers (fade + shrink), so a hover-exit close fades
+  the content the same way a click close does instead of dropping it in one frame.
 - **`UI/ExpandedPanelView.swift`** — the sheet's section stack, and where the sheet's finite height
   is rationed. **The media section anchors the top and is never displaced** — it is a tall,
   distinctive shape the eye expects there, and moving it costs more legibility than any reordering
@@ -555,7 +561,7 @@ artifacts:
 - Committing and pushing directly to this repo is fine — no need to ask first.
 - **Don't create PRs for this repo.** When asked to ship changes, push to `main` directly.
 - **Always push to `main` directly; don't create worktrees or branches.** Work in the main
-  checkout at `/Users/sdeng/code/notch`. `.claude/settings.json` sets
+  checkout at `/Users/sdeng/code/supervisor`. `.claude/settings.json` sets
   `worktree.bgIsolation: "none"` so a background session edits there rather than isolating
   itself in a worktree first.
 - **Commit messages must not carry co-authorship or tooling trailers** — no `Co-Authored-By:`
