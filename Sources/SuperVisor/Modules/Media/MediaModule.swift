@@ -502,12 +502,14 @@ final class MediaModule: NotchModule, ObservableObject {
         let trackIdentity = snapshot.trackIdentity
         autoPauseRequestID = requestID
         bridge.fetchNowPlayingApplicationPID(on: .main) { [weak self] processID in
-            Task { @MainActor [weak self] in
-                self?.completeAutoPauseRequest(
-                    requestID: requestID,
-                    processID: processID,
-                    trackIdentity: trackIdentity
-                )
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.completeAutoPauseRequest(
+                        requestID: requestID,
+                        processID: processID,
+                        trackIdentity: trackIdentity
+                    )
+                }
             }
         }
     }
@@ -594,12 +596,14 @@ final class MediaModule: NotchModule, ObservableObject {
         let requestID = UUID()
         autoPauseRequestID = requestID
         bridge.fetchNowPlayingApplicationPID(on: .main) { [weak self] processID in
-            Task { @MainActor [weak self] in
-                self?.completeAutoResumeRequest(
-                    requestID: requestID,
-                    processID: processID,
-                    bridge: bridge
-                )
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.completeAutoResumeRequest(
+                        requestID: requestID,
+                        processID: processID,
+                        bridge: bridge
+                    )
+                }
             }
         }
     }

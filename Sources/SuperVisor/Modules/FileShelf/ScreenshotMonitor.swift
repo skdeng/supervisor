@@ -38,7 +38,11 @@ final class ScreenshotMonitor {
         isRunning = true
 
         let watcher = FileChangeWatcher(url: Self.preferencesURL, debounce: 0.3) { [weak self] in
-            Task { @MainActor in self?.reconfigureIfNeeded() }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.reconfigureIfNeeded()
+                }
+            }
         }
         preferencesWatcher = watcher
         watcher.start()
@@ -78,7 +82,11 @@ final class ScreenshotMonitor {
         knownPaths = Set(Self.contents(of: destination).map(\.path))
 
         let watcher = FileChangeWatcher(url: destination, debounce: 0.35) { [weak self] in
-            Task { @MainActor in self?.scan() }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.scan()
+                }
+            }
         }
         directoryWatcher = watcher
         watcher.start()

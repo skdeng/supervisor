@@ -48,10 +48,12 @@ final class CalendarService: ObservableObject {
             reload()
         case .notDetermined:
             store.requestFullAccessToEvents { [weak self] granted, _ in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.authorization = EKEventStore.authorizationStatus(for: .event)
-                    if granted { self.reload() }
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.authorization = EKEventStore.authorizationStatus(for: .event)
+                        if granted { self.reload() }
+                    }
                 }
             }
         default:

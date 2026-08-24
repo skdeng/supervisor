@@ -84,7 +84,11 @@ final class QuotaMonitor: ObservableObject {
     func start() {
         guard watcher == nil else { return }
         let watcher = FileChangeWatcher(url: captureURL) { [weak self] in
-            Task { @MainActor in self?.refresh() }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.refresh()
+                }
+            }
         }
         self.watcher = watcher
         watcher.start()

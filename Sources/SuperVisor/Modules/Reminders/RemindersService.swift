@@ -44,10 +44,12 @@ final class RemindersService: ObservableObject {
             reload()
         case .notDetermined:
             store.requestFullAccessToReminders { [weak self] granted, _ in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.authorization = EKEventStore.authorizationStatus(for: .reminder)
-                    if granted { self.reload() }
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.authorization = EKEventStore.authorizationStatus(for: .reminder)
+                        if granted { self.reload() }
+                    }
                 }
             }
         default:
@@ -77,7 +79,11 @@ final class RemindersService: ObservableObject {
                 .compactMap(Self.makeItem)
                 .filter { $0.due < startOfTomorrow }
                 .sorted { $0.due < $1.due }
-            Task { @MainActor in self?.apply(items) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.apply(items)
+                }
+            }
         }
     }
 

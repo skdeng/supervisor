@@ -52,7 +52,9 @@ final class BatteryModule: NotchModule, ObservableObject {
         // compact pill shows no connect/disconnect indicator. Selectors fire on the main
         // thread; hop explicitly to satisfy main-actor isolation of UI state.
         bluetoothMonitor.onChange = { [weak self] devices in
-            Task { @MainActor in self?.devices = devices }
+            MainActor.assumeIsolated {
+                self?.devices = devices
+            }
         }
         bluetoothMonitor.start()
     }

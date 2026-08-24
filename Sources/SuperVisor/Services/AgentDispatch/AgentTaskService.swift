@@ -260,9 +260,11 @@ final class AgentTaskService {
                     continuation: continuation
                 )
             }
-        } onCancel: {
-            Task { @MainActor [weak self] in
-                self?.cancel()
+        } onCancel: { [weak self] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.cancel()
+                }
             }
         }
     }
@@ -338,13 +340,17 @@ final class AgentTaskService {
         observeExit(of: spawned.processIdentifier)
 
         Self.readOutput(from: spawned.standardOutput) { [weak self] outcome in
-            Task { @MainActor [weak self] in
-                self?.handleOutput(outcome)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.handleOutput(outcome)
+                }
             }
         }
         Self.readDiagnostics(from: spawned.standardError) { [weak self] tail in
-            Task { @MainActor [weak self] in
-                self?.handleDiagnostics(tail)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.handleDiagnostics(tail)
+                }
             }
         }
 
@@ -372,9 +378,11 @@ final class AgentTaskService {
             queue: .global(qos: .userInitiated)
         )
         source.setEventHandler { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self, self.processIdentifier == processIdentifier else { return }
-                self.reapExitedProcess(blocking: false)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.processIdentifier == processIdentifier else { return }
+                    self.reapExitedProcess(blocking: false)
+                }
             }
         }
         processSource = source

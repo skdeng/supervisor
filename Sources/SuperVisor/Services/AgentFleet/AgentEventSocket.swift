@@ -89,8 +89,10 @@ final class AgentEventSocket {
     func start() {
         guard worker == nil else { return }
         let worker = Worker(socketPath: socketPath) { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.onEvent?(event)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.onEvent?(event)
+                }
             }
         }
         self.worker = worker

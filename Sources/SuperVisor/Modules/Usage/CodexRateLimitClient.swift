@@ -73,13 +73,19 @@ final class CodexRateLimitClient {
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
-            Task { @MainActor in self?.ingest(chunk) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.ingest(chunk)
+                }
+            }
         }
         process.terminationHandler = { [weak self] process in
             let status = process.terminationStatus
             let reason = process.terminationReason == .exit ? "exit" : "signal"
-            Task { @MainActor in
-                self?.handleTermination(status: status, reason: reason)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.handleTermination(status: status, reason: reason)
+                }
             }
         }
 

@@ -65,9 +65,11 @@ final class CodexQuotaMonitor: ObservableObject {
         }
 
         let rootWatcher = FileChangeWatcher(url: sessionsRootURL) { [weak self] in
-            Task { @MainActor in
-                self?.ensureTreeWatcher()
-                self?.refreshActivity()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.ensureTreeWatcher()
+                    self?.refreshActivity()
+                }
             }
         }
         self.rootWatcher = rootWatcher
@@ -105,7 +107,11 @@ final class CodexQuotaMonitor: ObservableObject {
         else { return }
 
         let watcher = DirectoryTreeWatcher(url: sessionsRootURL) { [weak self] in
-            Task { @MainActor in self?.recordTreeActivity() }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.recordTreeActivity()
+                }
+            }
         }
         treeWatcher = watcher
         watcher.start()
