@@ -63,8 +63,10 @@ final class ClaudeSessionMonitor: ObservableObject {
         AppLog.debug(.swarm, "session monitor started")
 
         let watcher = DirectoryTreeWatcher(url: registryURL) { [weak self] in
-            Task { @MainActor in
-                self?.refreshSoon()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.refreshSoon()
+                }
             }
         }
         self.watcher = watcher
@@ -127,8 +129,10 @@ final class ClaudeSessionMonitor: ObservableObject {
                 queue: processQueue
             )
             source.setEventHandler { [weak self] in
-                Task { @MainActor in
-                    self?.refreshSoon()
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        self?.refreshSoon()
+                    }
                 }
             }
             processSources[pid] = source
