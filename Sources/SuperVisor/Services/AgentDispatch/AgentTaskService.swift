@@ -377,7 +377,7 @@ final class AgentTaskService {
             eventMask: .exit,
             queue: .global(qos: .userInitiated)
         )
-        source.setEventHandler { [weak self] in
+        source.setEventHandler { @Sendable [weak self] in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, self.processIdentifier == processIdentifier else { return }

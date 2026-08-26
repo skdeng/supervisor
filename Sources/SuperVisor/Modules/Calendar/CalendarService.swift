@@ -47,7 +47,7 @@ final class CalendarService: ObservableObject {
         case .fullAccess:
             reload()
         case .notDetermined:
-            store.requestFullAccessToEvents { [weak self] granted, _ in
+            store.requestFullAccessToEvents { @Sendable [weak self] granted, _ in
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         guard let self else { return }

@@ -43,7 +43,7 @@ final class RemindersService: ObservableObject {
         case .fullAccess:
             reload()
         case .notDetermined:
-            store.requestFullAccessToReminders { [weak self] granted, _ in
+            store.requestFullAccessToReminders { @Sendable [weak self] granted, _ in
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         guard let self else { return }
@@ -70,7 +70,7 @@ final class RemindersService: ObservableObject {
         let predicate = store.predicateForIncompleteReminders(
             withDueDateStarting: nil, ending: startOfTomorrow, calendars: nil
         )
-        store.fetchReminders(matching: predicate) { [weak self] fetched in
+        store.fetchReminders(matching: predicate) { @Sendable [weak self] fetched in
             // Runs on an EventKit queue: build value snapshots here, then publish on the main actor.
             // The predicate's end bound is inclusive, so a date-only reminder due *tomorrow*
             // (resolving to tomorrow 00:00 == startOfTomorrow) slips in; filter it back out so we

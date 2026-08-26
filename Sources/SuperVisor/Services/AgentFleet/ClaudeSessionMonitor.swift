@@ -128,7 +128,7 @@ final class ClaudeSessionMonitor: ObservableObject {
                 eventMask: .exit,
                 queue: processQueue
             )
-            source.setEventHandler { [weak self] in
+            source.setEventHandler { @Sendable [weak self] in
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         self?.refreshSoon()
