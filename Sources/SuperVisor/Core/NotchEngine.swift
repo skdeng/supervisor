@@ -56,9 +56,13 @@ public final class NotchEngine: ObservableObject {
     /// True while the cursor is hovering the notch. Drives a subtle grow affordance; the
     /// sheet itself only opens on a click.
     @Published public private(set) var isHovered: Bool = false
-    /// True while a file is being dragged onto the notch (before it is dropped). While set,
-    /// the expanded sheet surfaces only the FileShelf section so the drop target stands alone.
-    @Published public private(set) var isFileDragging: Bool = false
+    /// True while a close is waiting for the side card to tuck back under the sheet. The root
+    /// view animates the card's slide off this; the state machine holds `.expanded` until the
+    /// tuck has played, then completes the collapse — so the card is never left floating beside
+    /// a sheet that is already shrinking.
+    @Published public private(set) var isSideCardRetracting: Bool = false
+    /// The delayed second phase of a close begun while the side card was out.
+    private var pendingCloseTask: Task<Void, Never>?
 
     private(set) lazy var context: NotchContext = NotchContext(
         requestExpand: { [weak self] in self?.requestExpand() },
@@ -87,6 +91,20 @@ public final class NotchEngine: ObservableObject {
     public let minExpandedSheetHeight: CGFloat = 96
     public let maxExpandedSheetHeight: CGFloat = 600
 
+    /// The FileShelf's detached side card: its fixed width and the gap between it and the
+    /// sheet's trailing edge. The canvas budgets for the card on both sides (it stays centered
+    /// on the notch), and the expanded hit-test and hover rects extend over it while it shows.
+    public let sideCardWidth: CGFloat = 128
+    public let sideCardGap: CGFloat = 8
+    /// Slack the card's clipping window keeps on its free edges so the card's shadow isn't cut
+    /// where nothing occludes it. Part of the canvas budget: the window overflows the card by
+    /// this much to the right and below.
+    public let sideCardShadowPad: CGFloat = 32
+    /// The card's height floor. The card matches the sheet's height, but the sheet's measured
+    /// height comes from the other modules' sections — a quiet sheet near the height floor
+    /// would otherwise crush the card below what its empty drop zone needs.
+    public let sideCardMinHeight: CGFloat = 180
+
     /// The collapsed surface's laid-out width and strip height, reported by the root view so the
     /// hit-test and hover rects cover the pill as it actually renders — compact content and an
     /// inline peek both size it beyond the bare notch.
@@ -96,9 +114,15 @@ public final class NotchEngine: ObservableObject {
     /// whenever the surface is hovered.
     public private(set) var collapsedSurfaceWidth: CGFloat = 0
     public private(set) var collapsedStripHeight: CGFloat = 0
-    /// Widest the collapsed surface may render. The canvas is a fixed size derived from the
-    /// screen geometry alone, so clamping against it can never feed back into layout.
-    public var collapsedWidthLimit: CGFloat { canvasFrame(for: geometry).width - 8 }
+    /// Widest the collapsed surface may render. Bounded by the canvas's COMPACT width term
+    /// rather than the whole canvas: the canvas also budgets expanded-only surfaces (the side
+    /// card and its shadow slack), and a collapsed pill has no business growing into that
+    /// allowance. Derived from screen geometry alone, so clamping against it can never feed
+    /// back into layout.
+    public var collapsedWidthLimit: CGFloat {
+        let pillGrowth = geometry.isHardwareNotch ? 1 : NotchTheme.pillHoverScale
+        return (geometry.notchWidth + 2 * compactSideReserve) * pillGrowth - 8
+    }
 
     public init(settings: SettingsStore = .shared) {
         self.settings = settings
@@ -169,6 +193,7 @@ public final class NotchEngine: ObservableObject {
     public func shutdown() {
         hover.stop()
         peekTask?.cancel()
+        pendingCloseTask?.cancel()
         for module in modules {
             module.deactivate()
         }
@@ -360,16 +385,50 @@ public final class NotchEngine: ObservableObject {
         modules.first { $0 is FileShelfModule } as? FileShelfModule
     }
 
+    // MARK: Side card
+
+    /// Whether the shelf's detached card accompanies the open sheet right now. Drives the
+    /// asymmetric extension of the expanded hit-test and hover rects, so hovering or clicking
+    /// the card behaves as part of the sheet.
+    public var isSideCardVisible: Bool {
+        state == .expanded && fileShelf?.wantsSideCard == true
+    }
+
+    /// The shelf's card content, for the root view to render beside the sheet. Nil while the
+    /// sheet is closed or the shelf has nothing to show.
+    public func sideCardView() -> AnyView? {
+        guard state == .expanded else { return nil }
+        return fileShelf?.sideCard()
+    }
+
+    /// Distance from the surface's top edge (below any pill drop) to the side card's bottom
+    /// edge. Can exceed the sheet's own extent when the height floor lifts a card beside a
+    /// short sheet, so the expanded hit-test and hover rects take the larger of the two.
+    private var sideCardBottomExtent: CGFloat {
+        let notchH = max(geometry.notchHeight, 32)
+        let cardHeight = max(
+            expandedSheetHeight + (geometry.isHardwareNotch ? 0 : notchH),
+            sideCardMinHeight
+        )
+        return (geometry.isHardwareNotch ? notchH : 0) + cardHeight
+    }
+
     /// A file drag entered the notch: open the sheet and show the file shelf's drop UI. With the
     /// shelf module disabled there is nowhere to drop, so don't open an inert sheet or advertise
     /// a drop target.
     private func handleFileDragEntered() {
         guard let fileShelf else { return }
         fileShelf.setDropTargeting(true)
-        isFileDragging = true
-        compactRevision &+= 1  // force the panel to re-evaluate sections (show the shelf)
+        compactRevision &+= 1  // re-render the root so the side card appears with its drop zone
         if state != .expanded {
             transition(to: .expanded)
+        } else {
+            // Already expanded: no transition recomputes the rects, but the card just appeared
+            // and the hit-test / hover regions must reach over it for the drop to land there.
+            // The refresh matters because the hover monitor sees no mouse events during a drag
+            // session, so only a refresh re-evaluates a rect that moved under the drag cursor.
+            updateInteractivity()
+            hover.refresh()
         }
     }
 
@@ -377,10 +436,12 @@ public final class NotchEngine: ObservableObject {
     private func handleFileDragExited() {
         guard let fileShelf else { return }
         fileShelf.setDropTargeting(false)
-        isFileDragging = false
         compactRevision &+= 1
         if fileShelf.stagedCount == 0, state == .expanded, !isHovered {
             transition(to: resolvedRestingState())
+        } else {
+            updateInteractivity()
+            hover.refresh()
         }
     }
 
@@ -389,8 +450,9 @@ public final class NotchEngine: ObservableObject {
         guard let fileShelf else { return }
         fileShelf.stage(urls: urls)
         fileShelf.setDropTargeting(false)
-        isFileDragging = false
         compactRevision &+= 1
+        updateInteractivity()
+        hover.refresh()
     }
 
     // MARK: State machine
@@ -429,6 +491,35 @@ public final class NotchEngine: ObservableObject {
     }
 
     private func transition(to newState: NotchState) {
+        if newState == .expanded {
+            // An open (or re-open during a sequenced close) resolves any pending close: the
+            // card slides back out and the sheet holds.
+            pendingCloseTask?.cancel()
+            pendingCloseTask = nil
+            if isSideCardRetracting { isSideCardRetracting = false }
+        } else if state == .expanded {
+            // A close already sequencing needs no second trigger.
+            if pendingCloseTask != nil { return }
+            // Closing with the side card out is two-phase: retract the card under the sheet
+            // first, then collapse the sheet itself — the reverse of the open, where the sheet
+            // forms first and then ejects the card. The target state is re-resolved when the
+            // second phase fires, since compact presence can change during the tuck.
+            if isSideCardVisible {
+                isSideCardRetracting = true
+                pendingCloseTask = Task { [weak self] in
+                    try? await Task.sleep(for: .milliseconds(260))
+                    guard let self, !Task.isCancelled else { return }
+                    self.pendingCloseTask = nil
+                    self.isSideCardRetracting = false
+                    self.performTransition(to: self.resolvedRestingState())
+                }
+                return
+            }
+        }
+        performTransition(to: newState)
+    }
+
+    private func performTransition(to newState: NotchState) {
         guard newState != state else { return }
         // The window is a constant-size canvas; only the SwiftUI content morphs, so the
         // Dynamic-Island animation is never clipped by a window resize. `NotchRootView` owns
@@ -505,7 +596,21 @@ public final class NotchEngine: ObservableObject {
         switch state {
         case .expanded:
             width = expandedPanelWidth + 24
-            height = notchH + expandedSheetHeight + 12
+            // The side card hangs off the sheet's trailing edge, so the clickable region
+            // extends asymmetrically: same left edge, wider to the right — and down to the
+            // card's bottom when its height floor puts it below a short sheet.
+            let cardVisible = isSideCardVisible
+            height = max(
+                notchH + expandedSheetHeight,
+                cardVisible ? sideCardBottomExtent : 0
+            ) + 12
+            let cardExtension = cardVisible ? sideCardGap + sideCardWidth : 0
+            return CGRect(
+                x: centerX - width / 2,
+                y: h - drop - height,
+                width: width + cardExtension,
+                height: height
+            )
         case .compact:
             // The fixed allowance covers ordinary compact content; the measured surface covers
             // anything that outgrows it — an inline peek, or compact contributions wide enough to
@@ -521,16 +626,25 @@ public final class NotchEngine: ObservableObject {
 
     /// The constant window frame (global, bottom-left origin): top-aligned, centered on the
     /// notch, tall enough for the dropped panel and wide enough for the widest state.
-    private func canvasFrame(for geo: NotchGeometry) -> CGRect {
+    /// Internal (not private) so the tests can pin the side card's containment.
+    func canvasFrame(for geo: NotchGeometry) -> CGRect {
         let top = geo.screenTop
         // A hovered pill swells, so the canvas has to be wide enough to hold the widest compact
         // content at full growth; the surface is only ever clipped by the window, never resized.
+        // The expanded budget carries the side card and its shadow slack on BOTH sides: the
+        // canvas stays centered on the notch, so the trailing card is only in frame if its
+        // width is mirrored.
         let pillGrowth = geo.isHardwareNotch ? 1 : NotchTheme.pillHoverScale
-        let width = max((geo.notchWidth + 2 * compactSideReserve) * pillGrowth, expandedPanelWidth + 40)
+        let width = max(
+            (geo.notchWidth + 2 * compactSideReserve) * pillGrowth,
+            expandedPanelWidth + 40 + 2 * (sideCardGap + sideCardWidth + sideCardShadowPad)
+        )
         // Budget the canvas for the tallest possible sheet so the fixed-size window never has
         // to resize as the sheet grows/shrinks to fit its content — only the surface morphs.
-        // The drop is budgeted too, since a detached pill pushes the sheet that far further down.
+        // The drop is budgeted too, since a detached pill pushes the sheet that far further
+        // down, and the side card's shadow slack so a full-height card's shadow isn't cut.
         let height = max(geo.notchHeight, 32) + maxExpandedSheetHeight + geo.pillTopDrop
+            + sideCardShadowPad
         return CGRect(
             x: geo.centerX - width / 2,
             y: top - height,
@@ -577,11 +691,25 @@ public final class NotchEngine: ObservableObject {
                 - (hovered ? 22 : 12) - bannerExtension
             return CGRect(x: geo.centerX - width / 2, y: minY, width: width, height: maxY - minY)
         case .expanded:
-            // Exactly the open panel bounds plus a small margin.
+            // Exactly the open panel bounds plus a small margin — extended over the side card
+            // while it shows, so moving the cursor onto the card does not close the sheet out
+            // from under it. The card's floored height can reach below a short sheet, so the
+            // zone reaches down to whichever bottom edge is lower.
             let pad: CGFloat = 12
             let width = expandedPanelWidth + 2 * pad
-            let minY = top - notchH - expandedSheetHeight - pad - geo.pillTopDrop
-            return CGRect(x: geo.centerX - width / 2, y: minY, width: width, height: maxY - minY)
+            let cardVisible = isSideCardVisible
+            let cardExtension = cardVisible ? sideCardGap + sideCardWidth : 0
+            let extent = max(
+                notchH + expandedSheetHeight,
+                cardVisible ? sideCardBottomExtent : 0
+            )
+            let minY = top - extent - pad - geo.pillTopDrop
+            return CGRect(
+                x: geo.centerX - width / 2,
+                y: minY,
+                width: width + cardExtension,
+                height: maxY - minY
+            )
         }
     }
 }

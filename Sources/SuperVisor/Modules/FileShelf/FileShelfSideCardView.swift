@@ -1,10 +1,10 @@
 import SwiftUI
 
-/// The FileShelf section in the expanded panel: a header, a horizontal shelf of staged tiles,
-/// and actions operating on the current selection (or all items when nothing is selected).
-/// File drops are received by the window's drag destination; this view reflects its targeting
-/// state.
-struct FileShelfExpandedView: View {
+/// The FileShelf as a detached card beside the expanded sheet: a header, a vertical rail of
+/// staged tiles, and actions operating on the current selection (or all items when nothing is
+/// selected). File drops are received by the window's drag destination; this view reflects its
+/// targeting state.
+struct FileShelfSideCardView: View {
     @ObservedObject var store: FileShelfStore
     /// True while a file is being dragged onto the notch (engine-driven highlight).
     let dropTargeting: Bool
@@ -16,8 +16,8 @@ struct FileShelfExpandedView: View {
             if store.isEmpty {
                 emptyDropZone
             } else {
-                filmstrip
-                actionToolbar
+                tileRail
+                actionGrid
             }
             OperationTickerRow(center: store.operations)
 
@@ -34,11 +34,13 @@ struct FileShelfExpandedView: View {
                     .transition(.opacity)
             }
         }
+        .padding(12)
         .opacity(dropTargeting ? 0.72 : 1)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .overlay { targetingOverlay }
         .animation(.snappy(duration: 0.15), value: dropTargeting)
         .animation(.snappy(duration: 0.18), value: store.feedback)
+        .foregroundStyle(NotchTheme.primaryForeground)
     }
 
     // MARK: Header
@@ -47,7 +49,7 @@ struct FileShelfExpandedView: View {
         HStack(spacing: 6) {
             Image(systemName: "tray.full.fill")
                 .font(.system(size: 12, weight: .semibold))
-            Text("FileShelf")
+            Text("Shelf")
                 .font(.system(size: 13, weight: .semibold))
             if store.count > 0 {
                 Text("\(store.count)")
@@ -59,10 +61,16 @@ struct FileShelfExpandedView: View {
             Spacer()
 
             if !store.selection.isEmpty {
-                Button("Deselect") { store.clearSelection() }
-                    .buttonStyle(.plain)
-                    .font(.caption2)
-                    .foregroundStyle(NotchTheme.secondaryForeground)
+                Button {
+                    store.clearSelection()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(NotchTheme.secondaryForeground)
+                .help("Deselect")
+                .notchTooltip("Deselect")
             }
         }
         .foregroundStyle(NotchTheme.primaryForeground)
@@ -74,10 +82,10 @@ struct FileShelfExpandedView: View {
     private var targetingOverlay: some View {
         if dropTargeting {
             ZStack {
-                RoundedRectangle(cornerRadius: NotchTheme.surfaceCornerRadius, style: .continuous)
+                RoundedRectangle(cornerRadius: NotchTheme.panelCornerRadius, style: .continuous)
                     .fill(NotchTheme.brandGradient.opacity(0.10))
 
-                RoundedRectangle(cornerRadius: NotchTheme.surfaceCornerRadius, style: .continuous)
+                RoundedRectangle(cornerRadius: NotchTheme.panelCornerRadius, style: .continuous)
                     .strokeBorder(NotchTheme.brandGradient, lineWidth: 1.5)
 
                 if !store.isEmpty {
@@ -119,34 +127,39 @@ struct FileShelfExpandedView: View {
                     .font(.system(size: 22, weight: .regular))
                 Text("Drop files here")
                     .font(.system(size: 12, weight: .medium))
-                Text("Stage files to AirDrop, compress, or drag out")
+                Text("AirDrop, compress, or drag out")
                     .font(.caption2)
                     .foregroundStyle(NotchTheme.secondaryForeground)
+                    .multilineTextAlignment(.center)
             }
             .foregroundStyle(NotchTheme.primaryForeground)
             .frame(maxWidth: .infinity)
+            .padding(.horizontal, 8)
             .padding(.vertical, 18)
         }
+        .frame(maxHeight: .infinity)
         .animation(.snappy(duration: 0.15), value: dropTargeting)
     }
 
-    // MARK: Filmstrip
+    // MARK: Tile rail
 
-    private var filmstrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
+    /// Staged tiles stacked vertically. The scroll view is flexible, so the rail absorbs
+    /// whatever height the card's fixed frame leaves between header and actions.
+    private var tileRail: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(spacing: 10) {
                 ForEach(store.files) { file in
                     FileTileView(store: store, file: file)
                 }
             }
             .padding(.vertical, 2)
+            .frame(maxWidth: .infinity)
         }
-        .frame(height: 96)
     }
 
-    // MARK: Action toolbar
+    // MARK: Action grid
 
-    private var actionToolbar: some View {
+    private var actionGrid: some View {
         let targets = store.actionFiles()
         let targetIDs = Set(targets.map(\.id))
         let supportsTextRecognition = !targets.isEmpty && targets.allSatisfy {
@@ -162,55 +175,70 @@ struct FileShelfExpandedView: View {
             agentTargetID = nil
         }
 
-        return HStack(spacing: 2) {
-            ShelfActionButton(title: "Copy", systemImage: "doc.on.doc") {
-                store.copyToPasteboard(ids: targetIDs)
-            }
-            if supportsTextRecognition {
-                ShelfActionButton(
-                    title: textTargetID == nil ? "Copy Text (needs one item)" : "Copy Text",
-                    systemImage: "text.viewfinder",
-                    busy: store.recognizingID != nil,
-                    disabled: textTargetID == nil || store.recognizingID != nil
-                ) {
-                    if let textTargetID {
-                        store.copyRecognizedText(id: textTargetID)
+        let columns = Array(
+            repeating: GridItem(.flexible(), spacing: 2),
+            count: 4
+        )
+        return VStack(spacing: 2) {
+            LazyVGrid(columns: columns, spacing: 2) {
+                ShelfActionButton(title: "Copy", systemImage: "doc.on.doc") {
+                    store.copyToPasteboard(ids: targetIDs)
+                }
+                if supportsTextRecognition {
+                    ShelfActionButton(
+                        title: textTargetID == nil ? "Copy Text (needs one item)" : "Copy Text",
+                        systemImage: "text.viewfinder",
+                        busy: store.recognizingID != nil,
+                        disabled: textTargetID == nil || store.recognizingID != nil
+                    ) {
+                        if let textTargetID {
+                            store.copyRecognizedText(id: textTargetID)
+                        }
                     }
                 }
+                ShelfActionButton(title: "Quick Look", systemImage: "eye") {
+                    store.quickLook(ids: targetIDs)
+                }
+                ShelfActionButton(title: "AirDrop", systemImage: "dot.radiowaves.right") {
+                    store.airDrop(ids: targetIDs)
+                }
+                ShelfActionButton(title: "Reveal in Finder", systemImage: "folder") {
+                    store.revealInFinder(ids: targetIDs)
+                }
+                ShelfActionButton(title: "Compress to Zip", systemImage: "doc.zipper") {
+                    store.compress(ids: targetIDs)
+                }
+                ShelfAgentMenu(store: store, targetID: agentTargetID)
             }
-            ShelfActionButton(title: "Quick Look", systemImage: "eye") {
-                store.quickLook(ids: targetIDs)
-            }
-            ShelfActionButton(title: "AirDrop", systemImage: "dot.radiowaves.right") {
-                store.airDrop(ids: targetIDs)
-            }
-            ShelfActionButton(title: "Reveal in Finder", systemImage: "folder") {
-                store.revealInFinder(ids: targetIDs)
-            }
-            ShelfActionButton(title: "Compress to Zip", systemImage: "doc.zipper") {
-                store.compress(ids: targetIDs)
-            }
-            ShelfAgentMenu(store: store, targetID: agentTargetID)
 
             Rectangle()
                 .fill(NotchTheme.separator)
-                .frame(width: 1, height: 16)
-                .padding(.horizontal, 2)
+                .frame(height: 1)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
 
-            ShelfActionButton(title: "Remove from shelf", systemImage: "xmark.bin") {
-                store.remove(ids: targetIDs)
-            }
-            ShelfActionButton(
-                title: "Move to Trash",
-                systemImage: "trash.fill",
-                destructive: true
-            ) {
-                store.moveToTrash(ids: targetIDs)
+            // The destructive pair shares the grid's column width, so Remove and Move to
+            // Trash render at the same weight as every other action instead of stretching
+            // across the row.
+            LazyVGrid(columns: columns, spacing: 2) {
+                ShelfActionButton(title: "Remove from shelf", systemImage: "xmark.bin") {
+                    store.remove(ids: targetIDs)
+                }
+                ShelfActionButton(
+                    title: "Move to Trash",
+                    systemImage: "trash.fill",
+                    destructive: true
+                ) {
+                    store.moveToTrash(ids: targetIDs)
+                }
             }
         }
         .padding(3)
         .frame(maxWidth: .infinity)
-        .background(Capsule().fill(Color.white.opacity(0.08)))
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.white.opacity(0.08))
+        )
     }
 }
 
@@ -298,14 +326,11 @@ private struct OperationTickerRow: View {
     var body: some View {
         Group {
             if !center.operations.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        ForEach(center.operations) { operation in
-                            OperationTickerEntry(operation: operation)
-                        }
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(center.operations) { operation in
+                        OperationTickerEntry(operation: operation)
                     }
                 }
-                .frame(height: 18)
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
@@ -316,24 +341,24 @@ private struct OperationTickerRow: View {
     }
 }
 
+/// One live operation as two stacked lines sized for the card's narrow content column: the
+/// title, then the state with its controls. The cancel button rides the state line, always in
+/// view — cancelling billable agent work is the one control here that must never scroll away.
 private struct OperationTickerEntry: View {
     @ObservedObject var operation: LiveOperation
 
     var body: some View {
-        HStack(spacing: 4) {
+        VStack(alignment: .leading, spacing: 2) {
             Text(operation.title)
                 .foregroundStyle(NotchTheme.primaryForeground)
-            if let detail = operation.detail {
-                Text("· \(detail)")
-                    .foregroundStyle(NotchTheme.secondaryForeground)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 120)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            HStack(spacing: 4) {
+                stateView
             }
-
-            stateView
+            .lineLimit(1)
         }
         .font(.caption2)
-        .lineLimit(1)
         .animation(.snappy(duration: 0.15), value: operation.state)
     }
 
@@ -361,6 +386,7 @@ private struct OperationTickerEntry: View {
             .buttonStyle(.plain)
             .foregroundStyle(NotchTheme.secondaryForeground)
             .help("Cancel \(operation.title)")
+            .notchTooltip("Cancel \(operation.title)")
 
         case .cancelling:
             ProgressView()
@@ -389,8 +415,8 @@ private struct OperationTickerEntry: View {
             Text(message)
                 .foregroundStyle(NotchTheme.secondaryForeground)
                 .truncationMode(.tail)
-                .frame(maxWidth: 160, alignment: .leading)
                 .help(message)
+                .notchTooltip(message)
 
         case .cancelled:
             Image(systemName: "slash.circle")
@@ -432,7 +458,6 @@ private struct ShelfActionButton: View {
         .foregroundStyle(destructive ? Color.red.opacity(0.9) : NotchTheme.primaryForeground)
         .disabled(disabled)
         .opacity(disabled ? 0.45 : 1)
-        .frame(maxWidth: .infinity)
         .onHover { hovering = $0 }
         .animation(.snappy(duration: 0.15), value: hovering)
         .help(title)

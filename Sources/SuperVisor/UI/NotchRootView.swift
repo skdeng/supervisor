@@ -31,6 +31,11 @@ struct NotchRootView: View {
     /// collapse path, and racing the new content when one peek replaces another.
     @State private var centerSize: CGSize?
 
+    /// Whether the side card rests at its out position. False holds it tucked behind the
+    /// sheet's trailing edge inside its clipping window; the `onChange` handlers on the body
+    /// animate the flips so the slide sequences with the sheet's own open and close.
+    @State private var sideCardOut = false
+
     /// Debug: render the whole surface bright red so its exact bounds are visible. It overrides
     /// the glass material too, which is otherwise hard to pin down against a busy desktop.
     private var debugTint: Bool { settings.debugTintEnabled }
@@ -40,6 +45,7 @@ struct NotchRootView: View {
     private var notchW: CGFloat { max(geo.notchWidth, 80) }
     private var notchH: CGFloat { max(geo.notchHeight, 32) }
     private var isExpanded: Bool { engine.state == .expanded }
+    private var sideCardPresent: Bool { isExpanded && engine.sideCardView() != nil }
     private var peekBannerView: AnyView? {
         guard !isExpanded, engine.isPeeking else { return nil }
         return engine.activePeekBanner()
@@ -216,6 +222,12 @@ struct NotchRootView: View {
                     .allowsHitTesting(false)
                 }
 
+                // The FileShelf's detached side card, sliding out of a clipping window whose
+                // leading edge sits at the sheet's visible trailing edge — see `sideCard`.
+                if isExpanded, let card = engine.sideCardView() {
+                    sideCard(card)
+                }
+
                 // ONE surface: the notch itself grows and becomes the sheet — not a separate
                 // panel dropping below a static bar. It always renders: with no compact content
                 // it rests as a bare black pill exactly over the hardware notch, so the notch is
@@ -262,6 +274,32 @@ struct NotchRootView: View {
             // engine's hit-test and hover rects have to contain it.
             .onChange(of: collapsedWidth, initial: true) { _, _ in reportCollapsedSurface() }
             .onChange(of: stripH) { _, _ in reportCollapsedSurface() }
+            // The side card's slide is sequenced explicitly rather than through a transition:
+            // out only after the sheet's open spring has settled (the delay), and — via
+            // `isSideCardRetracting` below — back under before the engine collapses the sheet.
+            .onChange(of: sideCardPresent) { _, present in
+                if present {
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.72).delay(0.26)) {
+                        sideCardOut = true
+                    }
+                } else {
+                    // The card is unmounted; reset instantly so the next one starts tucked.
+                    sideCardOut = false
+                }
+            }
+            .onChange(of: engine.isSideCardRetracting) { _, retracting in
+                if retracting {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 1.0)) {
+                        sideCardOut = false
+                    }
+                } else if sideCardPresent, !sideCardOut {
+                    // A re-open cancelled the sequenced close mid-tuck: slide back out, no
+                    // settle delay — the sheet never left.
+                    withAnimation(.spring(response: 0.38, dampingFraction: 0.72)) {
+                        sideCardOut = true
+                    }
+                }
+            }
 
             Spacer(minLength: 0)
         }
@@ -387,6 +425,61 @@ struct NotchRootView: View {
         .onTapGesture { if !isExpanded { engine.toggleSheet() } }
         // The tooltip host lives outside the surface clip so labels can extend beyond the silhouette.
         .notchTooltipHost()
+    }
+
+    /// The shelf's detached card, floating off the sheet's trailing edge at the sheet's own
+    /// height, in the sheet's own material (opaque black over a hardware notch, clear glass with
+    /// the hit-testable fill otherwise — glass alone would pass clicks through to the desktop).
+    ///
+    /// The card slides inside a clipping window whose leading edge sits exactly at the sheet's
+    /// visible trailing edge. That clip is what sells the pop as the card emerging from UNDER
+    /// the sheet: off a hardware notch the sheet is clear glass, so merely layering the card
+    /// behind it in z-order would leave it visible through the material the whole time. The
+    /// slide itself is `sideCardOut`, animated by the `onChange` handlers on the body — out
+    /// after the open spring settles, back under before the engine completes a close.
+    private func sideCard(_ content: AnyView) -> some View {
+        let metrics = sideCardMetrics
+        let shape = RoundedRectangle(cornerRadius: NotchTheme.panelCornerRadius, style: .continuous)
+        return content
+            .frame(width: engine.sideCardWidth, height: metrics.cardHeight)
+            .background {
+                if debugTint {
+                    shape.fill(surfaceColor)
+                } else if geo.isHardwareNotch {
+                    shape.fill(NotchTheme.notchBlack)
+                } else {
+                    Color.clear
+                        .liquidGlass(in: shape, clear: true)
+                        .overlay { shape.fill(Color.white.opacity(NotchTheme.hitTestableAlpha)) }
+                }
+            }
+            .clipShape(shape)
+            .shadow(color: .black.opacity(0.45), radius: 22, y: 12)
+            .offset(x: sideCardOut ? metrics.shownSlide : metrics.hiddenSlide)
+            .frame(
+                width: metrics.windowWidth,
+                height: metrics.windowHeight,
+                alignment: .topLeading
+            )
+            .clipped()
+            .padding(.top, metrics.top)
+            .offset(x: metrics.windowOffsetX)
+    }
+
+    private var sideCardMetrics: SideCardLayout.Metrics {
+        SideCardLayout.metrics(
+            // The sheet's VISIBLE trailing edge: the shape's body cedes the flare gutters
+            // while attached to a hardware notch, so the frame's edge overstates it there.
+            visibleShapeWidth: shapeWidth - 2 * NotchShape.defaultTopRadius * (1 - pillness),
+            cardWidth: engine.sideCardWidth,
+            gap: engine.sideCardGap,
+            notchHeight: notchH,
+            sheetHeight: panelH,
+            topDrop: topDrop,
+            isHardwareNotch: geo.isHardwareNotch,
+            shadowPad: engine.sideCardShadowPad,
+            minHeight: engine.sideCardMinHeight
+        )
     }
 
     private func reportCollapsedSurface() {

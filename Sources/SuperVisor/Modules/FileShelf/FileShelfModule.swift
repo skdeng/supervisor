@@ -60,18 +60,24 @@ final class FileShelfModule: NotchModule, ObservableObject {
         return AnyView(FileShelfCompactView(store: store))
     }
 
-    // MARK: Expanded section
+    // MARK: Side card
 
-    /// The section remains available while an operation is visible so paid work can be
-    /// inspected and cancelled after its source item leaves the shelf.
-    func expandedSection() -> AnyView? {
-        guard dropTargeting
-                || store.count > 0
-                || store.arrivalItem != nil
-                || !store.operations.operations.isEmpty
-        else {
-            return nil
-        }
-        return AnyView(FileShelfExpandedView(store: store, dropTargeting: dropTargeting))
+    /// Whether the detached side card has anything to show. It stays available while an
+    /// operation is visible so paid work can be inspected and cancelled after its source item
+    /// leaves the shelf, and while a drag is in flight so the drop zone can receive it.
+    var wantsSideCard: Bool {
+        dropTargeting
+            || store.count > 0
+            || store.arrivalItem != nil
+            || !store.operations.operations.isEmpty
+    }
+
+    /// The shelf's only expanded surface: a detached card beside the sheet. It contributes no
+    /// `expandedSection()`. The engine reads this directly — the shelf is the one module with a
+    /// surface outside the sheet, and widening the module protocol for a single implementor
+    /// would push a dead requirement onto every other module.
+    func sideCard() -> AnyView? {
+        guard wantsSideCard else { return nil }
+        return AnyView(FileShelfSideCardView(store: store, dropTargeting: dropTargeting))
     }
 }

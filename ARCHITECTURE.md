@@ -42,8 +42,14 @@ below the menu bar. The panel stacks every module's `expandedSection()` vertical
 sorted by each module's `order` (lower first) — except that the media section is pinned to
 the top, and below it a module raising `SectionUrgencyCenter` floats its section ahead of the
 quiet ones, `order` still deciding within each group. This is the rich, interactive surface:
-media transport controls, the file shelf, system HUD detail, glance widgets, timer
-lists, the notification feed, and the unit converter.
+media transport controls, system HUD detail, glance widgets, timer lists, the notification
+feed, and the unit converter.
+
+One expanded surface lives outside the panel: the file shelf renders as a **detached side
+card** beside the open sheet rather than as a section inside it. The engine reaches it through
+a concrete `FileShelfModule` read (`sideCard()`), not the module protocol — the shelf is the
+single module with an out-of-sheet surface, and widening the protocol for one implementor
+would push a dead requirement onto every other module.
 
 The panel collapses back to the pill when the pointer leaves, after a short grace
 delay, or on `requestCollapse()`.
@@ -234,11 +240,12 @@ non-symlink image/PDF carrying the system screenshot metadata attribute (existin
 baselined, and preferences-plist changes rebase the watcher). Each item records its source
 (dropped / screenshot / generated), shown as a tile badge. Compact: a count/affordance while
 items are held, plus a transient thumbnail flourish that animates a new screenshot into the
-trailing pill and requests a peek. Expanded: a filmstrip of staged thumbnails with Copy, Copy
-Text (local Vision OCR), Quick Look, AirDrop, Reveal, Zip, and agent actions, plus a
-non-destructive Remove and an identity-verified Move-to-Trash (checks the recorded volume/inode
-so a replacement at the same path is never removed). Dragging items back out to any target
-(Finder, Mail, chat) works from every tile. It never captures the screen itself.
+trailing pill and requests a peek. Expanded: a detached side card beside the sheet holding a
+vertical rail of staged thumbnails and an action grid — Copy, Copy Text (local Vision OCR),
+Quick Look, AirDrop, Reveal, Zip, and agent actions, plus a non-destructive Remove and an
+identity-verified Move-to-Trash (checks the recorded volume/inode so a replacement at the same
+path is never removed). Dragging items back out to any target (Finder, Mail, chat) works from
+every tile. It never captures the screen itself.
 
 ### glance
 At-a-glance widgets — small informational tiles (e.g. clock/date, calendar next-event,

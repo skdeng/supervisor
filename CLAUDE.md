@@ -63,9 +63,10 @@ A single morphing surface, driven by a small state machine, that modules feed co
   is bumped on `setNeedsCompactRefresh`.
 - **`Core/NotchWindow.swift`** — a borderless, non-activating `NSPanel` above the status-bar
   level, on all spaces, floating over fullscreen, transparent. It is a **fixed-size canvas**
-  (`canvasFrame`): always large enough for the expanded panel and widest compact content, so it
-  **never resizes per state** — only the SwiftUI content morphs, so the Dynamic-Island animation
-  is never clipped by a window resize. Events pass through everywhere except the notch/sheet
+  (`canvasFrame`): always large enough for the expanded panel, the widest compact content, and
+  the FileShelf side card with its shadow slack (budgeted on both sides, since the canvas stays
+  centered on the notch), so it **never resizes per state** — only the SwiftUI content morphs,
+  so the Dynamic-Island animation is never clipped by a window resize. Events pass through everywhere except the notch/sheet
   region: `NotchContentContainer` hit-tests against an interactive rect (so clicks and file drags
   land only there) and is also a file-drag destination — dragging a file onto the notch opens the
   sheet — while the desktop/menu bar stay usable elsewhere.
@@ -303,12 +304,22 @@ names below are the code paths.
   watcher live, and existing files are baselined on activation/reconfiguration. A new screenshot
   animates into the pill with a 3.2-second peek, then its arrival flourish collapses into the
   persistent count badge. Screenshots evict oldest-first past eight; dropped and generated items
-  are never auto-evicted. Expanded: a horizontal filmstrip of tiles with an icon-only capsule —
-  Copy, Copy Text (Vision OCR, images/PDF; runs detached, only the resulting `String` returns to
-  the main actor), Quick Look, AirDrop, Reveal, Zip, and an **agent-verbs** menu (Summarize /
-  Explain / Extract Text) — plus, separated, **Remove** (off-shelf, non-destructive; a generated
-  artifact's backing file is deleted) and **Move to Trash** (moves the original to the macOS Trash
-  after verifying the file's recorded volume/inode identity, refusing a file swapped at the path).
+  are never auto-evicted. Expanded: a **detached side card** floating `sideCardGap` off the
+  sheet's trailing edge at the sheet's height (floored at `sideCardMinHeight` so a short sheet
+  cannot crush the drop zone), in the sheet's material. The card slides out of a clipping window
+  whose leading edge sits at the sheet's visible trailing edge — the clip is what makes the pop
+  read as emerging from under the sheet, since the flat-screen sheet is clear glass and z-order
+  alone would leave the card visible through it. It slides out only after the open spring
+  settles; a close is **two-phase** (`NotchEngine.isSideCardRetracting`): the card tucks back
+  under, then the engine completes the collapse. The card holds a vertical rail of tiles and an
+  icon action grid — Copy, Copy Text (Vision OCR, images/PDF; runs detached, only the resulting
+  `String` returns to the main actor), Quick Look, AirDrop, Reveal, Zip, and an **agent-verbs**
+  menu (Summarize / Explain / Extract Text) — plus, separated, **Remove** (off-shelf,
+  non-destructive; a generated artifact's backing file is deleted) and **Move to Trash** (moves
+  the original to the macOS Trash after verifying the file's recorded volume/inode identity,
+  refusing a file swapped at the path). The shelf contributes no `expandedSection()`; the engine
+  reads the card through a concrete `FileShelfModule.sideCard()`, and the expanded hit-test and
+  hover rects extend over the card while it shows.
   Agent verbs route to the on-device system language model when a file has a small plain-text or OCR
   representation; verbatim OCR satisfies Extract Text directly. The sandboxed headless CLI remains
   the path for large or binary content, an unavailable system model, and on-device failures (see
