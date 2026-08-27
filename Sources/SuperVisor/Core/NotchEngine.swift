@@ -56,10 +56,10 @@ public final class NotchEngine: ObservableObject {
     /// True while the cursor is hovering the notch. Drives a subtle grow affordance; the
     /// sheet itself only opens on a click.
     @Published public private(set) var isHovered: Bool = false
-    /// True while a close is waiting for the side card to tuck back under the sheet. The root
-    /// view animates the card's slide off this; the state machine holds `.expanded` until the
-    /// tuck has played, then completes the collapse — so the card is never left floating beside
-    /// a sheet that is already shrinking.
+    /// True while a close is waiting for the side card to fade back out. The root view
+    /// animates the card off this; the state machine holds `.expanded` until the fade has
+    /// played, then completes the collapse — so the card is never left floating beside a
+    /// sheet that is already shrinking.
     @Published public private(set) var isSideCardRetracting: Bool = false
     /// The delayed second phase of a close begun while the side card was out.
     private var pendingCloseTask: Task<Void, Never>?
@@ -500,10 +500,10 @@ public final class NotchEngine: ObservableObject {
         } else if state == .expanded {
             // A close already sequencing needs no second trigger.
             if pendingCloseTask != nil { return }
-            // Closing with the side card out is two-phase: retract the card under the sheet
-            // first, then collapse the sheet itself — the reverse of the open, where the sheet
-            // forms first and then ejects the card. The target state is re-resolved when the
-            // second phase fires, since compact presence can change during the tuck.
+            // Closing with the side card out is two-phase: fade the card out first, then
+            // collapse the sheet itself — the reverse of the open, where the sheet forms
+            // first and then presents the card. The target state is re-resolved when the
+            // second phase fires, since compact presence can change during the fade.
             if isSideCardVisible {
                 isSideCardRetracting = true
                 pendingCloseTask = Task { [weak self] in

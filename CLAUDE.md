@@ -306,12 +306,10 @@ names below are the code paths.
   persistent count badge. Screenshots evict oldest-first past eight; dropped and generated items
   are never auto-evicted. Expanded: a **detached side card** floating `sideCardGap` off the
   sheet's trailing edge at the sheet's height (floored at `sideCardMinHeight` so a short sheet
-  cannot crush the drop zone), in the sheet's material. The card slides out of a clipping window
-  whose leading edge sits at the sheet's visible trailing edge — the clip is what makes the pop
-  read as emerging from under the sheet, since the flat-screen sheet is clear glass and z-order
-  alone would leave the card visible through it. It slides out only after the open spring
-  settles; a close is **two-phase** (`NotchEngine.isSideCardRetracting`): the card tucks back
-  under, then the engine completes the collapse. The card holds a vertical rail of tiles and an
+  cannot crush the drop zone), in the sheet's material. The card fades in with a short drift
+  from the sheet's edge, only after the open spring settles; a close is **two-phase**
+  (`NotchEngine.isSideCardRetracting`): the card fades back out, then the engine completes the
+  collapse. The card holds a vertical rail of tiles and an
   icon action grid — Copy, Copy Text (Vision OCR, images/PDF; runs detached, only the resulting
   `String` returns to the main actor), Quick Look, AirDrop, Reveal, Zip, and an **agent-verbs**
   menu (Summarize / Explain / Extract Text) — plus, separated, **Remove** (off-shelf,

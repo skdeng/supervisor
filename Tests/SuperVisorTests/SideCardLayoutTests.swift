@@ -28,7 +28,6 @@ struct SideCardLayoutTests {
             sheetHeight: sheetHeight,
             topDrop: topDrop,
             isHardwareNotch: isHardwareNotch,
-            shadowPad: engine.sideCardShadowPad,
             minHeight: engine.sideCardMinHeight
         )
     }
@@ -60,24 +59,17 @@ struct SideCardLayoutTests {
         #expect(m.cardHeight == engine.sideCardMinHeight)
     }
 
-    @Test("The clipping window's leading edge sits exactly at the sheet's visible trailing edge")
-    func windowLeadingEdgeAtSheetEdge() {
+    @Test("The card clears the sheet's visible trailing edge by exactly the gap")
+    func cardClearsSheetByGap() {
         for hardware in [true, false] {
             let m = metrics(sheetHeight: 400, topDrop: 0, isHardwareNotch: hardware)
 
-            // Window and surface are centered in the same stack: the window's leading edge is
-            // its center offset minus half its width.
-            let windowLeadingEdge = m.windowOffsetX - m.windowWidth / 2
-            #expect(windowLeadingEdge == visibleShapeWidth(isHardwareNotch: hardware) / 2)
+            // Card and surface are centered in the same stack: the card's leading edge is its
+            // center offset minus half its width.
+            let cardLeadingEdge = m.offsetX - engine.sideCardWidth / 2
+            let sheetTrailingEdge = visibleShapeWidth(isHardwareNotch: hardware) / 2
+            #expect(cardLeadingEdge - sheetTrailingEdge == engine.sideCardGap)
         }
-    }
-
-    @Test("Shown, the card clears the window's leading edge by exactly the gap; hidden, its trailing edge is flush with it")
-    func slidePositionsBracketTheClipEdge() {
-        let m = metrics(sheetHeight: 400, topDrop: 0, isHardwareNotch: true)
-
-        #expect(m.shownSlide == engine.sideCardGap)
-        #expect(m.hiddenSlide + engine.sideCardWidth == 0)
     }
 
     @Test("The card, its gap, and its shadow slack fit inside the fixed canvas on both screen classes")
