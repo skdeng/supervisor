@@ -37,28 +37,12 @@ struct RemindersChecklistView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            header
             ForEach(Array(service.reminders.prefix(8))) { item in
                 row(item)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .animation(.snappy(duration: 0.2), value: service.reminders)
-    }
-
-    private var header: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "checklist")
-                .font(.system(size: 14, weight: .semibold))
-            Text("Tasks")
-                .font(.headline)
-            Spacer()
-            Text("\(service.reminders.count)")
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(NotchTheme.secondaryForeground)
-        }
-        .foregroundStyle(NotchTheme.primaryForeground)
     }
 
     private func row(_ item: ReminderItem) -> some View {
