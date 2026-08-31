@@ -126,7 +126,7 @@ final class SwarmModule: NotchModule, ObservableObject {
     /// keeps its own indefinite hold while it is covered and returns once this toast retires.
     func peekBanner() -> AnyView? {
         guard announcedEntry != nil else { return nil }
-        return AnyView(SwarmPeekBannerView(module: self, settings: SettingsStore.shared))
+        return AnyView(SwarmPeekBannerView(module: self))
     }
 
     /// Teleports to the session's terminal and acknowledges the attention: the glow clears, and

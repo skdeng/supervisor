@@ -179,18 +179,17 @@ private extension Array {
 }
 
 /// The banner a session raises for a few seconds as it enters the attention queue: who it is,
-/// why it stopped, and a way straight into its terminal.
+/// its state, and a way straight into its terminal. The state renders as fixed vocabulary only
+/// (Done, Asked, Approve <tool>, an error code) — session content (a question, a closing
+/// summary) is sheet-only, gated there by `swarm.showMessages`, so model-generated text never
+/// rides the pill.
 @MainActor
 struct SwarmPeekBannerView: View {
     @ObservedObject var module: SwarmModule
-    @ObservedObject var settings: SettingsStore
 
     var body: some View {
         if let entry = module.announcedEntry {
-            let parts = SwarmReason.parts(
-                of: entry.reason,
-                showsMessages: settings.swarmShowsMessages
-            )
+            let parts = SwarmReason.parts(of: entry.reason, showsMessages: false)
 
             HStack(spacing: 10) {
                 SwarmAttentionMarker(entry: entry, size: NotchTheme.compactContentHeight)
@@ -203,9 +202,6 @@ struct SwarmPeekBannerView: View {
 
                     SwarmReasonLine(parts: parts)
                 }
-                // A message runs to several hundred characters, and the banner's measured width
-                // is what the surface grows to; the cap keeps one long message from stretching
-                // the pill across the screen.
                 .frame(maxWidth: 280, alignment: .leading)
 
                 // The pill can be wider than the banner needs (compact content on the flanks, a
