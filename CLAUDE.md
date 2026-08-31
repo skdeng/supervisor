@@ -30,8 +30,22 @@ them.
   required because TCC permission grants (Location, Calendar, Reminders, Accessibility, Bluetooth) and the
   now-playing read only persist for a **stable, signed bundle identity** — a bare `swift run`
   binary gets a fresh identity each launch and grants never stick. `make-app.sh` also compiles
-  the MediaRemote adapter dylib (see below), applies `SuperVisor.entitlements`, and DER-encodes
-  its Calendar entitlement; `swift build` does none of those packaging steps.
+  the MediaRemote adapter dylib (see below), embeds Sparkle.framework from the SPM artifact
+  into `Contents/Frameworks` (rewriting the binary's rpath to resolve it there), signs every
+  nested component individually — **never `--deep`**, which would stamp the app's TCC
+  entitlements onto Sparkle's XPC services — applies `SuperVisor.entitlements`, and DER-encodes
+  its Calendar entitlement; `swift build` does none of those packaging steps. Release builds
+  carry a secure timestamp so signatures outlive the signing certificate.
+- **`./release.sh <version> [notes…]`** — cuts a Sparkle auto-update release: asserts
+  main/clean-tree/Developer ID, stamps `Info.plist`, builds, zips, EdDSA-signs the zip (private
+  key in the login Keychain as "Private key for signing Sparkle updates"), prepends the
+  `appcast.xml` item, commits and tags, then publishes **asset first, feed last** (tag + GitHub
+  release upload before the appcast push) so the feed never points at a missing download. The
+  feed is `appcast.xml` on `main` via raw.githubusercontent.com; installed apps check daily
+  (`SUFeedURL`/`SUPublicEDKey` in Info.plist) and also offer **Check for Updates…** in the
+  status-bar menu. Updates verify against the EdDSA key plus the app's own code signature, so
+  a release signed by anything but the Developer ID identity would be refused by installed
+  copies — which is why the script hard-fails without that identity.
 
 ## High-Level Architecture
 

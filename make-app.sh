@@ -39,6 +39,23 @@ cp "$BIN_PATH" "${MACOS_DIR}/${APP_NAME}"
 cp Info.plist "${APP_DIR}/Contents/Info.plist"
 printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"
 
+# Sparkle ships as a binary xcframework artifact; the bundle carries its own copy so the app
+# is self-contained on machines that never built it. SPM links the framework for lookup
+# beside the binary (@loader_path, where the build dir keeps a copy); in the bundle the
+# binary sits in Contents/MacOS, so an added @executable_path/../Frameworks rpath is what
+# resolves the embedded copy. Any absolute build-dir rpath a toolchain adds is deleted so
+# the shipped binary never references paths from this machine.
+FRAMEWORKS_DIR="${APP_DIR}/Contents/Frameworks"
+mkdir -p "$FRAMEWORKS_DIR"
+SPARKLE_FW=".build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+ditto "$SPARKLE_FW" "${FRAMEWORKS_DIR}/Sparkle.framework"
+install_name_tool -add_rpath "@executable_path/../Frameworks" "${MACOS_DIR}/${APP_NAME}"
+while read -r RPATH; do
+  [ -n "$RPATH" ] && install_name_tool -delete_rpath "$RPATH" "${MACOS_DIR}/${APP_NAME}"
+done < <(otool -l "${MACOS_DIR}/${APP_NAME}" \
+  | awk '/LC_RPATH/{getline; getline; sub(/^ *path /,""); sub(/ \(offset [0-9]+\)$/,""); print}' \
+  | grep "/.build/" || true)
+
 # Bundled image assets (SwarmVisor's Claude session mark, etc). NSImage renders the SVGs as
 # vectors at runtime, so they stay crisp at any size.
 cp Resources/*.svg "$RES_DIR/"
@@ -76,14 +93,35 @@ else
   echo "==> Code signing with ${SIGN_IDENTITY}…"
 fi
 
-codesign --force --deep --sign "$SIGN_IDENTITY" \
+# A real (secure) timestamp lets signatures outlive the signing certificate. Only shipped
+# artifacts need one; requiring it for debug builds would put seven timestamp-server round
+# trips (and a network dependency) in the inner dev loop, and ad-hoc signatures cannot be
+# timestamped at all.
+TIMESTAMP_FLAG="--timestamp"
+if [ "$SIGN_IDENTITY" = "-" ] || [ "$CONFIG" != "release" ]; then TIMESTAMP_FLAG="--timestamp=none"; fi
+
+# Nested code signs individually, innermost first — never --deep: deep signing stamps the
+# app's entitlements onto every nested executable, which would hand Sparkle's XPC services
+# the app's TCC entitlements. --preserve-metadata keeps whatever entitlements a service
+# ships with, whatever a future Sparkle chooses those to be.
+SPARKLE_B="${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B"
+codesign --force --options runtime "$TIMESTAMP_FLAG" --preserve-metadata=entitlements \
+  --sign "$SIGN_IDENTITY" "${SPARKLE_B}/XPCServices/Downloader.xpc"
+codesign --force --options runtime "$TIMESTAMP_FLAG" --preserve-metadata=entitlements \
+  --sign "$SIGN_IDENTITY" "${SPARKLE_B}/XPCServices/Installer.xpc"
+codesign --force --options runtime "$TIMESTAMP_FLAG" --sign "$SIGN_IDENTITY" "${SPARKLE_B}/Autoupdate"
+codesign --force --options runtime "$TIMESTAMP_FLAG" --sign "$SIGN_IDENTITY" "${SPARKLE_B}/Updater.app"
+codesign --force --options runtime "$TIMESTAMP_FLAG" --sign "$SIGN_IDENTITY" "${FRAMEWORKS_DIR}/Sparkle.framework"
+codesign --force --options runtime "$TIMESTAMP_FLAG" --sign "$SIGN_IDENTITY" "${RES_DIR}/mediaremote_adapter.dylib"
+
+codesign --force --sign "$SIGN_IDENTITY" \
   --options runtime \
-  --timestamp=none \
+  "$TIMESTAMP_FLAG" \
   --entitlements SuperVisor.entitlements \
   --generate-entitlement-der \
   --identifier com.supervisor.SuperVisor \
   "$APP_DIR"
-codesign --verify --verbose "$APP_DIR"
+codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
 echo "==> Built ${APP_DIR}"
 if [ "$RUN" = "1" ]; then

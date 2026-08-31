@@ -1,13 +1,28 @@
 import AppKit
+import Sparkle
 import SwiftUI
 
 /// Owns the app lifecycle: sets the accessory activation policy (menu-bar agent, no Dock
-/// icon), installs the notch engine, and hosts the status-bar menu (Settings + Quit) and
-/// the Settings window.
+/// icon), installs the notch engine, and hosts the status-bar menu (Settings + Check for
+/// Updates + Quit) and the Settings window.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settings = SettingsStore.shared
     private lazy var engine = NotchEngine(settings: settings)
+
+    /// Sparkle updater against the appcast in `SUFeedURL`. Constructed dormant and started
+    /// in `applicationDidFinishLaunching`, after logging is up — the standard user driver
+    /// reports a start failure (bad feed URL, invalid public key) as an alert, and in an
+    /// accessory app with no Dock icon that alert is easy to miss, so launch order at least
+    /// puts the version line in the log first. Automatic daily checks come from
+    /// `SUEnableAutomaticChecks` in Info.plist. Update zips are verified against
+    /// `SUPublicEDKey` plus the app's own code signature before install, so the feed host
+    /// never has to be trusted.
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: false,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
 
     private var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
@@ -36,6 +51,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         installStatusItem()
         engine.install()
+
+        updaterController.startUpdater()
+        AppLog.notice(.engine, "updater started")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -68,6 +86,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         settingsItem.target = self
         menu.addItem(settingsItem)
+
+        let updateItem = NSMenuItem(
+            title: "Check for Updates…",
+            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        updateItem.target = updaterController
+        menu.addItem(updateItem)
 
         menu.addItem(.separator())
 

@@ -13,9 +13,15 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>1.0.0</string>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/skdeng/supervisor/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>xzIE4ymTOZr/TdgZ3xlOHhODLMC0qc0fte3vl1wl8mE=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
 	<key>LSUIElement</key>

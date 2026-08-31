@@ -6,9 +6,18 @@ let package = Package(
     platforms: [
         .macOS("26.0")
     ],
+    dependencies: [
+        // Pinned to the minor because make-app.sh hardcodes the artifact slice path and the
+        // framework's Versions/B layout; a Sparkle minor bump is a deliberate act that
+        // revisits both.
+        .package(url: "https://github.com/sparkle-project/Sparkle", .upToNextMinor(from: "2.9.6"))
+    ],
     targets: [
         .executableTarget(
             name: "SuperVisor",
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             path: "Sources/SuperVisor",
             swiftSettings: [
                 .unsafeFlags(["-parse-as-library"])
