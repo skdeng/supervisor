@@ -5,5 +5,17 @@
     <link>https://github.com/skdeng/supervisor</link>
     <description>SuperVisor release feed</description>
     <!-- release.sh prepends items here; newest first -->
+    <item>
+      <title>1.0.0</title>
+      <pubDate>Tue, 01 Sep 2026 08:50:13 -0400</pubDate>
+      <sparkle:version>1.0.0</sparkle:version>
+      <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[Initial release: the notch surface with MusicVisor, Calendar and Meeting Mode, TaskVisor, FileShelf, FlowVisor, SwarmVisor, Battery, AI Usage — now with Sparkle auto-updates. First install: unzip, drag to Applications, then System Settings → Privacy & Security → Open Anyway (one time).]]></description>
+      <enclosure
+        url="https://github.com/skdeng/supervisor/releases/download/v1.0.0/SuperVisor-1.0.0.zip"
+        sparkle:edSignature="NRCmnLpkhDvrX3S+POkDAf8Uc5Yf91DgvpKzUZrJmKIPugMpXX699S42r64T+3V/O+zgog2rP7EY6PaaOBnLCw==" length="2501045"
+        type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>

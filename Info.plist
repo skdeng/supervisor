@@ -2,13 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleIdentifier</key>
-	<string>com.supervisor.SuperVisor</string>
-	<key>CFBundleName</key>
-	<string>SuperVisor</string>
 	<key>CFBundleDisplayName</key>
 	<string>SuperVisor</string>
 	<key>CFBundleExecutable</key>
+	<string>SuperVisor</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.supervisor.SuperVisor</string>
+	<key>CFBundleName</key>
 	<string>SuperVisor</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
@@ -16,35 +16,35 @@
 	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
 	<string>1.0.0</string>
-	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/skdeng/supervisor/main/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>xzIE4ymTOZr/TdgZ3xlOHhODLMC0qc0fte3vl1wl8mE=</string>
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
 	<key>LSUIElement</key>
 	<true/>
-	<key>NSHighResolutionCapable</key>
-	<true/>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>SuperVisor uses your location to show local weather in the notch.</string>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>SuperVisor reads incoming notification banners to mirror them in the notch.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>SuperVisor focuses the iTerm2 tab running the agent session you tap.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>SuperVisor listens to the system audio output to render a live spectrum and beat-synced glow in the notch while music plays. Audio is analyzed in memory and never recorded or stored.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>SuperVisor reads Bluetooth accessory battery levels to show them in the notch.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>SuperVisor reads your calendar to show your next event in the notch.</string>
 	<key>NSCalendarsUsageDescription</key>
 	<string>SuperVisor reads your calendar to show your next event in the notch.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>SuperVisor uses your location to show local weather in the notch.</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
 	<string>SuperVisor reads your reminders to show due tasks in the notch.</string>
 	<key>NSRemindersUsageDescription</key>
 	<string>SuperVisor reads your reminders to show due tasks in the notch.</string>
-	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>SuperVisor reads Bluetooth accessory battery levels to show them in the notch.</string>
-	<key>NSAccessibilityUsageDescription</key>
-	<string>SuperVisor reads incoming notification banners to mirror them in the notch.</string>
-	<key>NSAudioCaptureUsageDescription</key>
-	<string>SuperVisor listens to the system audio output to render a live spectrum and beat-synced glow in the notch while music plays. Audio is analyzed in memory and never recorded or stored.</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>SuperVisor focuses the iTerm2 tab running the agent session you tap.</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/skdeng/supervisor/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>xzIE4ymTOZr/TdgZ3xlOHhODLMC0qc0fte3vl1wl8mE=</string>
 </dict>
 </plist>
