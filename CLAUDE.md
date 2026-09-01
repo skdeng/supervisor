@@ -45,7 +45,14 @@ them.
   (`SUFeedURL`/`SUPublicEDKey` in Info.plist) and also offer **Check for Updates…** in the
   status-bar menu. Updates verify against the EdDSA key plus the app's own code signature, so
   a release signed by anything but the Developer ID identity would be refused by installed
-  copies — which is why the script hard-fails without that identity.
+  copies — which is why the script hard-fails without that identity. **Testing the update
+  channel requires an https feed**: the appcast fetch (in-process) tolerates http://localhost,
+  but the zip download runs in Sparkle's Downloader XPC, whose own ATS policy
+  (`NSAllowsArbitraryLoads=false`) silently refuses plain http — the check "works" and the
+  download never even reaches the server. Test against real https (a temporary GitHub
+  prerelease holding both a scratch appcast and the zip works), overriding the feed with
+  `defaults write com.supervisor.SuperVisor SUFeedURL <url>` — and **always
+  `defaults delete` that key afterward**: Sparkle persists it over the Info.plist value.
 
 ## High-Level Architecture
 
