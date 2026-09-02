@@ -402,7 +402,9 @@ names below are the code paths.
   the queue leads every section but the pinned media one. Sessions mid-turn fold behind an
   **N working** disclosure (`AgentFleetCenter.workingSessions`, most recently started first);
   opened, each row shows the session, its folder, how long the turn has run, and Jump — no
-  dismiss, since the row leaves on its own when the turn ends. A validated tty teleports directly to the matching iTerm2 tab through
+  dismiss, since the row leaves on its own when the turn ends. Its green badge pulses (a ring
+  swelling out and fading, still under Reduce Motion), the marker's one live state, so a
+  working row is never mistaken for a finished one that shares its green. A validated tty teleports directly to the matching iTerm2 tab through
   AppleScript, from the row, the banner, or **⌘⇧⎋** without the sheet open (`swarm.jumpHotKey`,
   default on). The shortcut goes to the session the banner is announcing, else the queue's first;
   entries with no tty are skipped, and it is claimed only while some session is reachable, so the

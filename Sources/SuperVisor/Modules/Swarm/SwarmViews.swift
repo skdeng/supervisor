@@ -351,21 +351,36 @@ private struct SwarmReasonLine: View {
 }
 
 /// The Claude icon marks an agent session at a glance — the calendar rows in the adjacent section
-/// lead with plain accent dots. The badge dot in its corner carries the state.
+/// lead with plain accent dots. The badge dot in its corner carries the state; a pulsing badge
+/// is the one live state, so a session mid-turn is never mistaken for one that finished, which
+/// shares its green.
 @MainActor
 private struct SwarmSessionMarker: View {
     let status: AnyShapeStyle
     let size: CGFloat
+    var pulses = false
+
+    private static let badgeSize: CGFloat = 7
 
     var body: some View {
         ClaudeSessionIcon(size: size)
             .overlay(alignment: .bottomTrailing) {
-                Circle()
-                    .fill(status)
-                    .frame(width: 7, height: 7)
-                    .overlay(Circle().strokeBorder(NotchTheme.notchBlack, lineWidth: 1))
-                    .offset(x: 2, y: 2)
+                badge.offset(x: 2, y: 2)
             }
+    }
+
+    @ViewBuilder
+    private var badge: some View {
+        let dot = Circle()
+            .fill(status)
+            .frame(width: Self.badgeSize, height: Self.badgeSize)
+            .overlay(Circle().strokeBorder(NotchTheme.notchBlack, lineWidth: 1))
+
+        if pulses {
+            dot.background(SwarmPulseRing(style: status, size: Self.badgeSize))
+        } else {
+            dot
+        }
     }
 
     /// A session mid-turn is live, and green is the sheet's live color.
@@ -375,13 +390,39 @@ private struct SwarmSessionMarker: View {
         switch reason {
         case .failed:
             AnyShapeStyle(Color.red)
-        case .waiting:
+        case .waiting, .needsInput:
             AnyShapeStyle(Color.orange)
-        case .asked, .needsInput:
+        case .asked:
             AnyShapeStyle(NotchTheme.brandGradient)
         case .finished:
             AnyShapeStyle(Color.green)
         }
+    }
+}
+
+/// A ring that swells out from under a badge and fades as it goes, over and over, the way a live
+/// indicator breathes. It exists only inside a built sheet, so nothing animates at idle. Under
+/// Reduce Motion it stays tucked beneath the badge, leaving a still dot.
+@MainActor
+private struct SwarmPulseRing: View {
+    let style: AnyShapeStyle
+    let size: CGFloat
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isSwollen = false
+
+    var body: some View {
+        Circle()
+            .fill(style)
+            .frame(width: size, height: size)
+            .scaleEffect(isSwollen ? 2.8 : 1)
+            .opacity(isSwollen ? 0 : 0.7)
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) {
+                    isSwollen = true
+                }
+            }
     }
 }
 
@@ -411,7 +452,11 @@ private struct SwarmWorkingRow: View {
 
     var body: some View {
         HStack(spacing: NotchTheme.rowMarkerGap) {
-            SwarmSessionMarker(status: SwarmSessionMarker.working, size: NotchTheme.rowMarkerWidth)
+            SwarmSessionMarker(
+                status: SwarmSessionMarker.working,
+                size: NotchTheme.rowMarkerWidth,
+                pulses: true
+            )
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
