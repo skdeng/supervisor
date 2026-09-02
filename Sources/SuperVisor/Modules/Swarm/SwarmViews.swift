@@ -351,9 +351,9 @@ private struct SwarmReasonLine: View {
 }
 
 /// The Claude icon marks an agent session at a glance — the calendar rows in the adjacent section
-/// lead with plain accent dots. The badge dot in its corner carries the state; a pulsing badge
-/// is the one live state, so a session mid-turn is never mistaken for one that finished, which
-/// shares its green.
+/// lead with plain accent dots. The badge dot in its corner carries the state: orange for every
+/// state that is the user's move, green for a finished turn, red for a failed one, and the
+/// brand gradient, pulsing, for a session mid-turn.
 @MainActor
 private struct SwarmSessionMarker: View {
     let status: AnyShapeStyle
@@ -374,7 +374,6 @@ private struct SwarmSessionMarker: View {
         let dot = Circle()
             .fill(status)
             .frame(width: Self.badgeSize, height: Self.badgeSize)
-            .overlay(Circle().strokeBorder(NotchTheme.notchBlack, lineWidth: 1))
 
         if pulses {
             dot.background(SwarmPulseRing(style: status, size: Self.badgeSize))
@@ -383,17 +382,16 @@ private struct SwarmSessionMarker: View {
         }
     }
 
-    /// A session mid-turn is live, and green is the sheet's live color.
-    static let working = AnyShapeStyle(Color.green)
+    /// A session mid-turn wears the brand: it is the app's own agent at work, and the pulse
+    /// marks it live.
+    static let working = AnyShapeStyle(NotchTheme.brandGradient)
 
     static func status(for reason: AttentionReason) -> AnyShapeStyle {
         switch reason {
         case .failed:
             AnyShapeStyle(Color.red)
-        case .waiting, .needsInput:
+        case .waiting, .asked, .needsInput:
             AnyShapeStyle(Color.orange)
-        case .asked:
-            AnyShapeStyle(NotchTheme.brandGradient)
         case .finished:
             AnyShapeStyle(Color.green)
         }
