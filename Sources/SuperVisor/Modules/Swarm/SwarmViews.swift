@@ -41,6 +41,9 @@ struct SwarmExpandedView: View {
     /// Whether the folded group of long-idle sessions is open. Resets with the sheet, which is
     /// built only while it is expanded or hovered, so the queue opens folded every time.
     @State private var showsIdle = false
+    /// Whether the folded group of mid-turn sessions is open. Folded by default for the same
+    /// reason: a session that is working needs nothing, so its row is reference, not triage.
+    @State private var showsWorking = false
 
     var body: some View {
         TimelineView(.periodic(from: Date(), by: 30)) { context in
@@ -59,10 +62,9 @@ struct SwarmExpandedView: View {
                     idleGroup(split.idle, now: context.date)
                 }
 
-                if center.workingCount > 0 {
-                    Text("\(center.workingCount) working")
-                        .font(.caption)
-                        .foregroundStyle(NotchTheme.secondaryForeground)
+                let working = SwarmQueuePresentation.ordered(working: center.workingSessions)
+                if !working.isEmpty {
+                    workingGroup(working, now: context.date)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -74,21 +76,7 @@ struct SwarmExpandedView: View {
     /// worth jumping to, it just no longer earns sheet height unprompted.
     private func idleGroup(_ entries: [AttentionEntry], now: Date) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Button {
-                showsIdle.toggle()
-            } label: {
-                HStack(spacing: 5) {
-                    Text("\(entries.count) idle")
-                        .font(.caption)
-                        .foregroundStyle(NotchTheme.secondaryForeground)
-                    Image(systemName: showsIdle ? "chevron.up" : "chevron.down")
-                        .font(.caption2)
-                        .foregroundStyle(NotchTheme.secondaryForeground)
-                    Spacer()
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+            foldToggle(label: "\(entries.count) idle", isOpen: $showsIdle)
 
             if showsIdle {
                 ForEach(entries) { entry in
@@ -96,6 +84,39 @@ struct SwarmExpandedView: View {
                 }
             }
         }
+    }
+
+    /// Sessions mid-turn, folded behind a count. Opened, each shows where it is working, how
+    /// long the turn has run, and a way into its terminal — there is nothing to dismiss, since
+    /// the row leaves on its own when the turn ends.
+    private func workingGroup(_ entries: [WorkingEntry], now: Date) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            foldToggle(label: "\(entries.count) working", isOpen: $showsWorking)
+
+            if showsWorking {
+                ForEach(entries) { entry in
+                    SwarmWorkingRow(entry: entry, now: now, terminalTeleport: terminalTeleport)
+                }
+            }
+        }
+    }
+
+    private func foldToggle(label: String, isOpen: Binding<Bool>) -> some View {
+        Button {
+            isOpen.wrappedValue.toggle()
+        } label: {
+            HStack(spacing: 5) {
+                Text(label)
+                    .font(.caption)
+                    .foregroundStyle(NotchTheme.secondaryForeground)
+                Image(systemName: isOpen.wrappedValue ? "chevron.up" : "chevron.down")
+                    .font(.caption2)
+                    .foregroundStyle(NotchTheme.secondaryForeground)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func row(_ entry: AttentionEntry, now: Date) -> some View {
@@ -146,6 +167,16 @@ enum SwarmQueuePresentation {
         return queue.first { $0.tty != nil }
     }
 
+    /// Mid-turn sessions, the most recently started first — the turn the user kicked off last
+    /// is the one they are most likely wondering about — with the session PID settling a tie so
+    /// a retick never reorders them.
+    static func ordered(working: [WorkingEntry]) -> [WorkingEntry] {
+        working.sorted { first, second in
+            if first.since != second.since { return first.since > second.since }
+            return first.sessionPID < second.sessionPID
+        }
+    }
+
     static func split(_ queue: [AttentionEntry], now: Date) -> Split {
         let ordered = queue.sorted { first, second in
             if first.reason.isBlocking != second.reason.isBlocking {
@@ -192,7 +223,10 @@ struct SwarmPeekBannerView: View {
             let parts = SwarmReason.parts(of: entry.reason, showsMessages: false)
 
             HStack(spacing: 10) {
-                SwarmAttentionMarker(entry: entry, size: NotchTheme.compactContentHeight)
+                SwarmSessionMarker(
+                    status: SwarmSessionMarker.status(for: entry.reason),
+                    size: NotchTheme.compactContentHeight
+                )
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(entry.name)
@@ -234,7 +268,10 @@ private struct SwarmAttentionRow: View {
         let parts = SwarmReason.parts(of: entry.reason, showsMessages: showsMessages)
 
         HStack(spacing: NotchTheme.rowMarkerGap) {
-            SwarmAttentionMarker(entry: entry, size: NotchTheme.rowMarkerWidth)
+            SwarmSessionMarker(
+                status: SwarmSessionMarker.status(for: entry.reason),
+                size: NotchTheme.rowMarkerWidth
+            )
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -243,7 +280,7 @@ private struct SwarmAttentionRow: View {
                         .foregroundStyle(NotchTheme.primaryForeground)
                         .lineLimit(1)
 
-                    Text(Self.lastPathComponent(entry.cwd))
+                    Text(lastPathComponent(entry.cwd))
                         .font(.caption)
                         .foregroundStyle(NotchTheme.secondaryForeground)
                         .lineLimit(1)
@@ -252,7 +289,7 @@ private struct SwarmAttentionRow: View {
                 HStack(spacing: 6) {
                     SwarmReasonLine(parts: parts)
 
-                    Text(Self.age(since: entry.since, now: now))
+                    Text(sessionAge(since: entry.since, now: now))
                         .font(.caption)
                         .foregroundStyle(NotchTheme.secondaryForeground)
                         .monospacedDigit()
@@ -274,21 +311,6 @@ private struct SwarmAttentionRow: View {
 
             SwarmIconButton(systemName: "xmark", tooltip: "Dismiss", action: onDismiss)
         }
-    }
-
-    private static func lastPathComponent(_ path: String) -> String {
-        let component = (path as NSString).lastPathComponent
-        return component.isEmpty ? path : component
-    }
-
-    private static func age(since: Date, now: Date) -> String {
-        let seconds = max(0, Int(now.timeIntervalSince(since)))
-        if seconds < 60 { return "now" }
-        let minutes = seconds / 60
-        if minutes < 60 { return "\(minutes)m" }
-        let hours = minutes / 60
-        if hours < 24 { return "\(hours)h" }
-        return "\(hours / 24)d"
     }
 }
 
@@ -331,23 +353,26 @@ private struct SwarmReasonLine: View {
 /// The Claude icon marks an agent session at a glance — the calendar rows in the adjacent section
 /// lead with plain accent dots. The badge dot in its corner carries the state.
 @MainActor
-private struct SwarmAttentionMarker: View {
-    let entry: AttentionEntry
+private struct SwarmSessionMarker: View {
+    let status: AnyShapeStyle
     let size: CGFloat
 
     var body: some View {
         ClaudeSessionIcon(size: size)
             .overlay(alignment: .bottomTrailing) {
                 Circle()
-                    .fill(statusStyle)
+                    .fill(status)
                     .frame(width: 7, height: 7)
                     .overlay(Circle().strokeBorder(NotchTheme.notchBlack, lineWidth: 1))
                     .offset(x: 2, y: 2)
             }
     }
 
-    private var statusStyle: AnyShapeStyle {
-        switch entry.reason {
+    /// A session mid-turn is live, and green is the sheet's live color.
+    static let working = AnyShapeStyle(Color.green)
+
+    static func status(for reason: AttentionReason) -> AnyShapeStyle {
+        switch reason {
         case .failed:
             AnyShapeStyle(Color.red)
         case .waiting:
@@ -356,6 +381,80 @@ private struct SwarmAttentionMarker: View {
             AnyShapeStyle(NotchTheme.brandGradient)
         case .finished:
             AnyShapeStyle(Color.green)
+        }
+    }
+}
+
+/// How long ago a moment was, at the coarseness a session row needs.
+private func sessionAge(since: Date, now: Date) -> String {
+    let seconds = max(0, Int(now.timeIntervalSince(since)))
+    if seconds < 60 { return "now" }
+    let minutes = seconds / 60
+    if minutes < 60 { return "\(minutes)m" }
+    let hours = minutes / 60
+    if hours < 24 { return "\(hours)h" }
+    return "\(hours / 24)d"
+}
+
+private func lastPathComponent(_ path: String) -> String {
+    let component = (path as NSString).lastPathComponent
+    return component.isEmpty ? path : component
+}
+
+/// A session mid-turn: who it is, where, how long the turn has run, and a way into its
+/// terminal. It carries no dismiss, since the row leaves on its own when the turn ends.
+@MainActor
+private struct SwarmWorkingRow: View {
+    let entry: WorkingEntry
+    let now: Date
+    let terminalTeleport: TerminalTeleport
+
+    var body: some View {
+        HStack(spacing: NotchTheme.rowMarkerGap) {
+            SwarmSessionMarker(status: SwarmSessionMarker.working, size: NotchTheme.rowMarkerWidth)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(entry.name)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(NotchTheme.primaryForeground)
+                        .lineLimit(1)
+
+                    Text(lastPathComponent(entry.cwd))
+                        .font(.caption)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                        .lineLimit(1)
+                }
+
+                HStack(spacing: 4) {
+                    Text("Working")
+                        .font(.caption)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                        .lineLimit(1)
+
+                    Text("·")
+                        .font(.caption)
+                        .foregroundStyle(NotchTheme.separator)
+
+                    Text(sessionAge(since: entry.since, now: now))
+                        .font(.caption)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            if let tty = entry.tty {
+                SwarmIconButton(
+                    systemName: "apple.terminal",
+                    tooltip: "Open in iTerm2",
+                    showsHoverLabel: false
+                ) {
+                    terminalTeleport.teleport(toTTY: tty)
+                }
+            }
         }
     }
 }

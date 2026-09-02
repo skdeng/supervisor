@@ -135,6 +135,29 @@ struct SwarmQueuePresentationTests {
         )
     }
 
+    @Test("Working sessions list the most recently started first, PID settling a tie")
+    func workingSessionsOrderMostRecentFirst() {
+        func working(pid: Int32, secondsAgo: TimeInterval) -> WorkingEntry {
+            WorkingEntry(
+                sessionPID: pid,
+                name: "session-\(pid)",
+                cwd: "/tmp/session-\(pid)",
+                tty: nil,
+                since: now.addingTimeInterval(-secondsAgo)
+            )
+        }
+        let entries = [
+            working(pid: 9, secondsAgo: 600),
+            working(pid: 3, secondsAgo: 30),
+            working(pid: 7, secondsAgo: 600),
+        ]
+
+        #expect(SwarmQueuePresentation.ordered(working: entries).map(\.sessionPID) == [3, 7, 9])
+        #expect(
+            SwarmQueuePresentation.ordered(working: entries.reversed()).map(\.sessionPID) == [3, 7, 9]
+        )
+    }
+
     @Test("A session that stopped long ago folds away")
     func longIdleSessionsFold() {
         let split = SwarmQueuePresentation.split(

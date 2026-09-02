@@ -55,6 +55,19 @@ struct AttentionEntry: Identifiable, Equatable, Sendable {
     var id: Int32 { sessionPID }
 }
 
+/// A session mid-turn. It needs nothing from the user, so it carries no reason — only where it
+/// is and how long it has been at it.
+struct WorkingEntry: Identifiable, Equatable, Sendable {
+    let sessionPID: Int32
+    let name: String
+    let cwd: String
+    let tty: String?
+    /// When the registry recorded the session turning busy.
+    let since: Date
+
+    var id: Int32 { sessionPID }
+}
+
 /// Merges authoritative registry snapshots with low-latency hook metadata.
 @MainActor
 final class AgentFleetCenter: ObservableObject {
@@ -66,6 +79,21 @@ final class AgentFleetCenter: ObservableObject {
 
     var workingCount: Int {
         sessions.lazy.filter { $0.status == .busy }.count
+    }
+
+    /// Every session the registry reports mid-turn, in registry order, carrying whatever tty a
+    /// hook has validated for it.
+    var workingSessions: [WorkingEntry] {
+        sessions.compactMap { session in
+            guard session.status == .busy else { return nil }
+            return WorkingEntry(
+                sessionPID: session.pid,
+                name: session.name,
+                cwd: session.cwd,
+                tty: ttyBySessionPID[session.pid],
+                since: session.statusUpdatedAt
+            )
+        }
     }
 
     private static let finishedThreshold: TimeInterval = 45

@@ -115,6 +115,33 @@ struct AgentFleetCenterTests {
 
     // MARK: - Tests
 
+    @Test("A busy session is listed as working, with the tty a hook validated, until it stops")
+    func busySessionIsWorking() async {
+        let harness = Harness()
+        defer { harness.tearDown() }
+
+        let startedAt = Date().addingTimeInterval(-120)
+        harness.write(status: "busy", statusUpdatedAt: startedAt, name: "refactor-auth")
+        harness.start()
+        await waitUntil("the busy session to load") { !harness.center.workingSessions.isEmpty }
+
+        let working = harness.center.workingSessions
+        #expect(working.count == 1)
+        #expect(working[0].sessionPID == harness.pid)
+        #expect(working[0].name == "refactor-auth")
+        #expect(working[0].cwd == "/tmp/project")
+        #expect(working[0].tty == nil, "no hook has reported a tty yet")
+        #expect(abs(working[0].since.timeIntervalSince(startedAt)) < 0.01)
+
+        harness.send(event: "UserPromptSubmit")
+        #expect(harness.center.workingSessions[0].tty == "/dev/ttys004")
+
+        harness.write(status: "idle", statusUpdatedAt: Date())
+        harness.monitor.refreshSoon()
+        await waitUntil("the session to stop working") { harness.center.workingSessions.isEmpty }
+        #expect(harness.center.workingCount == 0)
+    }
+
     @Test("A finished turn enters the queue naming how long it ran")
     func finishedTurnEnters() async {
         let harness = Harness()
