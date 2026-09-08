@@ -8,6 +8,17 @@ import UniformTypeIdentifiers
 ///
 /// The monitor also watches `com.apple.screencapture.plist`, rebasing itself without ingesting
 /// existing files when the user changes the destination in Screenshot settings.
+///
+/// The attribute is applied by `screencapture` through the Spotlight metadata framework, so it
+/// depends on the metadata server being able to open an item for the file. When the Data
+/// volume's index is unhealthy (`mdutil -s /System/Volumes/Data` reports "unknown indexing
+/// state", and `mdls` on any file under `/Users` answers "could not find" even for a path that
+/// exists), every new screenshot lands without the attribute and this monitor, correctly,
+/// stages nothing — while the screenshots themselves keep appearing on the Desktop as usual.
+/// Verify with `xattr <screenshot>`; a healthy capture carries `kMDItemIsScreenCapture`,
+/// `kMDItemScreenCaptureType`, and `kMDItemScreenCaptureGlobalRect`. Rebuilding the index
+/// (`sudo mdutil -E /System/Volumes/Data`) restores tagging for captures taken afterwards;
+/// captures taken during the outage are never tagged retroactively.
 @MainActor
 final class ScreenshotMonitor {
     var onScreenshots: (([URL]) -> Void)?

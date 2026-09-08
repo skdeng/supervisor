@@ -592,6 +592,15 @@ artifacts:
   liveness/timeline record: it exists iff an instance bound it and
   died uncleanly since; its mtime is the moment that instance's SwarmModule activated.
 
+**Screenshots stop reaching the shelf while the Desktop keeps filling up.** `screencapture`
+tags each capture with `kMDItemIsScreenCapture` through the Spotlight metadata framework, so
+when the Data volume's index is unhealthy the tag is silently never written and
+`ScreenshotMonitor` stages nothing. Check `xattr` on a fresh screenshot (no
+`com.apple.metadata:` attributes), `mdutil -s /System/Volumes/Data` ("unknown indexing
+state"), and `mdls` on any file under `/Users` ("could not find" for a path that exists).
+`sudo mdutil -E /System/Volumes/Data` rebuilds the index; only captures taken afterwards are
+tagged.
+
 ## Git
 
 - Committing and pushing directly to this repo is fine — no need to ask first.
