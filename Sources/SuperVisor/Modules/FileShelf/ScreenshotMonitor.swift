@@ -1,24 +1,24 @@
 import Darwin
 import Foundation
+import ImageIO
 import UniformTypeIdentifiers
 
-/// Watches the directory where macOS saves screenshots and emits only files carrying the
-/// system screenshot metadata attribute. Filename matching is deliberately avoided: names are
-/// localized and user-configurable, while the metadata survives those changes.
+/// Watches the directory where macOS saves screenshots and emits only files that macOS itself
+/// marked as captures. Filename matching is deliberately avoided: names are localized and
+/// user-configurable, while the markers survive those changes.
+///
+/// `screencapture` marks a capture two ways, and either one is accepted:
+/// - the `kMDItemIsScreenCapture` extended attribute, applied through the Spotlight metadata
+///   framework — which means it is silently never written while the Data volume's index is
+///   unhealthy (`mdutil -s /System/Volumes/Data` reports "unknown indexing state" and `mdls`
+///   answers "could not find" for files that exist), even though captures keep landing on the
+///   Desktop as usual;
+/// - the Exif `UserComment` of `Screenshot` embedded in the image's own XMP block, written by
+///   the capture itself and independent of Spotlight. ImageIO reads it from the file header
+///   without decoding pixels.
 ///
 /// The monitor also watches `com.apple.screencapture.plist`, rebasing itself without ingesting
 /// existing files when the user changes the destination in Screenshot settings.
-///
-/// The attribute is applied by `screencapture` through the Spotlight metadata framework, so it
-/// depends on the metadata server being able to open an item for the file. When the Data
-/// volume's index is unhealthy (`mdutil -s /System/Volumes/Data` reports "unknown indexing
-/// state", and `mdls` on any file under `/Users` answers "could not find" even for a path that
-/// exists), every new screenshot lands without the attribute and this monitor, correctly,
-/// stages nothing — while the screenshots themselves keep appearing on the Desktop as usual.
-/// Verify with `xattr <screenshot>`; a healthy capture carries `kMDItemIsScreenCapture`,
-/// `kMDItemScreenCaptureType`, and `kMDItemScreenCaptureGlobalRect`. Rebuilding the index
-/// (`sudo mdutil -E /System/Volumes/Data`) restores tagging for captures taken afterwards;
-/// captures taken during the outage are never tagged retroactively.
 @MainActor
 final class ScreenshotMonitor {
     var onScreenshots: (([URL]) -> Void)?
@@ -36,6 +36,7 @@ final class ScreenshotMonitor {
     private var isRunning = false
 
     private static let screenshotAttribute = "com.apple.metadata:kMDItemIsScreenCapture"
+    nonisolated private static let captureComment = "Screenshot"
     private static let pendingLifetime: TimeInterval = 3
     private static let maximumFileSize: Int64 = 512 * 1024 * 1024
 
@@ -228,9 +229,27 @@ final class ScreenshotMonitor {
         let size = Int64(values.totalFileSize ?? values.fileSize ?? 0)
         guard size > 0, size <= maximumFileSize else { return false }
 
-        return standardized.withUnsafeFileSystemRepresentation { path in
+        if carriesScreenshotAttribute(standardized) { return true }
+        return type.conforms(to: .image) && carriesCaptureComment(standardized)
+    }
+
+    private static func carriesScreenshotAttribute(_ url: URL) -> Bool {
+        url.withUnsafeFileSystemRepresentation { path in
             guard let path else { return false }
             return getxattr(path, screenshotAttribute, nil, 0, 0, 0) >= 0
         }
+    }
+
+    /// Whether the image's embedded metadata carries the comment `screencapture` writes into
+    /// every capture. Only the header is parsed; no pixel data is decoded.
+    nonisolated static func carriesCaptureComment(_ url: URL) -> Bool {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, options),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, options)
+                as? [CFString: Any],
+              let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any],
+              let comment = exif[kCGImagePropertyExifUserComment] as? String
+        else { return false }
+        return comment == captureComment
     }
 }

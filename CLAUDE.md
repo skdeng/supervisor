@@ -247,9 +247,10 @@ sink. Preserve these guards when touching the relevant code:
   Registry `waitingFor` is bounded the same way in `ClaudeSessionMonitor`. None of this text is
   ever logged; `AppLog` records the reason's name only.
 - **Screenshot-directory contents** are arbitrary local files. `ScreenshotMonitor` accepts only
-  direct, regular, non-symlink image/PDF children carrying macOS's
-  `com.apple.metadata:kMDItemIsScreenCapture` attribute, requires a non-zero size, and rejects files
-  over 512 MiB. It baselines existing paths before emitting anything. Vision OCR separately caps
+  direct, regular, non-symlink image/PDF children that macOS marked as a capture — either
+  macOS's `com.apple.metadata:kMDItemIsScreenCapture` attribute or, for images, the Exif
+  `UserComment` of `Screenshot` that `screencapture` embeds in the file (read by ImageIO from
+  the header, never decoding pixels) — requires a non-zero size, and rejects files over 512 MiB. It baselines existing paths before emitting anything. Vision OCR separately caps
   decoded dimensions at 120 million pixels before creating a recognition request. Before Move to
   Trash moves a staged file's original to Trash, `FileShelfStore` compares the current volume/file
   numbers with the identity recorded when the item entered the shelf; a replacement at the same
@@ -319,8 +320,9 @@ names below are the code paths.
   `source` (`.dropped` / `.screenshot` / `.generated`) that drives a corner badge on its tile.
   Dropping a file onto the notch opens the sheet and stages it; `ScreenshotMonitor` (moved into
   this module) recognizes new macOS screenshots through the system
-  `com.apple.metadata:kMDItemIsScreenCapture` extended attribute (never by localized/user-defined
-  filenames), watching both the destination directory and
+  `com.apple.metadata:kMDItemIsScreenCapture` extended attribute or the Exif `UserComment`
+  `screencapture` embeds in the image (never by localized/user-defined filenames), watching
+  both the destination directory and
   `~/Library/Preferences/com.apple.screencapture.plist` — a destination change reconfigures the
   watcher live, and existing files are baselined on activation/reconfiguration. A new screenshot
   animates into the pill with a 3.2-second peek, then its arrival flourish collapses into the
@@ -592,14 +594,12 @@ artifacts:
   liveness/timeline record: it exists iff an instance bound it and
   died uncleanly since; its mtime is the moment that instance's SwarmModule activated.
 
-**Screenshots stop reaching the shelf while the Desktop keeps filling up.** `screencapture`
-tags each capture with `kMDItemIsScreenCapture` through the Spotlight metadata framework, so
-when the Data volume's index is unhealthy the tag is silently never written and
-`ScreenshotMonitor` stages nothing. Check `xattr` on a fresh screenshot (no
-`com.apple.metadata:` attributes), `mdutil -s /System/Volumes/Data` ("unknown indexing
-state"), and `mdls` on any file under `/Users` ("could not find" for a path that exists).
-`sudo mdutil -E /System/Volumes/Data` rebuilds the index; only captures taken afterwards are
-tagged.
+**A fresh screenshot with no `com.apple.metadata:` attributes is a Spotlight symptom, not a
+capture bug.** `screencapture` applies `kMDItemIsScreenCapture` through the metadata framework,
+which silently writes nothing while the Data volume's index is unhealthy (`mdutil -s
+/System/Volumes/Data` reports "unknown indexing state"; `mdls` answers "could not find" for
+files that exist). The shelf keeps working through that because `ScreenshotMonitor` also
+accepts the capture comment embedded in the image itself.
 
 ## Git
 
