@@ -384,6 +384,11 @@ names below are the code paths.
   carries no text for the same reason. A busy → idle transition enters triage only after a ≥45 s
   turn; `idle_prompt` enters regardless of turn length, and a session blocked on a prompt
   (`waiting`) enters immediately however short the turn, because it cannot proceed at all.
+  **A `dialog open` wait is the one reason that never interrupts** (`AttentionReason.interrupts`):
+  the user opened that dialog in that terminal, so it is already on their screen. It joins the
+  sheet queue silently — no glow, no toast — counts as calm rather than blocking (so it neither
+  floats the section nor outranks a real block, and folds into **N idle** like any quiet entry),
+  and ⌘⇧⎋ skips it. Becoming a genuine block later announces then, since by that point it is news.
   Attention stays quiet: a newly added entry raises a rotating brand-gradient glow around the
   notch, joins the flat sheet queue, and announces itself through the peek banner (Claude mark,
   session name, reason, one-tap Jump) — below the notch on a cutout screen, inline in the pill on
@@ -410,7 +415,8 @@ names below are the code paths.
   input), green for a finished turn, red for a failed one. A validated tty teleports directly to the matching iTerm2 tab through
   AppleScript, from the row, the banner, or **⌘⇧⎋** without the sheet open (`swarm.jumpHotKey`,
   default on). The shortcut goes to the session the banner is announcing, else the queue's first;
-  entries with no tty are skipped, and it is claimed only while some session is reachable, so the
+  entries with no tty or on their own dialog are skipped, and it is claimed only while some
+  session is reachable, so the
   rest of the time ⌘⇧⎋ belongs to the frontmost app. `swarm.showMessages` (**default off**) gates session *content* — the question, the
   closing summary, an error's detail text, each truncated to one line with the whole of it on
   hover; labels, tool names, and error codes are fixed vocabulary and always show. The sheet

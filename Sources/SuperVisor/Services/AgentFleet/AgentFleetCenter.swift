@@ -34,14 +34,32 @@ enum AttentionReason: Equatable, Sendable {
         }
     }
 
+    /// Whether the session is stopped on a dialog open in its own terminal. The user opened it,
+    /// so it is already on their screen and in front of their cursor: the entry records where
+    /// the session stands, and nothing about it is news.
+    var isOpenDialog: Bool {
+        guard case let .waiting(detail) = self else { return false }
+        return detail == Self.openDialogDetail
+    }
+
     /// Whether the session is stopped and cannot proceed without the user, as opposed to
-    /// sitting at a prompt having finished its work.
+    /// sitting at a prompt having finished its work. An open dialog is excluded: the session is
+    /// stopped, but on something the user is already looking at, so it ranks with the calm
+    /// entries rather than leading the queue and floating the section.
     var isBlocking: Bool {
         switch self {
-        case .waiting, .failed: true
+        case .waiting: !isOpenDialog
+        case .failed: true
         case .asked, .finished, .needsInput: false
         }
     }
+
+    /// Whether entering the queue interrupts: raising the notch glow, announcing the session
+    /// through the peek banner, and making it a jump target.
+    var interrupts: Bool { !isOpenDialog }
+
+    /// The registry's own phrase for a session stopped on an open dialog.
+    private static let openDialogDetail = "dialog open"
 }
 
 struct AttentionEntry: Identifiable, Equatable, Sendable {
@@ -392,6 +410,16 @@ final class AgentFleetCenter: ObservableObject {
             if queue[index] != entry {
                 queue[index] = entry
             }
+            // A session that stood on its own dialog and is now genuinely blocked is news; one
+            // that has gone the other way no longer is. A refresh leaving that standing alone
+            // never touches the glow, so an already-seen queue stays quiet.
+            if entry.reason.interrupts != current.reason.interrupts {
+                if entry.reason.interrupts {
+                    AttentionGlowCenter.shared.raise()
+                } else {
+                    clearGlowIfQuiet()
+                }
+            }
             return
         }
 
@@ -408,11 +436,20 @@ final class AgentFleetCenter: ObservableObject {
         // where one enters — a hook event can surface a session that stopped before one
         // already queued.
         queue.sort { $0.since > $1.since }
-        AttentionGlowCenter.shared.raise()
+        if reason.interrupts {
+            AttentionGlowCenter.shared.raise()
+        }
         AppLog.notice(
             .swarm,
             "attention added \(entry.name) reason \(Self.logDescription(reason)) count \(queue.count)"
         )
+    }
+
+    /// Drops the glow once nothing queued is still interrupting. A silent entry left behind — a
+    /// session stopped on its own dialog — is not something to keep the notch lit for.
+    private func clearGlowIfQuiet() {
+        guard !queue.contains(where: { $0.reason.interrupts }) else { return }
+        AttentionGlowCenter.shared.clear()
     }
 
     private func refreshQueuedMetadata(for session: FleetSession) {
@@ -459,9 +496,7 @@ final class AgentFleetCenter: ObservableObject {
     private func removeQueuedEntry(for pid: Int32) {
         guard let entry = queue.first(where: { $0.sessionPID == pid }) else { return }
         queue.removeAll { $0.sessionPID == pid }
-        if queue.isEmpty {
-            AttentionGlowCenter.shared.clear()
-        }
+        clearGlowIfQuiet()
         AppLog.notice(
             .swarm,
             "attention removed \(entry.name) reason \(Self.logDescription(entry.reason)) count \(queue.count)"

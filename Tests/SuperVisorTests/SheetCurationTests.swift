@@ -228,7 +228,7 @@ struct SwarmQueuePresentationTests {
         let split = SwarmQueuePresentation.split(
             [
                 entry(pid: 1, reason: .finished(turnDuration: 90, summary: nil), secondsAgo: 30),
-                entry(pid: 2, reason: .waiting(detail: "dialog open"), secondsAgo: 300),
+                entry(pid: 2, reason: .waiting(detail: "approve Bash"), secondsAgo: 300),
                 entry(pid: 3, reason: .needsInput, secondsAgo: 120),
             ],
             now: now
@@ -257,7 +257,7 @@ struct SwarmQueuePresentationTests {
         let target = SwarmQueuePresentation.pressingSession(
             announced: announced,
             queue: [
-                entry(pid: 1, reason: .waiting(detail: "dialog open"), secondsAgo: 300, tty: "/dev/ttys001"),
+                entry(pid: 1, reason: .waiting(detail: "approve Bash"), secondsAgo: 300, tty: "/dev/ttys001"),
                 announced,
             ]
         )
@@ -270,7 +270,7 @@ struct SwarmQueuePresentationTests {
         let target = SwarmQueuePresentation.pressingSession(
             announced: nil,
             queue: [
-                entry(pid: 1, reason: .waiting(detail: "dialog open"), secondsAgo: 300, tty: "/dev/ttys001"),
+                entry(pid: 1, reason: .waiting(detail: "approve Bash"), secondsAgo: 300, tty: "/dev/ttys001"),
                 entry(pid: 2, reason: .needsInput, secondsAgo: 10, tty: "/dev/ttys002"),
             ]
         )
@@ -283,7 +283,7 @@ struct SwarmQueuePresentationTests {
         let target = SwarmQueuePresentation.pressingSession(
             announced: entry(pid: 5, reason: .needsInput, secondsAgo: 10, tty: nil),
             queue: [
-                entry(pid: 1, reason: .waiting(detail: "dialog open"), secondsAgo: 300, tty: nil),
+                entry(pid: 1, reason: .waiting(detail: "approve Bash"), secondsAgo: 300, tty: nil),
                 entry(pid: 2, reason: .needsInput, secondsAgo: 10, tty: "/dev/ttys002"),
             ]
         )
@@ -298,6 +298,77 @@ struct SwarmQueuePresentationTests {
             SwarmQueuePresentation.pressingSession(
                 announced: nil,
                 queue: [entry(pid: 1, reason: .needsInput, secondsAgo: 10, tty: nil)]
+            ) == nil
+        )
+    }
+
+    @Test("A session on its own dialog ranks with the calm entries")
+    func openDialogRanksCalm() {
+        let split = SwarmQueuePresentation.split(
+            [
+                entry(pid: 1, reason: .waiting(detail: "dialog open"), secondsAgo: 300),
+                entry(pid: 2, reason: .waiting(detail: "approve Bash"), secondsAgo: 30),
+                entry(pid: 3, reason: .finished(turnDuration: 90, summary: nil), secondsAgo: 600),
+            ],
+            now: now
+        )
+
+        #expect(split.current.map(\.sessionPID) == [2, 1, 3])
+    }
+
+    @Test("A session on its own dialog folds away once old, where a blocked one never does")
+    func openDialogFolds() {
+        let split = SwarmQueuePresentation.split(
+            [
+                entry(
+                    pid: 1,
+                    reason: .waiting(detail: "dialog open"),
+                    secondsAgo: SwarmQueuePresentation.idleFoldAge
+                ),
+                entry(
+                    pid: 2,
+                    reason: .waiting(detail: "approve Bash"),
+                    secondsAgo: SwarmQueuePresentation.idleFoldAge
+                ),
+            ],
+            now: now
+        )
+
+        #expect(split.current.map(\.sessionPID) == [2])
+        #expect(split.idle.map(\.sessionPID) == [1])
+    }
+
+    @Test("A session on its own dialog is skipped for the next reachable one")
+    func openDialogIsNotAJumpTarget() {
+        let target = SwarmQueuePresentation.pressingSession(
+            announced: nil,
+            queue: [
+                entry(
+                    pid: 1,
+                    reason: .waiting(detail: "dialog open"),
+                    secondsAgo: 300,
+                    tty: "/dev/ttys001"
+                ),
+                entry(pid: 2, reason: .needsInput, secondsAgo: 10, tty: "/dev/ttys002"),
+            ]
+        )
+
+        #expect(target?.sessionPID == 2)
+    }
+
+    @Test("A queue holding nothing but an open dialog claims no shortcut")
+    func openDialogAloneYieldsNoTarget() {
+        #expect(
+            SwarmQueuePresentation.pressingSession(
+                announced: nil,
+                queue: [
+                    entry(
+                        pid: 1,
+                        reason: .waiting(detail: "dialog open"),
+                        secondsAgo: 300,
+                        tty: "/dev/ttys001"
+                    )
+                ]
             ) == nil
         )
     }

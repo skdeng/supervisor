@@ -3,6 +3,43 @@ import Testing
 
 @testable import SuperVisor
 
+@Suite("Attention reason standing")
+struct AttentionReasonTests {
+    @Test("A wait on an open dialog neither blocks nor interrupts")
+    func openDialogIsQuiet() {
+        let reason = AttentionReason.waiting(detail: "dialog open")
+
+        #expect(reason.isOpenDialog)
+        #expect(!reason.isBlocking)
+        #expect(!reason.interrupts)
+    }
+
+    @Test(
+        "Every other reason interrupts",
+        arguments: [
+            AttentionReason.waiting(detail: "approve Bash"),
+            .waiting(detail: "sandbox request"),
+            .failed(error: "rate_limit", details: nil),
+            .asked(question: "Which one?"),
+            .finished(turnDuration: 90, summary: nil),
+            .needsInput,
+        ]
+    )
+    func otherReasonsInterrupt(reason: AttentionReason) {
+        #expect(!reason.isOpenDialog)
+        #expect(reason.interrupts)
+    }
+
+    @Test("Only a wait blocks, and only the ones the user has not already opened")
+    func blockingIsTheStoppedWaits() {
+        #expect(AttentionReason.waiting(detail: "approve Bash").isBlocking)
+        #expect(AttentionReason.failed(error: "rate_limit", details: nil).isBlocking)
+        #expect(!AttentionReason.asked(question: "Which one?").isBlocking)
+        #expect(!AttentionReason.finished(turnDuration: 90, summary: nil).isBlocking)
+        #expect(!AttentionReason.needsInput.isBlocking)
+    }
+}
+
 @Suite("Attention row text")
 struct SwarmReasonTests {
     @Test("An approval names the tool it is waiting on")

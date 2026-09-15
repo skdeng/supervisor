@@ -158,13 +158,14 @@ enum SwarmQueuePresentation {
     /// The session a jump goes to: the one the banner is announcing, else the queue's first —
     /// its most pressing, the queue being ordered blocked-first then most-recent. Entries with no
     /// validated tty are skipped, since nothing can focus a session whose terminal was never
-    /// identified.
+    /// identified, and so are sessions stopped on their own dialog: the shortcut exists to carry
+    /// the user to a terminal they are not already in.
     static func pressingSession(
         announced: AttentionEntry?,
         queue: [AttentionEntry]
     ) -> AttentionEntry? {
         if let announced, announced.tty != nil { return announced }
-        return queue.first { $0.tty != nil }
+        return queue.first { $0.tty != nil && $0.reason.interrupts }
     }
 
     /// Mid-turn sessions, the most recently started first — the turn the user kicked off last

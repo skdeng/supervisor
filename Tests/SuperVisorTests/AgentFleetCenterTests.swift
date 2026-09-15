@@ -5,8 +5,10 @@ import Testing
 
 /// Drives the fleet center through a real session registry on disk, using this process's own
 /// pid so the liveness check passes.
+/// Serialized because the attention glow is a process-wide signal these tests both raise and
+/// assert on.
 @MainActor
-@Suite("Attention queue")
+@Suite("Attention queue", .serialized)
 struct AgentFleetCenterTests {
     // MARK: - Harness
 
@@ -35,12 +37,16 @@ struct AgentFleetCenterTests {
 
         @MainActor
         func start() {
+            // The glow is process-wide and outlives whichever test raised it, so each harness
+            // begins from a dark notch.
+            AttentionGlowCenter.shared.clear()
             center.start()
             monitor.start()
         }
 
         @MainActor
         func tearDown() {
+            AttentionGlowCenter.shared.clear()
             monitor.stop()
             center.stop()
             try? FileManager.default.removeItem(at: registryURL)
@@ -140,6 +146,26 @@ struct AgentFleetCenterTests {
         harness.monitor.refreshSoon()
         await waitUntil("the session to stop working") { harness.center.workingSessions.isEmpty }
         #expect(harness.center.workingCount == 0)
+    }
+
+    @Test("A session stopped on its own dialog queues without lighting the notch")
+    func openDialogQueuesSilently() async {
+        let harness = Harness()
+        defer { harness.tearDown() }
+
+        harness.write(status: "waiting", statusUpdatedAt: Date(), waitingFor: "dialog open")
+        harness.start()
+        await waitUntil("the dialog wait to queue") { !harness.center.queue.isEmpty }
+
+        #expect(harness.center.queue[0].reason == .waiting(detail: "dialog open"))
+        #expect(!AttentionGlowCenter.shared.isRaised, "an open dialog is already on screen")
+
+        // The same session then stops on an approval, which the user has not seen.
+        harness.write(status: "waiting", statusUpdatedAt: Date(), waitingFor: "approve Bash")
+        harness.monitor.refreshSoon()
+        await waitUntil("the approval to light the notch") { AttentionGlowCenter.shared.isRaised }
+
+        #expect(harness.center.queue[0].reason == .waiting(detail: "approve Bash"))
     }
 
     @Test("A finished turn enters the queue naming how long it ran")

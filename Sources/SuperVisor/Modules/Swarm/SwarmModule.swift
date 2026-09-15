@@ -27,9 +27,10 @@ final class SwarmModule: NotchModule, ObservableObject {
         self?.jumpToPressingSession()
     }
     private var expandedPresence = false
-    /// The queue's PIDs as of the previous emission, so an emission can be split into sessions
-    /// that just entered the queue and entries that were rewritten where they stood.
-    private var queuedPIDs: Set<Int32> = []
+    /// The PIDs whose queued reason was interrupting as of the previous emission, so an
+    /// emission can be split into sessions that just became worth announcing and entries that
+    /// were rewritten where they stood.
+    private var interruptingPIDs: Set<Int32> = []
 
     init() {
         let sessionMonitor = ClaudeSessionMonitor()
@@ -94,7 +95,7 @@ final class SwarmModule: NotchModule, ObservableObject {
         fleetCenter.stop()
 
         announcedEntry = nil
-        queuedPIDs = []
+        interruptingPIDs = []
         expandedPresence = false
         SectionUrgencyCenter.shared.set(false, for: moduleID)
         if hadExpandedSection {
@@ -138,14 +139,19 @@ final class SwarmModule: NotchModule, ObservableObject {
         retireAnnouncement()
     }
 
-    /// Splits an emission into sessions that just entered the queue and entries rewritten in
-    /// place, so late-arriving metadata — a tty landing after the hook event, a refreshed name or
-    /// cwd — updates the toast rather than raising a second one for the same session. When
+    /// Splits an emission into sessions that just became worth announcing and entries rewritten
+    /// in place, so late-arriving metadata — a tty landing after the hook event, a refreshed name
+    /// or cwd — updates the toast rather than raising a second one for the same session. When
     /// several enter at once the most recent announces, which the queue's ordering puts first.
+    ///
+    /// Only interrupting entries are candidates, and a session stopped on its own dialog is not
+    /// one, so it joins the queue without a toast — and announces later if that dialog becomes a
+    /// genuine block, since by then it is news.
     private func receive(queue: [AttentionEntry]) {
-        let currentPIDs = Set(queue.map(\.sessionPID))
-        let addedPIDs = currentPIDs.subtracting(queuedPIDs)
-        queuedPIDs = currentPIDs
+        let interrupting = queue.filter { $0.reason.interrupts }
+        let currentPIDs = Set(interrupting.map(\.sessionPID))
+        let addedPIDs = currentPIDs.subtracting(interruptingPIDs)
+        interruptingPIDs = currentPIDs
 
         // A session that cannot proceed floats this section to the top of the sheet, ahead of
         // whatever is merely playing or scheduled.
@@ -154,16 +160,17 @@ final class SwarmModule: NotchModule, ObservableObject {
             for: moduleID
         )
 
-        if let newest = queue.first(where: { addedPIDs.contains($0.sessionPID) }) {
+        if let newest = interrupting.first(where: { addedPIDs.contains($0.sessionPID) }) {
             announce(newest)
         } else if let announced = announcedEntry {
-            if let refreshed = queue.first(where: { $0.sessionPID == announced.sessionPID }) {
+            let match = interrupting.first { $0.sessionPID == announced.sessionPID }
+            if let refreshed = match {
                 if refreshed != announced {
                     announcedEntry = refreshed
                 }
             } else {
-                // The session resumed, was dismissed, or vanished — a toast must not outlive
-                // the need that raised it.
+                // The session resumed, was dismissed, settled onto its own dialog, or vanished —
+                // a toast must not outlive the need that raised it.
                 retireAnnouncement()
             }
         }
