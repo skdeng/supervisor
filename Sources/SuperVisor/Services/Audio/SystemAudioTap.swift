@@ -18,7 +18,7 @@ import Foundation
 ///   can keep running while delivering only zeros; the sole reliable recovery is a full teardown
 ///   and rebuild of the tap *and* the aggregate. A watchdog rebuilds when the stream stays
 ///   silent for several seconds while the caller says audio should be flowing
-///   (`setExpectingAudio`).
+///   (`setExpectingAudio`). Consecutive silent rebuilds are paced by `SilentRebuildBackoff`.
 /// - **Route/rate changes**: switching the default output device (or its nominal sample rate)
 ///   invalidates the aggregate's main sub-device; listeners proactively rebuild.
 ///
@@ -51,7 +51,11 @@ final class SystemAudioTap: @unchecked Sendable {
     private var unavailable = false
     private var expectingAudio = false
     private var watchdog: DispatchSourceTimer?
-    private var lastRebuildAt = 0.0
+    private var silentBackoff = SilentRebuildBackoff()
+    /// When the current stream was started. Silence is measured from the later of this and the
+    /// last audible sample, so a freshly built stream gets the full threshold before it can be
+    /// judged stalled.
+    private var streamStartedAt = 0.0
     private var rebuildScheduled = false
     private var routeListeners: [AudioPropertyListener] = []
 
@@ -76,8 +80,13 @@ final class SystemAudioTap: @unchecked Sendable {
 
     /// Whether the caller believes audio should currently be flowing (e.g. a track is playing).
     /// The zero-buffer watchdog only rebuilds while this is true — silence while paused is normal.
+    /// Each new expectation starts a fresh rebuild sequence: a track that begins after a silent
+    /// one is a new chance for the tap, not a continuation of the old backoff.
     func setExpectingAudio(_ expecting: Bool) {
-        controlQueue.async { self.expectingAudio = expecting }
+        controlQueue.async {
+            if expecting, !self.expectingAudio { self.silentBackoff.reset() }
+            self.expectingAudio = expecting
+        }
     }
 
     /// Clear the `.unavailable` latch so the next `start()` attempts tap creation again.
@@ -196,7 +205,7 @@ final class SystemAudioTap: @unchecked Sendable {
         ioProcID = proc
 
         running = true
-        markAudible()  // grace period before the watchdog may consider the stream stalled
+        streamStartedAt = CFAbsoluteTimeGetCurrent()
         startWatchdogLocked()
         installRouteListenersLocked(outputDevice: output)
         notifyState(.running)
@@ -237,7 +246,6 @@ final class SystemAudioTap: @unchecked Sendable {
     /// sub-device is stale either way).
     private func rebuildLocked() {
         guard running else { return }
-        lastRebuildAt = CFAbsoluteTimeGetCurrent()
         stopLocked(notify: false)
         startLocked()
         // A failed rebuild latched `.unavailable` and notified; a successful one re-notified
@@ -267,10 +275,17 @@ final class SystemAudioTap: @unchecked Sendable {
             self.audibleLock.lock()
             let audibleAt = self.lastAudibleAt
             self.audibleLock.unlock()
-            if now - audibleAt > 6, now - self.lastRebuildAt > 10 {
-                AppLog.error(.media, "SystemAudioTap: stream silent while playing — rebuilding tap")
-                self.rebuildLocked()
-            }
+            self.silentBackoff.noteAudible(at: audibleAt)
+            let silentSince = max(audibleAt, self.streamStartedAt)
+            guard self.silentBackoff.isRebuildDue(now: now, lastAudibleAt: silentSince) else { return }
+            self.silentBackoff.recordRebuild(at: now)
+            AppLog.error(
+                .media,
+                "SystemAudioTap: stream silent while playing — rebuilding tap "
+                    + "(silent rebuild \(self.silentBackoff.consecutiveRebuilds), "
+                    + "next no sooner than \(Int(self.silentBackoff.currentInterval)) s)"
+            )
+            self.rebuildLocked()
         }
         timer.resume()
         watchdog = timer

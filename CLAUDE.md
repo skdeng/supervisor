@@ -35,7 +35,12 @@ them.
   nested component individually — **never `--deep`**, which would stamp the app's TCC
   entitlements onto Sparkle's XPC services — applies `SuperVisor.entitlements`, and DER-encodes
   its Calendar entitlement; `swift build` does none of those packaging steps. Release builds
-  carry a secure timestamp so signatures outlive the signing certificate.
+  carry a secure timestamp so signatures outlive the signing certificate. The adapter is
+  compiled against the selected toolchain's SDK (`xcrun --sdk macosx --show-sdk-path`), never
+  clang's default: the Command Line Tools SDK updates independently of Xcode, and once it is
+  newer than the installed Xcode its `.tbd` stubs fail to link under Xcode's clang with
+  `unknown architecture`. `swift build` is unaffected, so the package compiles while the bundle
+  build fails at the adapter step.
 - **`./release.sh <version> [notes…]`** — cuts a Sparkle auto-update release: asserts
   main/clean-tree/Developer ID, stamps `Info.plist`, builds, zips, EdDSA-signs the zip (private
   key in the login Keychain as "Private key for signing Sparkle updates"), prepends the
@@ -75,6 +80,9 @@ A single morphing surface, driven by a small state machine, that modules feed co
 - **`App/ModuleRegistry.swift`** — THE single place modules are wired in (`allModules()`).
   Array order is irrelevant; modules sort by `order`. Currently lists 8 modules
   (Media, Calendar, Reminders, FileShelf, Flow, SwarmVisor, Battery, AI Usage).
+- **`Core/HoverMonitor.swift`** — hover detection through a global mouse-moved monitor, which
+  wakes the process on every cursor movement anywhere on screen; its handler reads the position
+  the event already carries, per the file's doc comment.
 - **`Core/NotchEngine.swift`** — owns the window, geometry, hover detection, the enabled-module
   list, and the state machine: `NotchState` is `.idle` / `.compact` / `.expanded` (peek is a
   transient `.compact`). Builds the `NotchContext`, filters modules by `SettingsStore`, activates
@@ -280,7 +288,13 @@ names below are the code paths.
   (`MediaArtworkColor`, computed once per track). While a track plays, the bars are a **real FFT
   spectrum of the actual system audio** (`SpectrumBarsView`, fed by the system-audio tap in
   `Services/Audio/`); when the tap is off, denied, or rebuilding they fall back to the
-  synthesized bounce (`AudioBarsView`) in the same footprint. A **beat aura**
+  synthesized bounce (`AudioBarsView`) in the same footprint. The tap runs only while the
+  session is playing **and** `LocalAudioOutputMonitor` reports some other process running
+  audio output (a player casting to another device reports playing while the tap would hear
+  only silence); an unknown answer falls back to the playing flag. `SpectrumTapIntent` and
+  `SpectrumTapAction` are the pure decisions behind `MediaModule.reconcileSpectrumTap`, and
+  inside the tap `SilentRebuildBackoff` paces the rebuilds a silent stream can still trigger.
+  A **beat aura**
   (`UI/BeatAuraView`, layered behind the morphing surface in `NotchRootView`) glows around the
   notch in the artwork color, following the music's bass envelope. Both are toggleable in
   Settings (`media.trueSpectrum`, `media.beatAura`). Expanded: large artwork, title/artist, a live
@@ -528,7 +542,9 @@ at runtime.
   listener API (`AudioObjectAddPropertyListener` + a retained weak-box `clientData`, hopping to the
   main actor). The block-based API is avoided: a Swift closure stored as a listener block re-bridges
   to a new block each time it crosses the C boundary, so `AudioObjectRemovePropertyListenerBlock`
-  never matches on removal and leaks the registration on every remove.
+  never matches on removal and leaks the registration on every remove. `LocalAudioOutputMonitor`
+  answers "is any other process producing sound here?" from CoreAudio's per-process objects,
+  event-driven through listeners on the process list and on each process's output state.
 
 ## Theme & Settings
 

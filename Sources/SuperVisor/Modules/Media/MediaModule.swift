@@ -92,6 +92,14 @@ final class MediaModule: NotchModule, ObservableObject {
     /// down only to immediately rebuild it.
     private var spectrumLingerTask: Task<Void, Never>?
     private var spectrumSettingCancellable: AnyCancellable?
+    /// Whether any other process is producing sound on this Mac; runs only while the session is
+    /// playing and the feature can use the answer.
+    private let localOutput = LocalAudioOutputMonitor()
+    /// When the session began reporting playing while the intent stayed `.linger` (no sound
+    /// produced here), or `nil` outside such a stretch.
+    private var silentPlayingSince: Date?
+    /// Pending tap start counting down `SpectrumTapAction.settle`.
+    private var spectrumStartTask: Task<Void, Never>?
 
     // MARK: CallSense transport ownership
 
@@ -148,14 +156,17 @@ final class MediaModule: NotchModule, ObservableObject {
         // gesture after a denied permission that the user has since granted).
         spectrumSettingCancellable = SettingsStore.shared.$trueSpectrumEnabled
             .dropFirst()
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] enabled in
                 guard let self else { return }
                 if enabled {
                     self.spectrumUnavailable = false
                     self.spectrumTap.resetAvailability()
                 }
-                self.reconcileSpectrumTap(spectrumEnabled: enabled)
+                self.reconcileSpectrumTap()
             }
+        localOutput.onChange = { [weak self] in self?.reconcileSpectrumTap() }
+        reconcileSpectrumTap()
 
         callSettingCancellable = SettingsStore.shared.$callAutoPausesMusic
             .receive(on: DispatchQueue.main)
@@ -202,6 +213,12 @@ final class MediaModule: NotchModule, ObservableObject {
         stopCallMonitoring()
         spectrumLingerTask?.cancel()
         spectrumLingerTask = nil
+        spectrumStartTask?.cancel()
+        spectrumStartTask = nil
+        localOutput.onChange = nil
+        localOutput.stop()
+        silentPlayingSince = nil
+        spectrumTap.setExpectingAudio(false)
         spectrumTap.stop()
         // Clear the read latch so a teardown mid-read can't leave it stuck (which would
         // silently freeze all future refreshes if the module were re-activated).
@@ -343,35 +360,85 @@ final class MediaModule: NotchModule, ObservableObject {
     }
 
     /// Drive the system-audio tap from the current playback state: capture while a track is
-    /// playing (and the feature is enabled and hasn't failed), linger 2 s across a pause so a
-    /// quick resume doesn't rebuild the whole tap, and stop immediately when the feature is
-    /// switched off (the recording indicator must honor the toggle without delay).
-    private func reconcileSpectrumTap(spectrumEnabled: Bool? = nil) {
-        let enabled = spectrumEnabled ?? SettingsStore.shared.trueSpectrumEnabled
+    /// playing and some process here is producing sound (and the feature is enabled and hasn't
+    /// failed), linger 2 s across a pause so a quick resume doesn't rebuild the whole tap, and
+    /// stop immediately when the feature is switched off (the recording indicator must honor
+    /// the toggle without delay). The local-output monitor runs only while its answer can
+    /// matter, so a paused session or a disabled feature registers no audio listeners.
+    private func reconcileSpectrumTap() {
+        let enabled = SettingsStore.shared.trueSpectrumEnabled
         let playing = nowPlaying?.isPlaying == true
-        spectrumTap.setExpectingAudio(playing)
-
         if enabled && !spectrumUnavailable && playing {
+            localOutput.start()
+        } else {
+            localOutput.stop()
+        }
+
+        let intent = currentSpectrumIntent()
+        spectrumTap.setExpectingAudio(intent == .capture)
+        let now = Date()
+        let silentPlayingFor = silentPlayingSince.map { now.timeIntervalSince($0) }
+        let action = SpectrumTapAction.resolve(
+            intent: intent,
+            silentPlayingFor: silentPlayingFor,
+            settlePending: spectrumStartTask != nil
+        )
+
+        switch action {
+        case .start:
             spectrumLingerTask?.cancel()
             spectrumLingerTask = nil
+            spectrumStartTask?.cancel()
+            spectrumStartTask = nil
             spectrumTap.start()
-        } else if !enabled || spectrumUnavailable {
+        case .settleThenStart:
             spectrumLingerTask?.cancel()
             spectrumLingerTask = nil
+            if spectrumStartTask == nil {
+                spectrumStartTask = Task { [weak self] in
+                    try? await Task.sleep(for: SpectrumTapAction.settle)
+                    guard let self, !Task.isCancelled else { return }
+                    self.spectrumStartTask = nil
+                    if self.currentSpectrumIntent() == .capture {
+                        self.spectrumTap.start()
+                    }
+                }
+            }
+        case .stop:
+            spectrumLingerTask?.cancel()
+            spectrumLingerTask = nil
+            spectrumStartTask?.cancel()
+            spectrumStartTask = nil
             spectrumTap.stop()
-        } else if spectrumLingerTask == nil {
-            spectrumLingerTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(2))
-                guard let self, !Task.isCancelled else { return }
-                self.spectrumLingerTask = nil
-                let stillWanted = SettingsStore.shared.trueSpectrumEnabled
-                    && !self.spectrumUnavailable
-                    && self.nowPlaying?.isPlaying == true
-                if !stillWanted {
-                    self.spectrumTap.stop()
+        case .linger:
+            spectrumStartTask?.cancel()
+            spectrumStartTask = nil
+            if spectrumLingerTask == nil {
+                spectrumLingerTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(2))
+                    guard let self, !Task.isCancelled else { return }
+                    self.spectrumLingerTask = nil
+                    if self.currentSpectrumIntent() != .capture {
+                        self.spectrumTap.stop()
+                    }
                 }
             }
         }
+
+        if intent == .linger && playing {
+            if silentPlayingSince == nil { silentPlayingSince = now }
+        } else {
+            silentPlayingSince = nil
+        }
+    }
+
+    private func currentSpectrumIntent() -> SpectrumTapIntent {
+        SpectrumTapIntent.resolve(
+            enabled: SettingsStore.shared.trueSpectrumEnabled,
+            unavailable: spectrumUnavailable,
+            playing: nowPlaying?.isPlaying == true,
+            localOutputRunning: localOutput.isAnyProcessRunningOutput
+        )
     }
 
     /// Keep the UI in sync with media controlled anywhere on the system (Spotify, a browser,

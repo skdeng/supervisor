@@ -7,6 +7,13 @@ import AppKit
 /// monitor (moves delivered to our own window) so detection works regardless of which app
 /// owns focus. Enter fires after a short dwell; exit fires after a short grace delay. Both
 /// debounce so the surface does not flicker at the activation boundary.
+///
+/// Every cursor movement anywhere on screen wakes this process through the global monitor, so
+/// the per-event work is kept to what the event already carries: a global event has no window
+/// and its `locationInWindow` is the cursor's screen position, and a local event converts
+/// through its window. `NSEvent.mouseLocation` costs a WindowServer round trip per call, so it
+/// is reserved for the rare enter/exit transitions, where the cursor's position at the end of
+/// the dwell is what matters.
 @MainActor
 public final class HoverMonitor {
     /// Called when the cursor settles inside the activation rect.
@@ -44,15 +51,15 @@ public final class HoverMonitor {
     public func start() {
         guard globalMonitor == nil, localMonitor == nil else { return }
 
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
             MainActor.assumeIsolated {
-                self?.evaluate(NSEvent.mouseLocation)
+                self?.evaluate(Self.screenLocation(of: event))
             }
         }
 
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
             MainActor.assumeIsolated {
-                self?.evaluate(NSEvent.mouseLocation)
+                self?.evaluate(Self.screenLocation(of: event))
             }
             return event
         }
@@ -76,6 +83,12 @@ public final class HoverMonitor {
     /// rect changes because the surface expanded or collapsed.
     public func refresh() {
         evaluate(NSEvent.mouseLocation)
+    }
+
+    /// The event's cursor position in global screen coordinates.
+    static func screenLocation(of event: NSEvent) -> NSPoint {
+        guard let window = event.window else { return event.locationInWindow }
+        return window.convertPoint(toScreen: event.locationInWindow)
     }
 
     private func evaluate(_ location: NSPoint) {

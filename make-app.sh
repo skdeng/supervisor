@@ -70,7 +70,10 @@ cp Resources/supervisor-agent-hook.py "$RES_DIR/"
 # is loaded at runtime by /usr/bin/perl (an Apple-signed host that the mediaremoted
 # entitlement gate admits since macOS 15.4). See NowPlayingReader.swift for the call path.
 echo "==> Building MediaRemote adapter dylib…"
-clang -dynamiclib -fobjc-arc -O2 \
+# The SDK is pinned to the selected toolchain's own. A bare `clang` defaults to the Command
+# Line Tools SDK, which Software Update can move ahead of the installed Xcode; a newer SDK's
+# library stubs then fail to link under the older toolchain ("unknown architecture").
+clang -isysroot "$(xcrun --sdk macosx --show-sdk-path)" -dynamiclib -fobjc-arc -O2 \
   -framework Foundation -framework CoreFoundation \
   Sources/MediaRemoteAdapter/mediaremote_adapter.m \
   -o "${RES_DIR}/mediaremote_adapter.dylib"
