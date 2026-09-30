@@ -98,7 +98,11 @@ A single morphing surface, driven by a small state machine, that modules feed co
   so the Dynamic-Island animation is never clipped by a window resize. Events pass through everywhere except the notch/sheet
   region: `NotchContentContainer` hit-tests against an interactive rect (so clicks and file drags
   land only there) and is also a file-drag destination — dragging a file onto the notch opens the
-  sheet — while the desktop/menu bar stay usable elsewhere.
+  sheet — while the desktop/menu bar stay usable elsewhere. The canvas sits *on* the screen's top
+  edge, inside the camera housing's safe area, so two things keep it there: `constrainFrameRect`
+  is overridden to return the frame untouched, and `NotchRootView` applies `.ignoresSafeArea()`
+  — otherwise the hosting view insets the content by the notch height and the whole surface
+  renders below the hardware notch instead of over it.
 - **`UI/NotchRootView.swift`** — the **single morphing surface**. One black `NotchShape` grows
   (width + height spring) from the notch-hugging pill into the expanded sheet; the fill stays
   black and the corner radius interpolates so the open reads as the notch itself expanding, not a

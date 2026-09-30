@@ -304,6 +304,11 @@ struct NotchRootView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // The canvas is pinned to the screen's top edge and the surface is laid out from its own
+        // top — on a notched screen that edge is INSIDE the camera housing's safe area. Without
+        // this, the hosting view insets the content by the notch height and the whole surface
+        // renders that far below the hardware, beside it instead of over it.
+        .ignoresSafeArea()
     }
 
     /// What the surface is made of, in whatever silhouette it currently holds.

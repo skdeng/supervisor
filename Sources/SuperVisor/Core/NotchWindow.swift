@@ -57,6 +57,13 @@ public final class NotchWindow: NSPanel {
     public override var canBecomeKey: Bool { false }
     public override var canBecomeMain: Bool { false }
 
+    /// The canvas is placed exactly on the screen's top edge, over the menu bar and the camera
+    /// housing. AppKit's default would slide a window that overlaps either back below it, which
+    /// lowers the whole surface away from the hardware notch it has to cover.
+    public override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
+
     /// Install a SwiftUI root view inside the hit-testing / drag-destination container.
     public func setRootView<Content: View>(_ view: Content) {
         let hosting = NSHostingView(rootView: view)
