@@ -25,7 +25,12 @@ them.
   depends on the executable target and reaches internals through `@testable import SuperVisor`,
   so logic can be tested without a second library target. Tests that need a session registry
   write real records to a temp directory using the test process's own pid, which is what makes
-  them pass the registry's liveness check.
+  them pass the registry's liveness check. **A test file that compares two `CGFloat` values
+  must `import Foundation`.** With only `Testing` and `@testable import SuperVisor` imported,
+  `#expect(a == b)` fails on two `CGFloat`s whose bit patterns are identical (the failure prints
+  `205.0 == 205.0`); the operator resolves differently inside the macro's expansion without
+  CoreGraphics in scope. Comparisons against an integer literal pass either way, so the gap
+  shows only once a test holds both sides in `CGFloat` variables.
 - **`swift build`** alone compiles the binary but does *not* produce the bundle. The bundle is
   required because TCC permission grants (Location, Calendar, Reminders, Accessibility, Bluetooth) and the
   now-playing read only persist for a **stable, signed bundle identity** — a bare `swift run`

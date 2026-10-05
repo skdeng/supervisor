@@ -133,7 +133,32 @@ struct NotchRootView: View {
         if inlinePeek {
             return max(compactWidth, min(2 * sideWidth + centerGap, engine.collapsedWidthLimit))
         }
-        return bannerBelow ? max(compactWidth, peekBannerWidth) : compactWidth
+        if bannerBelow {
+            return Self.belowNotchBannerSurfaceWidth(
+                compactWidth: compactWidth,
+                bannerWidth: peekBannerWidth,
+                notchWidth: notchW
+            )
+        }
+        return compactWidth
+    }
+
+    /// Surface width while a peek banner hangs below a hardware notch.
+    ///
+    /// The attached shape tucks its body `NotchShape.defaultTopRadius` inside the frame on each
+    /// side, so a frame no wider than the cutout draws a body NARROWER than the cutout — invisible
+    /// while everything stays inside the black hardware, but a banner strip continues below it,
+    /// where the step from the cutout's edge in to the body's reads as the strip hanging off-center
+    /// from the notch. A bare notch (no compact content, cursor away) is exactly that case: its
+    /// compact width is the cutout alone. The hover swell happens to avoid it only because
+    /// `hoverWidthPad` equals the flare inset. The floor here makes the strip's body span the
+    /// cutout in every state, with the flares landing just outside it on the menu bar.
+    static func belowNotchBannerSurfaceWidth(
+        compactWidth: CGFloat,
+        bannerWidth: CGFloat,
+        notchWidth: CGFloat
+    ) -> CGFloat {
+        max(compactWidth, bannerWidth, notchWidth + 2 * NotchShape.defaultTopRadius)
     }
 
     /// Height of the pill strip. An inline peek swells it to clear its content by the same margin
