@@ -124,7 +124,7 @@ struct SettingsView: View {
             AgentHookSettingsView()
 
             Toggle("Jump to the waiting session with ⌘⇧⎋", isOn: $settings.swarmJumpHotKeyEnabled)
-            Text("Focuses the iTerm2 tab of the session that most needs attention — the one the banner is announcing, otherwise the first blocked session in the queue. The shortcut is claimed only while a session is reachable; the rest of the time ⌘⇧⎋ goes to the app you are using.")
+            Text("Focuses the session that most needs attention — its iTerm2 tab, or the app it runs in (the Claude desktop app, an editor, another terminal). The target is the session the banner is announcing, otherwise the first blocked session in the queue. The shortcut is claimed only while a session is reachable; the rest of the time ⌘⇧⎋ goes to the app you are using.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

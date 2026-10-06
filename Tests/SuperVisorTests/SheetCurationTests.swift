@@ -123,7 +123,8 @@ struct SwarmQueuePresentationTests {
         pid: Int32,
         reason: AttentionReason,
         secondsAgo: TimeInterval,
-        tty: String? = nil
+        tty: String? = nil,
+        host: SessionHost? = nil
     ) -> AttentionEntry {
         AttentionEntry(
             sessionPID: pid,
@@ -131,9 +132,21 @@ struct SwarmQueuePresentationTests {
             cwd: "/tmp/session-\(pid)",
             tty: tty,
             reason: reason,
-            since: now.addingTimeInterval(-secondsAgo)
+            since: now.addingTimeInterval(-secondsAgo),
+            host: host
         )
     }
+
+    private static let iTerm = SessionHost(
+        processIdentifier: 100,
+        bundleIdentifier: SessionHost.iTermBundleIdentifier,
+        name: "iTerm2"
+    )
+    private static let desktop = SessionHost(
+        processIdentifier: 200,
+        bundleIdentifier: "com.anthropic.claudefordesktop",
+        name: "Claude"
+    )
 
     @Test("Working sessions list the most recently started first, PID settling a tie")
     func workingSessionsOrderMostRecentFirst() {
@@ -289,6 +302,37 @@ struct SwarmQueuePresentationTests {
         )
 
         #expect(target?.sessionPID == 2)
+    }
+
+    @Test("A session with no tty but a host app is still a jump target")
+    func hostAppAloneIsReachable() {
+        let target = SwarmQueuePresentation.pressingSession(
+            announced: nil,
+            queue: [
+                entry(pid: 1, reason: .waiting(detail: "approve Bash"), secondsAgo: 300, host: Self.desktop),
+                entry(pid: 2, reason: .needsInput, secondsAgo: 10, tty: "/dev/ttys002"),
+            ]
+        )
+
+        #expect(target?.sessionPID == 1)
+    }
+
+    @Test("Only an iTerm2-hosted (or host-unknown) tty selects a tab; anything else opens the host")
+    func jumpTargetRouting() {
+        #expect(JumpTarget(tty: nil, host: nil) == nil)
+
+        let unknownHost = JumpTarget(tty: "/dev/ttys001", host: nil)
+        #expect(unknownHost?.selectsITermTab == true)
+        #expect(unknownHost?.label == "Open in iTerm2")
+
+        let iTermTab = JumpTarget(tty: "/dev/ttys001", host: Self.iTerm)
+        #expect(iTermTab?.selectsITermTab == true)
+
+        // The desktop app runs the CLI under a pty of its own, so a tty alone does not mean iTerm2.
+        let desktopWithTTY = JumpTarget(tty: "/dev/ttys009", host: Self.desktop)
+        #expect(desktopWithTTY?.selectsITermTab == false)
+        #expect(desktopWithTTY?.label == "Open in Claude")
+        #expect(desktopWithTTY?.systemImage == "arrow.up.forward.app")
     }
 
     @Test("Nothing reachable yields no jump target, so the shortcut stays unclaimed")

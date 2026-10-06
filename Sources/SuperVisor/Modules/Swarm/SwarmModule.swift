@@ -130,11 +130,11 @@ final class SwarmModule: NotchModule, ObservableObject {
         return AnyView(SwarmPeekBannerView(module: self))
     }
 
-    /// Teleports to the session's terminal and acknowledges the attention: the glow clears, and
+    /// Teleports to the session's terminal or host app and acknowledges the attention: the glow clears, and
     /// the toast retires with it. The queue entry stays: it is cleared only by the session
     /// resuming or by an explicit dismissal, exactly as when Jump is pressed on the sheet row.
-    func jump(toTTY tty: String) {
-        terminalTeleport.teleport(toTTY: tty)
+    func jump(to target: JumpTarget) {
+        terminalTeleport.teleport(to: target)
         AttentionGlowCenter.shared.clear()
         retireAnnouncement()
     }
@@ -187,9 +187,9 @@ final class SwarmModule: NotchModule, ObservableObject {
     }
 
     private func jumpToPressingSession() {
-        guard let tty = pressingSession()?.tty else { return }
+        guard let target = pressingSession()?.jumpTarget else { return }
         AppLog.debug(.swarm, "hot key jump")
-        jump(toTTY: tty)
+        jump(to: target)
     }
 
     /// Hold the shortcut only while it would do something. With no reachable session the
@@ -202,7 +202,7 @@ final class SwarmModule: NotchModule, ObservableObject {
 
     /// Presents `entry`, replacing whatever the banner already shows, and holds the surface with
     /// an indefinite peek. `retireAnnouncement` is the single exit, reached when the user opens
-    /// the sheet (the glow clearing), jumps to the terminal, the session leaves the queue, or the
+    /// the sheet (the glow clearing), jumps to the session, the session leaves the queue, or the
     /// module deactivates.
     private func announce(_ entry: AttentionEntry) {
         announcedEntry = entry

@@ -20,8 +20,10 @@ struct AgentFleetCenterTests {
         let pid = ProcessInfo.processInfo.processIdentifier
         let sessionID = "11111111-2222-3333-4444-555555555555"
 
+        /// Host resolution is stubbed: the test runner's own ancestry (a terminal, an IDE) would
+        /// otherwise leak into every entry.
         @MainActor
-        init() {
+        init(host: SessionHost? = nil) {
             registryURL = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("swarm-tests-\(UUID().uuidString)", isDirectory: true)
             try? FileManager.default.createDirectory(
@@ -32,7 +34,11 @@ struct AgentFleetCenterTests {
             socket = AgentEventSocket(
                 socketPath: registryURL.appendingPathComponent("unused.sock").path
             )
-            center = AgentFleetCenter(monitor: monitor, eventSocket: socket)
+            center = AgentFleetCenter(
+                monitor: monitor,
+                eventSocket: socket,
+                hostResolver: { _ in host }
+            )
         }
 
         @MainActor
@@ -120,6 +126,32 @@ struct AgentFleetCenterTests {
     }
 
     // MARK: - Tests
+
+    @Test("A session's host app rides its entries, so a session with no tty can still be jumped to")
+    func hostAppMakesSessionJumpable() async {
+        let desktop = SessionHost(
+            processIdentifier: 4242,
+            bundleIdentifier: "com.anthropic.claudefordesktop",
+            name: "Claude"
+        )
+        let harness = Harness(host: desktop)
+        defer { harness.tearDown() }
+
+        harness.write(status: "busy", statusUpdatedAt: Date().addingTimeInterval(-120))
+        harness.start()
+        await waitUntil("the busy session to load") { !harness.center.workingSessions.isEmpty }
+
+        let working = harness.center.workingSessions[0]
+        #expect(working.tty == nil)
+        #expect(working.host == desktop)
+        #expect(working.jumpTarget?.selectsITermTab == false)
+        #expect(working.jumpTarget?.label == "Open in Claude")
+
+        harness.write(status: "idle", statusUpdatedAt: Date())
+        harness.monitor.refreshSoon()
+        await waitUntil("the finished turn to queue") { !harness.center.queue.isEmpty }
+        #expect(harness.center.queue[0].host == desktop)
+    }
 
     @Test("A busy session is listed as working, with the tty a hook validated, until it stops")
     func busySessionIsWorking() async {

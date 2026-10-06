@@ -69,8 +69,11 @@ struct AttentionEntry: Identifiable, Equatable, Sendable {
     let tty: String?
     let reason: AttentionReason
     let since: Date
+    /// The app the session runs inside, when its process ancestry leads to one.
+    var host: SessionHost? = nil
 
     var id: Int32 { sessionPID }
+    var jumpTarget: JumpTarget? { JumpTarget(tty: tty, host: host) }
 }
 
 /// A session mid-turn. It needs nothing from the user, so it carries no reason — only where it
@@ -82,8 +85,10 @@ struct WorkingEntry: Identifiable, Equatable, Sendable {
     let tty: String?
     /// When the registry recorded the session turning busy.
     let since: Date
+    var host: SessionHost? = nil
 
     var id: Int32 { sessionPID }
+    var jumpTarget: JumpTarget? { JumpTarget(tty: tty, host: host) }
 }
 
 /// Merges authoritative registry snapshots with low-latency hook metadata.
@@ -91,6 +96,9 @@ struct WorkingEntry: Identifiable, Equatable, Sendable {
 final class AgentFleetCenter: ObservableObject {
     @Published private(set) var sessions: [FleetSession] = []
     @Published private(set) var ttyBySessionPID: [Int32: String] = [:]
+    /// Each live session's host app, resolved once when the session first appears — a process's
+    /// parents do not change while it lives. A `nil` value records a walk that found none.
+    private(set) var hostBySessionPID: [Int32: SessionHost?] = [:]
     /// Sessions awaiting attention, most recent first: the session that stopped last is the one
     /// the user is most likely still thinking about.
     @Published private(set) var queue: [AttentionEntry] = []
@@ -109,7 +117,8 @@ final class AgentFleetCenter: ObservableObject {
                 name: session.name,
                 cwd: session.cwd,
                 tty: ttyBySessionPID[session.pid],
-                since: session.statusUpdatedAt
+                since: session.statusUpdatedAt,
+                host: host(for: session.pid)
             )
         }
     }
@@ -137,6 +146,7 @@ final class AgentFleetCenter: ObservableObject {
 
     private let monitor: ClaudeSessionMonitor
     private let eventSocket: AgentEventSocket
+    private let hostResolver: @MainActor (Int32) -> SessionHost?
     private var sessionSubscription: AnyCancellable?
     private var lastBusyStart: [Int32: Date] = [:]
     private var pendingInput: [Int32: PendingInput] = [:]
@@ -144,9 +154,14 @@ final class AgentFleetCenter: ObservableObject {
     private var turnOutcome: [Int32: TurnOutcome] = [:]
     private var isRunning = false
 
-    init(monitor: ClaudeSessionMonitor, eventSocket: AgentEventSocket) {
+    init(
+        monitor: ClaudeSessionMonitor,
+        eventSocket: AgentEventSocket,
+        hostResolver: @escaping @MainActor (Int32) -> SessionHost? = { SessionHost.resolve(forSessionPID: $0) }
+    ) {
         self.monitor = monitor
         self.eventSocket = eventSocket
+        self.hostResolver = hostResolver
     }
 
     func start() {
@@ -169,6 +184,7 @@ final class AgentFleetCenter: ObservableObject {
         eventSocket.onEvent = nil
         sessions = []
         ttyBySessionPID = [:]
+        hostBySessionPID = [:]
         for pid in queue.map(\.sessionPID) {
             removeQueuedEntry(for: pid)
         }
@@ -197,6 +213,9 @@ final class AgentFleetCenter: ObservableObject {
             if let previous, previous.sessionID != session.sessionID {
                 removeState(for: session.pid)
             }
+            if hostBySessionPID[session.pid] == nil {
+                hostBySessionPID[session.pid] = .some(hostResolver(session.pid))
+            }
 
             let sameSessionPrevious = previous?.sessionID == session.sessionID ? previous : nil
             reconcile(
@@ -208,6 +227,7 @@ final class AgentFleetCenter: ObservableObject {
         sessions = nextSessions
         let livePIDs = Set(nextByPID.keys)
         ttyBySessionPID = ttyBySessionPID.filter { livePIDs.contains($0.key) }
+        hostBySessionPID = hostBySessionPID.filter { livePIDs.contains($0.key) }
         let staleQueuedPIDs = queue.map(\.sessionPID).filter { !livePIDs.contains($0) }
         for pid in staleQueuedPIDs {
             removeQueuedEntry(for: pid)
@@ -405,7 +425,8 @@ final class AgentFleetCenter: ObservableObject {
                 cwd: session.cwd,
                 tty: ttyBySessionPID[session.pid],
                 reason: reason,
-                since: reason.rank > current.reason.rank ? since : current.since
+                since: reason.rank > current.reason.rank ? since : current.since,
+                host: host(for: session.pid)
             )
             if queue[index] != entry {
                 queue[index] = entry
@@ -429,7 +450,8 @@ final class AgentFleetCenter: ObservableObject {
             cwd: session.cwd,
             tty: ttyBySessionPID[session.pid],
             reason: reason,
-            since: since
+            since: since,
+            host: host(for: session.pid)
         )
         queue.append(entry)
         // An entry rewritten in place keeps its `since`, so ordering only needs restoring
@@ -463,7 +485,8 @@ final class AgentFleetCenter: ObservableObject {
             cwd: session.cwd,
             tty: ttyBySessionPID[session.pid],
             reason: current.reason,
-            since: current.since
+            since: current.since,
+            host: host(for: session.pid)
         )
         if refreshed != current {
             queue[index] = refreshed
@@ -480,13 +503,15 @@ final class AgentFleetCenter: ObservableObject {
             cwd: current.cwd,
             tty: tty,
             reason: current.reason,
-            since: current.since
+            since: current.since,
+            host: current.host
         )
     }
 
     private func removeState(for pid: Int32) {
         removeQueuedEntry(for: pid)
         ttyBySessionPID[pid] = nil
+        hostBySessionPID[pid] = nil
         lastBusyStart[pid] = nil
         pendingInput[pid] = nil
         pendingFailure[pid] = nil
@@ -501,6 +526,10 @@ final class AgentFleetCenter: ObservableObject {
             .swarm,
             "attention removed \(entry.name) reason \(Self.logDescription(entry.reason)) count \(queue.count)"
         )
+    }
+
+    private func host(for pid: Int32) -> SessionHost? {
+        hostBySessionPID[pid] ?? nil
     }
 
     static func isValidTTY(_ tty: String) -> Bool {

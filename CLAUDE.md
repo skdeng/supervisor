@@ -437,8 +437,13 @@ names below are the code paths.
   state; a badge is orange for every state that is the user's move (approve, asked, needs
   input), green for a finished turn, red for a failed one. A validated tty teleports directly to the matching iTerm2 tab through
   AppleScript, from the row, the banner, or **⌘⇧⎋** without the sheet open (`swarm.jumpHotKey`,
-  default on). The shortcut goes to the session the banner is announcing, else the queue's first;
-  entries with no tty or on their own dialog are skipped, and it is claimed only while some
+  default on). A session hosted anywhere else — the Claude desktop app (which runs the CLI under
+  a pty of its own, so a tty alone does not mean iTerm2), an editor's terminal, Terminal.app — is
+  reached through `SessionHost`: the session PID's parents are walked (`sysctl`) to the first
+  regular app, resolved once per session, and Jump brings that app forward through
+  `NSWorkspace.openApplication` (an accessory app cannot satisfy `activate`'s cooperative
+  activation). That focuses the app, not the specific conversation inside it. The shortcut goes to the session the banner is announcing, else the queue's first;
+  entries with neither a tty nor a host app, or on their own dialog, are skipped, and it is claimed only while some
   session is reachable, so the
   rest of the time ⌘⇧⎋ belongs to the frontmost app. `swarm.showMessages` (**default off**) gates session *content* — the question, the
   closing summary, an error's detail text, each truncated to one line with the whole of it on

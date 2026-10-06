@@ -2,7 +2,9 @@ import AppKit
 import Carbon
 import Foundation
 
-/// Focuses the iTerm2 tab whose session owns a validated terminal device.
+/// Carries the user to a session: the iTerm2 tab whose session owns a validated terminal device,
+/// or, for a session hosted anywhere else (the Claude desktop app, an editor, another terminal),
+/// that host app brought to the front.
 @MainActor
 final class TerminalTeleport {
     private static let scriptSource = """
@@ -41,15 +43,49 @@ final class TerminalTeleport {
         return script
     }()
 
-    func teleport(toTTY tty: String) {
-        guard AgentFleetCenter.isValidTTY(tty) else { return }
-        guard !NSRunningApplication.runningApplications(
-            withBundleIdentifier: "com.googlecode.iterm2"
-        ).isEmpty else {
-            AppLog.error(.swarm, "terminal teleport found no matching tab for \(tty)")
+    func teleport(to target: JumpTarget) {
+        if let tty = target.tty, target.selectsITermTab, teleportToITermTab(tty) {
             return
         }
-        guard let script else { return }
+        // The tab lookup can miss (a tty iTerm2 no longer owns); the host app is still the
+        // nearest place to put the user.
+        if let host = target.host {
+            activate(host)
+        }
+    }
+
+    /// Brings the host forward through LaunchServices. `NSRunningApplication.activate` is
+    /// subject to cooperative activation, which an accessory app that never becomes active
+    /// cannot satisfy; opening the already-running bundle is the request macOS honors.
+    private func activate(_ host: SessionHost) {
+        guard let app = NSRunningApplication(processIdentifier: host.processIdentifier),
+              !app.isTerminated
+        else {
+            AppLog.error(.swarm, "session host \(host.name) is no longer running")
+            return
+        }
+        guard let bundleURL = app.bundleURL else {
+            app.activate()
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.openApplication(at: bundleURL, configuration: configuration) { _, error in
+            if let error {
+                AppLog.error(.swarm, "session host activation failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func teleportToITermTab(_ tty: String) -> Bool {
+        guard AgentFleetCenter.isValidTTY(tty) else { return false }
+        guard !NSRunningApplication.runningApplications(
+            withBundleIdentifier: SessionHost.iTermBundleIdentifier
+        ).isEmpty else {
+            AppLog.error(.swarm, "terminal teleport found no matching tab for \(tty)")
+            return false
+        }
+        guard let script else { return false }
 
         let event = NSAppleEventDescriptor(
             eventClass: AEEventClass(kASAppleScriptSuite),
@@ -74,8 +110,12 @@ final class TerminalTeleport {
                 .swarm,
                 "terminal teleport AppleScript error for \(tty): \(error.description)"
             )
-        } else if result.booleanValue != true {
-            AppLog.error(.swarm, "terminal teleport found no matching tab for \(tty)")
+            return false
         }
+        guard result.booleanValue else {
+            AppLog.error(.swarm, "terminal teleport found no matching tab for \(tty)")
+            return false
+        }
+        return true
     }
 }

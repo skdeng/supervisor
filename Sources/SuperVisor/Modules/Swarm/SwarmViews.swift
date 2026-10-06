@@ -156,16 +156,16 @@ enum SwarmQueuePresentation {
     /// A blocked session never folds however long it has waited: it is stopped until the user
     /// deals with it, and time only makes that more true.
     /// The session a jump goes to: the one the banner is announcing, else the queue's first —
-    /// its most pressing, the queue being ordered blocked-first then most-recent. Entries with no
-    /// validated tty are skipped, since nothing can focus a session whose terminal was never
-    /// identified, and so are sessions stopped on their own dialog: the shortcut exists to carry
-    /// the user to a terminal they are not already in.
+    /// its most pressing, the queue being ordered blocked-first then most-recent. Entries with
+    /// neither a validated tty nor a host app are skipped, since nothing can focus a session whose
+    /// terminal was never identified, and so are sessions stopped on their own dialog: the shortcut
+    /// exists to carry the user to a session they are not already in.
     static func pressingSession(
         announced: AttentionEntry?,
         queue: [AttentionEntry]
     ) -> AttentionEntry? {
-        if let announced, announced.tty != nil { return announced }
-        return queue.first { $0.tty != nil && $0.reason.interrupts }
+        if let announced, announced.jumpTarget != nil { return announced }
+        return queue.first { $0.jumpTarget != nil && $0.reason.interrupts }
     }
 
     /// Mid-turn sessions, the most recently started first — the turn the user kicked off last
@@ -243,13 +243,9 @@ struct SwarmPeekBannerView: View {
                 // longer row above), so the action pins to the trailing content edge.
                 Spacer(minLength: 12)
 
-                if let tty = entry.tty {
-                    SwarmIconButton(
-                        systemName: "apple.terminal",
-                        tooltip: "Open in iTerm2",
-                        showsHoverLabel: false
-                    ) {
-                        module.jump(toTTY: tty)
+                if let target = entry.jumpTarget {
+                    SwarmJumpButton(target: target) {
+                        module.jump(to: target)
                     }
                 }
             }
@@ -300,13 +296,9 @@ private struct SwarmAttentionRow: View {
 
             Spacer(minLength: 4)
 
-            if let tty = entry.tty {
-                SwarmIconButton(
-                    systemName: "apple.terminal",
-                    tooltip: "Open in iTerm2",
-                    showsHoverLabel: false
-                ) {
-                    terminalTeleport.teleport(toTTY: tty)
+            if let target = entry.jumpTarget {
+                SwarmJumpButton(target: target) {
+                    terminalTeleport.teleport(to: target)
                 }
             }
 
@@ -490,16 +482,29 @@ private struct SwarmWorkingRow: View {
 
             Spacer(minLength: 4)
 
-            if let tty = entry.tty {
-                SwarmIconButton(
-                    systemName: "apple.terminal",
-                    tooltip: "Open in iTerm2",
-                    showsHoverLabel: false
-                ) {
-                    terminalTeleport.teleport(toTTY: tty)
+            if let target = entry.jumpTarget {
+                SwarmJumpButton(target: target) {
+                    terminalTeleport.teleport(to: target)
                 }
             }
         }
+    }
+}
+
+/// Jump's glyph names its destination — a terminal for an iTerm2 tab, an app arrow for a session
+/// hosted elsewhere — so it carries no hover label.
+@MainActor
+private struct SwarmJumpButton: View {
+    let target: JumpTarget
+    let action: () -> Void
+
+    var body: some View {
+        SwarmIconButton(
+            systemName: target.systemImage,
+            tooltip: target.label,
+            showsHoverLabel: false,
+            action: action
+        )
     }
 }
 
