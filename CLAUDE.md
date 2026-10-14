@@ -282,6 +282,15 @@ sink. Preserve these guards when touching the relevant code:
   preamble marks the content as data, not instructions, as defense-in-depth. The on-device path has
   no tools, so injected instructions in file content cannot act; the same preamble still marks the
   content as data.
+- **The Claude sign-in and the usage endpoint** (`ClaudeUsageClient`). The credential JSON comes
+  from the Keychain item Claude Code writes, or from `~/.claude/.credentials.json`, which anything
+  running as the user can edit: it is size-capped, only `accessToken`/`expiresAt`/`scopes` are
+  read, and the token must be printable ASCII with no whitespace before it reaches a header. The
+  request goes through an ephemeral `URLSession` with no cache (the shared session's disk cache
+  stores the request, `Authorization` header included, because the response carries no cache
+  directive) and a delegate that refuses redirects, so the header can never follow one to
+  another host. The response body is size-capped and parsed defensively; failure reasons are
+  fixed strings and never carry the token.
 
 ## Module Roster
 
@@ -471,17 +480,38 @@ names below are the code paths.
   `UI/UsageTickerRowView`). No compact/pill presence. One module (`AIUsageModule`) owns both
   monitors; each row gates on its own product's activity, and the section exists only while at
   least one row does.
-  - **Claude row:** `QuotaMonitor` **watches** `~/.claude/agentpace/last-status.json` (the
-    statusline capture the user's Claude Code statusline wrapper rewrites on every refresh)
-    through `FileChangeWatcher` and re-parses only when the mtime actually moves; the
-    `rate_limits` object carries `used_percentage`/`resets_at` per window. The row exists only
-    while Claude Code is actively in use (file fresh within 10 min) **and** quota data is
-    recent (30 min TTL) — quota is retained across payloads that omit `rate_limits`
-    (desktop-bridge sessions do; terminal sessions carry it). Payload is parsed defensively per
-    the untrusted-input convention. Freshness is wall-clock-derived, so when Claude Code stops
-    writing, no file event will ever arrive: a **single timer** is armed for the soonest
-    deadline that can still hide the row (and none at all once it is hidden), rather than a
-    periodic tick that exists only to notice the absence of one.
+  - **Claude row:** `QuotaMonitor` takes **activity from Claude Code's session registry**
+    (`~/.claude/sessions`, through its own `ClaudeSessionMonitor`), which every host writes —
+    a terminal, the desktop app, an editor's terminal. Claude Code counts as in use while any
+    live session is mid-turn or changed status within 10 min. **Quota comes from
+    `ClaudeUsageClient`**, which reads the account's windows from the same
+    `/api/oauth/usage` endpoint Claude Code's `/usage` command reads, authenticated with the
+    OAuth token Claude Code keeps in the login Keychain (`Claude Code-credentials`, read via
+    `/usr/bin/security`, the tool Claude Code stores it with, so the item's access list admits
+    the read without a prompt; `~/.claude/.credentials.json` is the fallback store). Only the
+    access token, its expiry, and its scopes are read — the refresh token is never touched,
+    since using it would rotate the tokens out from under Claude Code — and the token is never
+    logged. Reads happen while active: on becoming active, after each registry change no more
+    than once a minute, and 5 min after each successful read through a long turn; a failed read
+    retries with exponential backoff (1 min doubling to 15 min, which registry-change reads
+    honor too), logged once per distinct reason. **The statusline capture file**
+    (`~/.claude/agentpace/last-status.json`, which the user's statusline wrapper rewrites with
+    the statusline's stdin JSON on every refresh; its `rate_limits` object carries
+    `used_percentage`/`resets_at` per window) is watched and **applies only while the endpoint
+    is not producing** — its last read failed (a sign-in without the `user:profile` scope, an
+    expired token, no network) or it has no snapshot within the quota TTL — and then only when
+    newer than what is shown. While the endpoint answers the capture is ignored: a statusline
+    re-render carries the numbers of that session's last API response, so a newer file can hold
+    older numbers. **Only an interactive terminal session renders a statusline**: the desktop
+    app runs the CLI headless (`--output-format stream-json`), so the capture alone never sees
+    desktop use. Limits: the registry monitor admits only `kind: interactive` records (which
+    desktop sessions are; background `bg` jobs are not activity), and a non-default
+    `CLAUDE_CONFIG_DIR` (which moves the registry and suffixes the Keychain service name) is
+    not followed. The row exists only while active **and** quota data is recent (30 min TTL).
+    Freshness is wall-clock-derived, so when Claude Code stops, no registry or file event will
+    ever arrive: a **single timer** is armed for the soonest deadline that can still hide the
+    row (and none at all once it is hidden), rather than a periodic tick that exists only to
+    notice the absence of one.
   - **GPT row:** `CodexQuotaMonitor` uses a recursive FSEvents watcher over
     `~/.codex/sessions/` and reads only JSONL mtimes to determine whether Codex is active; it
     never opens transcript contents or auth files, and sessions crossing midnight or resumed
@@ -529,8 +559,9 @@ at runtime.
   while the file is absent (so it may be started before the file exists). Callbacks are
   debounced, and fire on a private serial queue, not the main actor.
 - **`Services/FileSystem/DirectoryTreeWatcher.swift`** — a recursive, debounced FSEvents watcher
-  used for Codex's date-partitioned sessions tree and SwarmVisor's Claude session registry. It
-  notices nested appends and in-place child rewrites with one stream, including an older Codex
+  used for Codex's date-partitioned sessions tree and, through `ClaudeSessionMonitor`, the
+  Claude session registry (SwarmVisor and AI Usage each hold their own monitor). It notices
+  nested appends and in-place child rewrites with one stream, including an older Codex
   transcript resumed after its original date, without a discovery poll.
 - **`Services/FileSystem/ThumbnailService.swift` + `QuickLookController.swift`** — shared local-file
   previews used by FileShelf. Thumbnail generation stays in Quick Look's service;
