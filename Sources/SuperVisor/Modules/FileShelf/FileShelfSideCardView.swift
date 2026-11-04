@@ -217,10 +217,10 @@ struct FileShelfSideCardView: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 1)
 
-            // The destructive pair shares the grid's column width, so Remove and Move to
-            // Trash render at the same weight as every other action instead of stretching
-            // across the row.
-            LazyVGrid(columns: columns, spacing: 2) {
+            // The destructive pair splits the full row between them rather than taking two of
+            // the grid's four columns: half-row targets are harder to mis-hit than the tight
+            // icon grid above, and the row reads as its own group below the separator.
+            HStack(spacing: 2) {
                 ShelfActionButton(title: "Remove from shelf", systemImage: "xmark.bin") {
                     store.remove(ids: targetIDs)
                 }
