@@ -127,7 +127,7 @@ struct FileShelfSideCardView: View {
                     .font(.system(size: 22, weight: .regular))
                 Text("Drop files here")
                     .font(.system(size: 12, weight: .medium))
-                Text("AirDrop, compress, or drag out")
+                Text("Copy, AirDrop, or drag out")
                     .font(.caption2)
                     .foregroundStyle(NotchTheme.secondaryForeground)
                     .multilineTextAlignment(.center)
@@ -166,21 +166,12 @@ struct FileShelfSideCardView: View {
             $0.contentType.conforms(to: .image) || $0.contentType.conforms(to: .pdf)
         }
         let textTargetID = targets.count == 1 ? targets.first?.id : nil
-        let agentTargetID: UUID?
-        if store.selection.count == 1 {
-            agentTargetID = store.selection.first
-        } else if store.count == 1 {
-            agentTargetID = store.files.first?.id
-        } else {
-            agentTargetID = nil
-        }
 
-        let columns = Array(
-            repeating: GridItem(.flexible(), spacing: 2),
-            count: 4
-        )
+        // Each row splits the card's full width among its buttons, so the panel stays flush
+        // whether Copy Text is offered or not. Quick Look, Reveal, Zip, and the agent verbs
+        // live on each tile's context menu (and Quick Look on double-click) instead.
         return VStack(spacing: 2) {
-            LazyVGrid(columns: columns, spacing: 2) {
+            HStack(spacing: 2) {
                 ShelfActionButton(title: "Copy", systemImage: "doc.on.doc") {
                     store.copyToPasteboard(ids: targetIDs)
                 }
@@ -196,19 +187,9 @@ struct FileShelfSideCardView: View {
                         }
                     }
                 }
-                ShelfActionButton(title: "Quick Look", systemImage: "eye") {
-                    store.quickLook(ids: targetIDs)
-                }
                 ShelfActionButton(title: "AirDrop", systemImage: "dot.radiowaves.right") {
                     store.airDrop(ids: targetIDs)
                 }
-                ShelfActionButton(title: "Reveal in Finder", systemImage: "folder") {
-                    store.revealInFinder(ids: targetIDs)
-                }
-                ShelfActionButton(title: "Compress to Zip", systemImage: "doc.zipper") {
-                    store.compress(ids: targetIDs)
-                }
-                ShelfAgentMenu(store: store, targetID: agentTargetID)
             }
 
             Rectangle()
@@ -217,9 +198,6 @@ struct FileShelfSideCardView: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 1)
 
-            // The destructive pair splits the full row between them rather than taking two of
-            // the grid's four columns: half-row targets are harder to mis-hit than the tight
-            // icon grid above, and the row reads as its own group below the separator.
             HStack(spacing: 2) {
                 ShelfActionButton(title: "Remove from shelf", systemImage: "xmark.bin") {
                     store.remove(ids: targetIDs)
@@ -239,84 +217,6 @@ struct FileShelfSideCardView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Color.white.opacity(0.08))
         )
-    }
-}
-
-private struct ShelfAgentMenu: View {
-    @ObservedObject var store: FileShelfStore
-    let targetID: UUID?
-
-    @State private var hovering = false
-
-    private var target: StagedFile? {
-        guard let targetID else { return nil }
-        return store.files.first { $0.id == targetID }
-    }
-
-    var body: some View {
-        Menu {
-            if let target {
-                ShelfAgentMenuItems(store: store, file: target)
-            } else {
-                Button("Select one file for agent actions") {}
-                    .disabled(true)
-            }
-        } label: {
-            Image(systemName: "sparkles")
-                .font(.system(size: 13, weight: .medium))
-                .frame(maxWidth: .infinity, minHeight: 28)
-                .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(hovering ? Color.white.opacity(0.10) : .clear)
-                )
-                .contentShape(Rectangle())
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .foregroundStyle(NotchTheme.primaryForeground)
-        .disabled(target == nil)
-        .opacity(target == nil ? 0.45 : 1)
-        .frame(maxWidth: .infinity)
-        .onHover { hovering = $0 }
-        .animation(.snappy(duration: 0.15), value: hovering)
-        .help(target == nil ? "Select one file for agent actions" : "Agent actions")
-        .notchTooltip("Agent actions")
-    }
-}
-
-private struct ShelfAgentMenuItems: View {
-    @ObservedObject var store: FileShelfStore
-    @ObservedObject var file: StagedFile
-
-    @ViewBuilder
-    var body: some View {
-        if let operation = file.activeOperation {
-            ShelfAgentOperationMenuItems(store: store, file: file, operation: operation)
-        } else {
-            FileShelfAgentVerbMenuItems(store: store, file: file)
-        }
-    }
-}
-
-private struct ShelfAgentOperationMenuItems: View {
-    @ObservedObject var store: FileShelfStore
-    @ObservedObject var file: StagedFile
-    @ObservedObject var operation: LiveOperation
-
-    @ViewBuilder
-    var body: some View {
-        switch operation.state {
-        case .running:
-            Button("Cancel \(operation.title)") {
-                operation.cancel()
-            }
-        case .cancelling:
-            Button("Cancelling…") {}
-                .disabled(true)
-        case .succeeded, .failed, .cancelled:
-            FileShelfAgentVerbMenuItems(store: store, file: file)
-        }
     }
 }
 

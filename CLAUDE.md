@@ -365,12 +365,13 @@ names below are the code paths.
   from the sheet's edge, only after the open spring settles; a close is **two-phase**
   (`NotchEngine.isSideCardRetracting`): the card fades back out, then the engine completes the
   collapse. The card holds a vertical rail of tiles and an
-  icon action grid — Copy, Copy Text (Vision OCR, images/PDF; runs detached, only the resulting
-  `String` returns to the main actor), Quick Look, AirDrop, Reveal, Zip, and an **agent-verbs**
-  menu (Summarize / Explain / Extract Text) — plus, separated, **Remove** (off-shelf,
-  non-destructive; a generated artifact's backing file is deleted) and **Move to Trash** (moves
-  the original to the macOS Trash after verifying the file's recorded volume/inode identity,
-  refusing a file swapped at the path). The shelf contributes no `expandedSection()`; the engine
+  icon action panel whose rows each split the card's full width — Copy, Copy Text (Vision OCR,
+  images/PDF; runs detached, only the resulting `String` returns to the main actor), and
+  AirDrop — plus, separated, **Remove** (off-shelf, non-destructive; a generated artifact's
+  backing file is deleted) and **Move to Trash** (moves the original to the macOS Trash after
+  verifying the file's recorded volume/inode identity, refusing a file swapped at the path).
+  Quick Look, Reveal, Zip, and the **agent verbs** (Summarize / Explain / Extract Text) are on
+  each tile's context menu only; double-clicking a tile also opens Quick Look. The shelf contributes no `expandedSection()`; the engine
   reads the card through a concrete `FileShelfModule.sideCard()`, and the expanded hit-test and
   hover rects extend over the card while it shows.
   Agent verbs route to the on-device system language model when a file has a small plain-text or OCR

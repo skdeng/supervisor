@@ -469,11 +469,6 @@ final class FileShelfStore: ObservableObject {
         FileActionService.revealInFinder(urls)
     }
 
-    func quickLook(ids: Set<UUID>? = nil, startAt index: Int = 0) {
-        let urls = actionURLs(ids: ids)
-        quickLook.preview(urls, startingAt: index)
-    }
-
     func quickLookSingle(_ id: UUID) {
         guard let idx = files.firstIndex(where: { $0.id == id }) else { return }
         // Preview the whole shelf but start on the clicked item for fast navigation.

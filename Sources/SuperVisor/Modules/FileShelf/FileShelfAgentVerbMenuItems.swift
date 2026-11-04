@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Shared verb menu content for the toolbar menu and per-file context menus.
+/// Agent verb menu content for a tile's context menu.
 struct FileShelfAgentVerbMenuItems: View {
     @ObservedObject var store: FileShelfStore
     @ObservedObject var file: StagedFile
