@@ -255,14 +255,22 @@ sink. Preserve these guards when touching the relevant code:
   numbers and validates the payload (`isValidJSONObject`) before serializing, so a malicious source
   cannot abort the entitled perl helper with an uncaught exception.
 - **Agent hook socket payloads** are arbitrary local input. Each connection is size-capped and
-  defensively parsed, and a tty must match `^/dev/ttys[0-9]+$` before it is stored or reaches
+  defensively parsed, and a tty must match `\A/dev/ttys[0-9]+\z` before it is stored or reaches
   AppleScript interpolation. The text fields (`message`, `last_assistant_message`,
   `error_details`) carry model-generated prose that reaches a view: the hook truncates at the
   source, `FleetHookEvent.isValid` rejects a payload whose fields exceed the cap rather than
   trimming it, and `AgentFleetCenter.displayMessage` collapses whitespace and strips control
   characters — an ANSI escape or a newline in a summary would otherwise redraw a notch row.
   Registry `waitingFor` is bounded the same way in `ClaudeSessionMonitor`. None of this text is
-  ever logged; `AppLog` records the reason's name only.
+  ever logged; `AppLog` records the reason's name only. A registry `hostSessionId` must match
+  `\Alocal_[A-Za-z0-9-]{1,64}\z` and sit beside `entrypoint: "claude-desktop"` before
+  `SessionLink` builds a URL from it, and `JumpTarget` drops a link whose app differs from the
+  host that process ancestry resolved. **Anchor a validating pattern with `\A` and `\z`, never
+  `^` and `$`**: they are the absolute ends of the input in every engine, whereas ICU's `$`
+  (`NSString`, `NSRegularExpression`) also matches before a trailing line terminator. Swift's
+  `String.range(of:options: .regularExpression)` rejects `"/dev/ttys004\n"` against
+  `^/dev/ttys[0-9]+$` on the Swift 6.2 toolchain, so a test of that input passes with either
+  anchoring there and proves nothing about the ICU path.
 - **Screenshot-directory contents** are arbitrary local files. `ScreenshotMonitor` accepts only
   direct, regular, non-symlink image/PDF children that macOS marked as a capture — either
   macOS's `com.apple.metadata:kMDItemIsScreenCapture` attribute or, for images, the Exif
@@ -452,8 +460,15 @@ names below are the code paths.
   reached through `SessionHost`: the session PID's parents are walked (`sysctl`) to the first
   regular app, resolved once per session, and Jump brings that app forward through
   `NSWorkspace.openApplication` (an accessory app cannot satisfy `activate`'s cooperative
-  activation). That focuses the app, not the specific conversation inside it. The shortcut goes to the session the banner is announcing, else the queue's first;
-  entries with neither a tty nor a host app, or on their own dialog, are skipped, and it is claimed only while some
+  activation). That focuses the app, not the specific conversation inside it — except in the
+  Claude desktop app, which Jump opens on the session itself: a desktop session's registry record
+  carries `entrypoint: "claude-desktop"` and a `hostSessionId` (`local_…`), and the app's URL
+  handler navigates to that session for `claude://code/continue?session=<id>` (`SessionLink`).
+  The link is opened only in the app with the link's bundle identifier — the running host, else
+  another running or installed copy — never through the scheme's registered handler, and a link
+  whose app differs from the resolved host is dropped. The desktop app ignores the link when its
+  deep links are disabled. The shortcut goes to the session the banner is announcing, else the queue's first;
+  entries with no tty, host app, or session link, or on their own dialog, are skipped, and it is claimed only while some
   session is reachable, so the
   rest of the time ⌘⇧⎋ belongs to the frontmost app. `swarm.showMessages` (**default off**) gates session *content* — the question, the
   closing summary, an error's detail text, each truncated to one line with the whole of it on
@@ -471,7 +486,7 @@ names below are the code paths.
   is the pass-through that not wiring it produces, at no latency and with no risk of stalling a
   prompt. The socket still replies `{"decision":"ask"}` to any `waiting_for_approval` message,
   since it is reachable by any local client. Without hooks the module still lists sessions and
-  tracks state from the registry; it loses Jump, turn text, and failure reasons.
+  tracks state from the registry; it loses iTerm2 tab selection, turn text, and failure reasons.
 - **Battery** (`Modules/Battery`) — power/charging status, time remaining, and connected-device
   (Bluetooth accessory) battery; peeks on plug/unplug and low battery. (`PowerSourceMonitor`,
   `BluetoothMonitor`.)

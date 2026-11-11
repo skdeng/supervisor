@@ -71,9 +71,10 @@ struct AttentionEntry: Identifiable, Equatable, Sendable {
     let since: Date
     /// The app the session runs inside, when its process ancestry leads to one.
     var host: SessionHost? = nil
+    var sessionLink: SessionLink? = nil
 
     var id: Int32 { sessionPID }
-    var jumpTarget: JumpTarget? { JumpTarget(tty: tty, host: host) }
+    var jumpTarget: JumpTarget? { JumpTarget(tty: tty, host: host, sessionLink: sessionLink) }
 }
 
 /// A session mid-turn. It needs nothing from the user, so it carries no reason — only where it
@@ -86,9 +87,10 @@ struct WorkingEntry: Identifiable, Equatable, Sendable {
     /// When the registry recorded the session turning busy.
     let since: Date
     var host: SessionHost? = nil
+    var sessionLink: SessionLink? = nil
 
     var id: Int32 { sessionPID }
-    var jumpTarget: JumpTarget? { JumpTarget(tty: tty, host: host) }
+    var jumpTarget: JumpTarget? { JumpTarget(tty: tty, host: host, sessionLink: sessionLink) }
 }
 
 /// Merges authoritative registry snapshots with low-latency hook metadata.
@@ -118,7 +120,8 @@ final class AgentFleetCenter: ObservableObject {
                 cwd: session.cwd,
                 tty: ttyBySessionPID[session.pid],
                 since: session.statusUpdatedAt,
-                host: host(for: session.pid)
+                host: host(for: session.pid),
+                sessionLink: session.sessionLink
             )
         }
     }
@@ -426,7 +429,8 @@ final class AgentFleetCenter: ObservableObject {
                 tty: ttyBySessionPID[session.pid],
                 reason: reason,
                 since: reason.rank > current.reason.rank ? since : current.since,
-                host: host(for: session.pid)
+                host: host(for: session.pid),
+                sessionLink: session.sessionLink
             )
             if queue[index] != entry {
                 queue[index] = entry
@@ -451,7 +455,8 @@ final class AgentFleetCenter: ObservableObject {
             tty: ttyBySessionPID[session.pid],
             reason: reason,
             since: since,
-            host: host(for: session.pid)
+            host: host(for: session.pid),
+            sessionLink: session.sessionLink
         )
         queue.append(entry)
         // An entry rewritten in place keeps its `since`, so ordering only needs restoring
@@ -486,7 +491,8 @@ final class AgentFleetCenter: ObservableObject {
             tty: ttyBySessionPID[session.pid],
             reason: current.reason,
             since: current.since,
-            host: host(for: session.pid)
+            host: host(for: session.pid),
+            sessionLink: session.sessionLink
         )
         if refreshed != current {
             queue[index] = refreshed
@@ -504,7 +510,8 @@ final class AgentFleetCenter: ObservableObject {
             tty: tty,
             reason: current.reason,
             since: current.since,
-            host: current.host
+            host: current.host,
+            sessionLink: current.sessionLink
         )
     }
 
@@ -532,9 +539,11 @@ final class AgentFleetCenter: ObservableObject {
         hostBySessionPID[pid] ?? nil
     }
 
+    /// Anchored with `\A` and `\z`, which every regex engine treats as the absolute ends of the
+    /// input; ICU's `$` also matches before a trailing line terminator.
     static func isValidTTY(_ tty: String) -> Bool {
         tty.range(
-            of: #"^/dev/ttys[0-9]+$"#,
+            of: #"\A/dev/ttys[0-9]+\z"#,
             options: .regularExpression
         ) != nil
     }

@@ -335,6 +335,95 @@ struct SwarmQueuePresentationTests {
         #expect(desktopWithTTY?.systemImage == "arrow.up.forward.app")
     }
 
+    @Test("A session link alone is a jump target, and it keeps a tty from selecting an iTerm2 tab")
+    func sessionLinkRouting() throws {
+        let link = try #require(
+            SessionLink.claudeDesktop(
+                entrypoint: "claude-desktop",
+                hostSessionID: "local_cce223bb-691d-4e02-8410-d293b45e3f76"
+            )
+        )
+
+        let linkOnly = JumpTarget(tty: nil, host: nil, sessionLink: link)
+        #expect(linkOnly?.selectsITermTab == false)
+        #expect(linkOnly?.label == "Open in Claude")
+
+        // Process ancestry found no host, so only the link says the tty is the desktop app's.
+        let linkWithTTY = JumpTarget(tty: "/dev/ttys009", host: nil, sessionLink: link)
+        #expect(linkWithTTY?.selectsITermTab == false)
+        #expect(linkWithTTY?.systemImage == "arrow.up.forward.app")
+    }
+
+    @Test("A session link belonging to an app other than the resolved host is dropped")
+    func hostOutranksAForeignSessionLink() throws {
+        let link = try #require(
+            SessionLink.claudeDesktop(entrypoint: "claude-desktop", hostSessionID: "local_abc123")
+        )
+
+        let iTermSession = JumpTarget(tty: "/dev/ttys001", host: Self.iTerm, sessionLink: link)
+        #expect(iTermSession?.sessionLink == nil)
+        #expect(iTermSession?.selectsITermTab == true)
+        #expect(iTermSession?.label == "Open in iTerm2")
+
+        let desktopSession = JumpTarget(tty: "/dev/ttys009", host: Self.desktop, sessionLink: link)
+        #expect(desktopSession?.sessionLink == link)
+        #expect(desktopSession?.selectsITermTab == false)
+    }
+
+    @Test(
+        "A tty is valid only as a whole /dev/ttysN path",
+        arguments: [
+            ("/dev/ttys004", true),
+            ("/dev/ttys004\n", false),
+            ("/dev/ttys004\r\n", false),
+            ("/dev/ttys", false),
+            ("/dev/ttys004; say hi", false),
+            ("x/dev/ttys004", false),
+        ]
+    )
+    func ttyValidation(tty: String, isValid: Bool) {
+        #expect(AgentFleetCenter.isValidTTY(tty) == isValid)
+    }
+
+    @Test("A desktop session link is the app's continue URL for a well-formed local session id")
+    func desktopSessionLinkURL() {
+        let link = SessionLink.claudeDesktop(
+            entrypoint: "claude-desktop",
+            hostSessionID: "local_cce223bb-691d-4e02-8410-d293b45e3f76"
+        )
+        #expect(
+            link?.url.absoluteString
+                == "claude://code/continue?session=local_cce223bb-691d-4e02-8410-d293b45e3f76"
+        )
+        #expect(link?.bundleIdentifier == SessionLink.claudeDesktopBundleIdentifier)
+    }
+
+    @Test(
+        "A registry record yields no desktop link unless it names the desktop entrypoint and a local session id",
+        arguments: [
+            ("cli", "local_abc123"),
+            (nil, "local_abc123"),
+            ("claude-desktop", nil),
+            ("claude-desktop", ""),
+            ("claude-desktop", "local_"),
+            ("claude-desktop", "abc123"),
+            ("claude-desktop", "session_01HobQzz7QPaEBQDJdaquwtz"),
+            ("claude-desktop", "local_abc&q=run"),
+            ("claude-desktop", "local_abc/../new"),
+            ("claude-desktop", "local_abc\nlocal_def"),
+            ("claude-desktop", "local_abc\n"),
+            ("claude-desktop", "local_abc\r\n"),
+            ("claude-desktop", "local_abc\u{2028}"),
+            ("claude-desktop", "local_abc\u{301}"),
+            ("claude-desktop", "local_" + String(repeating: "a", count: 65)),
+        ] as [(String?, String?)]
+    )
+    func desktopSessionLinkRejects(entrypoint: String?, hostSessionID: String?) {
+        #expect(
+            SessionLink.claudeDesktop(entrypoint: entrypoint, hostSessionID: hostSessionID) == nil
+        )
+    }
+
     @Test("Nothing reachable yields no jump target, so the shortcut stays unclaimed")
     func noReachableSessionYieldsNoTarget() {
         #expect(SwarmQueuePresentation.pressingSession(announced: nil, queue: []) == nil)

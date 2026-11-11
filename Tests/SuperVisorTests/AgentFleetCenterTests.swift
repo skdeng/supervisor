@@ -64,7 +64,9 @@ struct AgentFleetCenterTests {
             status: String,
             statusUpdatedAt: Date,
             waitingFor: String? = nil,
-            name: String = "test-session"
+            name: String = "test-session",
+            entrypoint: String? = nil,
+            hostSessionID: String? = nil
         ) {
             var record: [String: Any] = [
                 "pid": pid,
@@ -77,6 +79,12 @@ struct AgentFleetCenterTests {
             ]
             if let waitingFor {
                 record["waitingFor"] = waitingFor
+            }
+            if let entrypoint {
+                record["entrypoint"] = entrypoint
+            }
+            if let hostSessionID {
+                record["hostSessionId"] = hostSessionID
             }
             let data = try! JSONSerialization.data(withJSONObject: record)
             try! data.write(
@@ -151,6 +159,60 @@ struct AgentFleetCenterTests {
         harness.monitor.refreshSoon()
         await waitUntil("the finished turn to queue") { !harness.center.queue.isEmpty }
         #expect(harness.center.queue[0].host == desktop)
+    }
+
+    @Test("A desktop-hosted session's registry record gives its entries a link to that session")
+    func desktopSessionCarriesItsLink() async {
+        let harness = Harness()
+        defer { harness.tearDown() }
+        let hostSessionID = "local_cce223bb-691d-4e02-8410-d293b45e3f76"
+
+        harness.write(
+            status: "busy",
+            statusUpdatedAt: Date().addingTimeInterval(-120),
+            entrypoint: "claude-desktop",
+            hostSessionID: hostSessionID
+        )
+        harness.start()
+        await waitUntil("the busy session to load") { !harness.center.workingSessions.isEmpty }
+
+        let expected = "claude://code/continue?session=\(hostSessionID)"
+        let working = harness.center.workingSessions[0]
+        #expect(working.jumpTarget?.sessionLink?.url.absoluteString == expected)
+        #expect(working.jumpTarget?.label == "Open in Claude")
+
+        harness.write(
+            status: "idle",
+            statusUpdatedAt: Date(),
+            entrypoint: "claude-desktop",
+            hostSessionID: hostSessionID
+        )
+        harness.monitor.refreshSoon()
+        await waitUntil("the finished turn to queue") { !harness.center.queue.isEmpty }
+        #expect(harness.center.queue[0].jumpTarget?.sessionLink?.url.absoluteString == expected)
+
+        // The hook's tty lands after the entry is queued; the rewrite keeps the link.
+        harness.send(event: "Stop", lastAssistantMessage: "Done.")
+        await waitUntil("the tty to reach the queued entry") { harness.center.queue.first?.tty != nil }
+        #expect(harness.center.queue[0].jumpTarget?.sessionLink?.url.absoluteString == expected)
+        #expect(harness.center.queue[0].jumpTarget?.selectsITermTab == false)
+    }
+
+    @Test("A terminal-hosted session's registry record gives its entries no session link")
+    func terminalSessionHasNoLink() async {
+        let harness = Harness()
+        defer { harness.tearDown() }
+
+        harness.write(
+            status: "busy",
+            statusUpdatedAt: Date().addingTimeInterval(-120),
+            entrypoint: "cli"
+        )
+        harness.start()
+        await waitUntil("the busy session to load") { !harness.center.workingSessions.isEmpty }
+
+        #expect(harness.center.workingSessions[0].sessionLink == nil)
+        #expect(harness.center.workingSessions[0].jumpTarget == nil)
     }
 
     @Test("A busy session is listed as working, with the tty a hook validated, until it stops")

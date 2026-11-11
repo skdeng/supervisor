@@ -20,6 +20,8 @@ struct FleetSession: Identifiable, Equatable, Sendable {
     /// `worker request`, `sandbox request`, `dialog open`, or `input needed`. Absent in every
     /// other status. This is the only blocked-reason signal that needs no hook.
     let waitingFor: String?
+    /// The host app's link to this session, when the registry record identifies one.
+    var sessionLink: SessionLink? = nil
 
     var id: Int32 { pid }
 
@@ -212,6 +214,8 @@ private struct RegistryRecord: Decodable {
     let status: String
     let statusUpdatedAt: Int64
     let waitingFor: String?
+    let entrypoint: String?
+    let hostSessionID: String?
 
     enum CodingKeys: String, CodingKey {
         case pid
@@ -223,6 +227,8 @@ private struct RegistryRecord: Decodable {
         case status
         case statusUpdatedAt
         case waitingFor
+        case entrypoint
+        case hostSessionID = "hostSessionId"
     }
 
     var session: FleetSession? {
@@ -247,7 +253,11 @@ private struct RegistryRecord: Decodable {
                 timeIntervalSince1970: TimeInterval(statusUpdatedAt) / 1_000
             ),
             kind: kind,
-            waitingFor: Self.sanitizedWaitingFor(waitingFor)
+            waitingFor: Self.sanitizedWaitingFor(waitingFor),
+            sessionLink: SessionLink.claudeDesktop(
+                entrypoint: entrypoint,
+                hostSessionID: hostSessionID
+            )
         )
     }
 

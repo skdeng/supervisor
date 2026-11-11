@@ -2,9 +2,9 @@ import AppKit
 import Carbon
 import Foundation
 
-/// Carries the user to a session: the iTerm2 tab whose session owns a validated terminal device,
-/// or, for a session hosted anywhere else (the Claude desktop app, an editor, another terminal),
-/// that host app brought to the front.
+/// Carries the user to a session: the iTerm2 tab whose session owns a validated terminal device;
+/// the session itself inside a host app that has a link to it (the Claude desktop app); or, for
+/// any other host (an editor, another terminal), that app brought to the front.
 @MainActor
 final class TerminalTeleport {
     private static let scriptSource = """
@@ -47,11 +47,56 @@ final class TerminalTeleport {
         if let tty = target.tty, target.selectsITermTab, teleportToITermTab(tty) {
             return
         }
+        if let link = target.sessionLink {
+            open(link, hostedBy: target.host)
+            return
+        }
         // The tab lookup can miss (a tty iTerm2 no longer owns); the host app is still the
         // nearest place to put the user.
         if let host = target.host {
             activate(host)
         }
+    }
+
+    /// Opens the link in the app it belongs to, so another app registered for the same URL
+    /// scheme never receives it. A failed open still brings that app forward.
+    private func open(_ link: SessionLink, hostedBy host: SessionHost?) {
+        guard let bundleURL = Self.bundleURL(for: link, hostedBy: host) else {
+            AppLog.error(.swarm, "session link has no \(link.appName) app to open in")
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        // LaunchServices calls back off the main thread, so the handler is explicitly
+        // nonisolated rather than inheriting this class's main-actor isolation.
+        let completion: @Sendable (NSRunningApplication?, Error?) -> Void = { _, error in
+            guard let error else { return }
+            AppLog.error(.swarm, "session link open failed: \(error.localizedDescription)")
+            Task { @MainActor in Self.bringForward(bundleURL) }
+        }
+        NSWorkspace.shared.open(
+            [link.url],
+            withApplicationAt: bundleURL,
+            configuration: configuration,
+            completionHandler: completion
+        )
+    }
+
+    /// The link's app: the running host when it is that app, else another running copy, else
+    /// the installed one.
+    private static func bundleURL(for link: SessionLink, hostedBy host: SessionHost?) -> URL? {
+        if let host,
+           let app = NSRunningApplication(processIdentifier: host.processIdentifier),
+           !app.isTerminated,
+           app.bundleIdentifier == link.bundleIdentifier,
+           let bundleURL = app.bundleURL {
+            return bundleURL
+        }
+        let running = NSRunningApplication
+            .runningApplications(withBundleIdentifier: link.bundleIdentifier)
+            .first { !$0.isTerminated }
+        return running?.bundleURL
+            ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: link.bundleIdentifier)
     }
 
     /// Brings the host forward through LaunchServices. `NSRunningApplication.activate` is
@@ -68,6 +113,10 @@ final class TerminalTeleport {
             app.activate()
             return
         }
+        Self.bringForward(bundleURL)
+    }
+
+    private static func bringForward(_ bundleURL: URL) {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         NSWorkspace.shared.openApplication(at: bundleURL, configuration: configuration) { _, error in
