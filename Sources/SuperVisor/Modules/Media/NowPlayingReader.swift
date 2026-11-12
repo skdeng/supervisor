@@ -1,23 +1,18 @@
 import Foundation
 
-/// Reads the system-wide now-playing session — metadata *and* artwork — through an entitled
-/// system interpreter.
+/// Reads every app's now-playing session — metadata, playback state, and artwork — through an
+/// entitled system interpreter, one process spawn per read.
 ///
-/// Since macOS 15.4, `mediaremoted` gates the now-playing *info* read
-/// (`MRMediaRemoteGetNowPlayingInfo`) to callers whose host process is code-signed as an
-/// Apple identity (`com.apple.*`). An ad-hoc-signed app gets a `nil` info dict. Transport
-/// *commands* still work (see `MediaRemoteBridge`).
+/// Since macOS 15.4, `mediaremoted` gates now-playing *info* reads to callers whose host process
+/// is code-signed as an Apple identity (`com.apple.*`). Transport *commands* are admitted from
+/// this app (see `MediaRemoteBridge`).
 ///
 /// The workaround: `/usr/bin/perl` is an Apple-signed host (`com.apple.perl`) that the gate
 /// admits. We have perl `DynaLoader`-load a small precompiled adapter dylib
 /// (`mediaremote_adapter.dylib`, built by `make-app.sh` into the app's Resources) and call
-/// its entry point. The adapter calls the MediaRemote C function from inside the entitled
-/// host and prints a JSON object — including the artwork bytes as base64 — which we parse.
-///
-/// The C-function info dict inlines `kMRMediaRemoteNowPlayingInfoArtworkData`; the alternate
-/// `MRNowPlayingRequest.localNowPlayingItem.nowPlayingInfo` path omits the artwork bytes,
-/// which is why the adapter uses the C function. It is source-agnostic (Music, Spotify,
-/// browser video), the same channel Control Center uses.
+/// its entry point. The adapter reads MediaRemote from inside the admitted host and prints a
+/// JSON object — one entry per session, artwork as base64 — which we parse. The adapter's own
+/// header documents what it reads and why.
 ///
 /// `@unchecked Sendable`: holds only an immutable resolved dylib path, so it is safe to read
 /// from any queue.
@@ -50,7 +45,7 @@ final class NowPlayingReader: @unchecked Sendable {
     }
 
     /// Perl bootstrap that `DynaLoader`-loads the adapter dylib and invokes its entry point.
-    /// `@ARGV[0]` is the dylib path. Failures print `{}` so the caller parses cleanly.
+    /// `@ARGV[0]` is the dylib path. Failures print `{}`, which parses as a read with no answer.
     private static let perlScript = """
     use strict; use warnings; use DynaLoader;
     my $lib = $ARGV[0];
@@ -63,8 +58,9 @@ final class NowPlayingReader: @unchecked Sendable {
     """
 
     /// Run the helper synchronously (call off the main actor) and parse the result. Returns
-    /// `nil` when nothing is playing or the helper fails.
-    func read() -> NowPlaying? {
+    /// `nil` when the helper fails or could not complete its read; a capture with no sessions
+    /// means no app has one.
+    func read() -> NowPlayingCapture? {
         guard let dylibPath else { return nil }
 
         let process = Process()
@@ -90,6 +86,6 @@ final class NowPlayingReader: @unchecked Sendable {
         else {
             return nil
         }
-        return NowPlaying(json: dict)
+        return NowPlayingCapture(json: dict)
     }
 }

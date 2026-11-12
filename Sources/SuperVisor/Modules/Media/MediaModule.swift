@@ -4,10 +4,11 @@ import SwiftUI
 
 /// MusicVisor — the system-wide now-playing module.
 ///
-/// Reads the active media session's metadata through `NowPlayingReader` (an entitled helper,
-/// since macOS gates direct now-playing reads for third-party apps) and exposes it as
-/// `@Published` state. Transport commands still go straight through the private `MediaRemote`
-/// framework via `MediaRemoteBridge` (commands remain permitted). It renders:
+/// Reads every app's media session through an entitled helper (`NowPlayingStream`, with
+/// `NowPlayingReader` for one-off reads — macOS gates direct now-playing reads for third-party
+/// apps), presents the one `NowPlayingSelection` picks, and exposes it as `@Published` state.
+/// Transport commands go straight through the private `MediaRemote` framework via
+/// `MediaRemoteBridge`, addressed to the presented session's app. It renders:
 ///   - **compactLeading**: a tiny album-art thumbnail (left of the notch).
 ///   - **compactTrailing**: an animated audio-bars equalizer (right of the notch).
 ///   - **expandedSection**: large artwork, title/artist, a live scrubber, and transport.
@@ -20,27 +21,38 @@ final class MediaModule: NotchModule, ObservableObject {
     let displayName = "MusicVisor"
     let order = 10
 
-    /// The current now-playing snapshot, or `nil` when nothing is loaded. Drives all UI.
+    /// The presented session, or `nil` when no app has one. Drives the pill and the section.
     @Published private(set) var nowPlaying: NowPlaying?
 
-    /// Decoded artwork for the current track. Cached and decoded exactly once per track so
+    /// Every app's session, in a stable order. Drives the session list.
+    @Published private(set) var sessions: [NowPlaying] = []
+
+    /// Decoded artwork for the presented session. Cached and decoded exactly once per track so
     /// SwiftUI view bodies read a ready `NSImage` instead of re-parsing the artwork bytes on
-    /// every render. `nil` when the current track has no artwork.
+    /// every render. `nil` when the track has no artwork.
     @Published private(set) var artworkImage: NSImage?
+
+    /// Decoded artwork for each session that has any, keyed by `sessionID`.
+    @Published private(set) var sessionArtwork: [String: NSImage] = [:]
 
     /// A vibrant dominant color drawn from the current artwork, used to tint the compact
     /// equalizer bars. Falls back to white when there's no artwork.
     @Published private(set) var artworkAccent: Color = MediaArtworkColor.fallback
 
-    /// Whether transport commands are available (MediaRemote `SendCommand` resolved).
+    /// Whether transport commands can reach the presented session.
     @Published private(set) var canControl = false
 
     /// System audio output route (current device + available devices + switching). Observed by
     /// the expanded media section's output selector.
     let audioOutput = AudioOutputController()
 
+    /// Identifies the session list among the sheet's takeovers.
+    static let sessionsTakeoverID = "media.sessions"
+
     private var context: NotchContext?
     private let bridge: MediaRemoteBridge?
+    /// Which of `sessions` is presented.
+    private var selection = NowPlayingSelection()
     /// Reads now-playing info through the entitled helper; safe to use off the main actor.
     nonisolated let reader = NowPlayingReader()
 
@@ -54,26 +66,37 @@ final class MediaModule: NotchModule, ObservableObject {
     private var pollTask: Task<Void, Never>?
     /// Guards against overlapping helper reads piling up under a burst of notifications.
     private var isReading = false
+    /// When the newest capture applied so far was taken. The stream and a one-shot read run in
+    /// separate helpers, so a capture taken earlier can arrive later; applying it would roll the
+    /// state back, and the stream stays silent until something changes again.
+    private var lastCaptureDate: Date?
     /// Set when a refresh is requested while a read is already in flight. The in-flight read
     /// runs one more read on completion, so a coalesced refresh (e.g. right after a transport
     /// command) is never silently dropped and the UI always reaches the latest state.
     private var pendingRefresh = false
 
-    /// After an optimistic play/pause toggle, the play state we expect the daemon to report,
-    /// and the track it applies to. While set, reads that still report the old state (the
-    /// command hasn't settled yet) are overridden to this value so the button can't flicker
-    /// back. Cleared once a read confirms it, the track changes, or a timeout elapses.
-    private var expectedPlaying: Bool?
-    private var expectedTrackIdentity: String?
+    /// The play state an optimistic play/pause toggle expects the daemon to report for one
+    /// session's track.
+    private struct ExpectedPlaying {
+        let sessionID: String
+        let trackIdentity: String
+        let playing: Bool
+    }
+
+    /// After an optimistic play/pause toggle, the state the daemon is expected to report. While
+    /// set, reads that still report the old state (the command hasn't settled yet) are
+    /// overridden to this value so the button can't flicker back. Cleared once a read confirms
+    /// it, the track changes, or a timeout elapses.
+    private var expectedPlaying: ExpectedPlaying?
     private var expectedPlayingTimeout: Task<Void, Never>?
 
-    /// Last artwork bytes seen, keyed by track identity. MediaRemote transiently drops the
-    /// artwork from a poll (e.g. while scrubbing) even though the track is unchanged; we
-    /// re-inject the cached bytes so the UI artwork never flickers off mid-track.
-    private var cachedArtwork: (identity: String, data: Data)?
-    /// The decoded `NSImage` and its extracted accent color, keyed by track identity so they are
-    /// rebuilt only when the track actually changes (not on every poll/re-render).
-    private var decodedArtwork: (identity: String, image: NSImage, accent: Color)?
+    /// Last artwork bytes seen for each session, with the track they belong to. MediaRemote
+    /// transiently drops the artwork from a read (e.g. while scrubbing) even though the track is
+    /// unchanged; the cached bytes are re-injected so the artwork never flickers off mid-track.
+    private var cachedArtwork: [String: (identity: String, data: Data)] = [:]
+    /// Each session's decoded `NSImage`, with the track it belongs to, so it is rebuilt only
+    /// when the track changes. The accent color is extracted on first presentation.
+    private var decodedArtwork: [String: (identity: String, image: NSImage, accent: Color?)] = [:]
 
     /// Tracks whether a compact contribution is currently shown, so we only ask the engine
     /// to re-lay-out the pill when that visibility actually flips.
@@ -122,8 +145,10 @@ final class MediaModule: NotchModule, ObservableObject {
         case disabled
     }
 
-    /// A pause this module issued, tied to both the now-playing process and track/session state.
+    /// A pause this module issued, tied to the session it paused, that session's process, and
+    /// its track.
     private struct AutoPauseClaim {
+        let sessionID: String
         let processID: pid_t?
         let trackIdentity: String
         var phase: AutoPausePhase
@@ -139,7 +164,6 @@ final class MediaModule: NotchModule, ObservableObject {
 
     func activate(_ context: NotchContext) {
         self.context = context
-        self.canControl = bridge?.canSendCommands ?? false
         audioOutput.start()
 
         // Live spectrum: mirror the tap's state into the shared spectrum center (the compact
@@ -202,8 +226,9 @@ final class MediaModule: NotchModule, ObservableObject {
     }
 
     func deactivate() {
+        SheetTakeoverCenter.shared.dismiss(id: Self.sessionsTakeoverID)
         stream.stop()
-        stream.onSnapshot = nil
+        stream.onCapture = nil
         stream.onUnavailable = nil
         streamActive = false
         stopPolling()
@@ -225,6 +250,18 @@ final class MediaModule: NotchModule, ObservableObject {
         isReading = false
         pendingRefresh = false
         clearExpectedPlaying()
+        // Start the next activation from nothing, so it never shows sessions that have since
+        // ended.
+        selection = NowPlayingSelection()
+        lastCaptureDate = nil
+        cachedArtwork.removeAll()
+        decodedArtwork.removeAll()
+        sessions = []
+        sessionArtwork = [:]
+        nowPlaying = nil
+        artworkImage = nil
+        canControl = false
+        hadCompactContribution = false
         let center = NotificationCenter.default
         for observer in notificationObservers {
             center.removeObserver(observer)
@@ -257,8 +294,8 @@ final class MediaModule: NotchModule, ObservableObject {
 
     // MARK: Refresh pipeline
 
-    /// Read the now-playing snapshot via the entitled helper off the main actor, then publish
-    /// on the main actor. Coalesced so a burst of notifications can't stack up helper runs.
+    /// Read every session via the entitled helper off the main actor, then publish on the main
+    /// actor. Coalesced so a burst of notifications can't stack up helper runs.
     func refresh() {
         guard !isReading else {
             // A read is already running; remember to read again when it finishes so this
@@ -269,87 +306,127 @@ final class MediaModule: NotchModule, ObservableObject {
         isReading = true
         pendingRefresh = false
         Task.detached(priority: .utility) { [weak self, reader] in
-            let snapshot = reader.read()
-            await self?.finishRead(snapshot)
+            let capture = reader.read()
+            await self?.finishRead(capture)
         }
     }
 
-    private func finishRead(_ snapshot: NowPlaying?) {
+    /// Apply a capture. A read that produced none (`nil`), or one taken before a capture already
+    /// applied, leaves the presented state as it is.
+    private func finishRead(_ capture: NowPlayingCapture?) {
         isReading = false
-        var reconciled = snapshot.map(reconcileArtwork)
+        defer {
+            // Honor a refresh that was requested while this read was in flight.
+            if pendingRefresh {
+                pendingRefresh = false
+                refresh()
+            }
+        }
+        guard let capture else { return }
+        if let capturedAt = capture.capturedAt {
+            if let lastCaptureDate, capturedAt < lastCaptureDate { return }
+            lastCaptureDate = capturedAt
+        }
+        var sessions = reconcileArtwork(capture.sessions)
 
         // While an optimistic play/pause is pending, don't let a not-yet-settled read flip the
         // UI back: hold the expected state until a read confirms it (or the track changes).
         if let expected = expectedPlaying {
-            if let read = reconciled, read.trackIdentity == expectedTrackIdentity {
-                if read.isPlaying == expected {
+            if let index = sessions.firstIndex(where: {
+                $0.sessionID == expected.sessionID && $0.trackIdentity == expected.trackIdentity
+            }) {
+                if sessions[index].isPlaying == expected.playing {
                     clearExpectedPlaying()           // daemon caught up — accept the read as-is
                 } else {
-                    var held = read                  // stale read — keep the optimistic state
-                    held.setPlaying(expected)
-                    reconciled = held
+                    sessions[index].setPlaying(expected.playing)   // stale read — hold it
                 }
             } else {
                 clearExpectedPlaying()               // track changed / stopped — expectation void
             }
         }
 
-        nowPlaying = reconciled
-        reconcileAutoPauseClaim(with: reconciled)
-        updateArtwork(for: reconciled)
-        reconcileCompactVisibility()
-        reconcileSpectrumTap()
-        // Honor a refresh that was requested while this read was in flight.
-        if pendingRefresh {
-            pendingRefresh = false
-            refresh()
-        }
+        present(sessions)
     }
 
-    /// Begin holding an optimistic play state for the given track until a read confirms it.
-    private func setExpectedPlaying(_ playing: Bool, track: String?) {
-        expectedPlaying = playing
-        expectedTrackIdentity = track
+    /// Publish `sessions` and whichever of them the selection presents.
+    private func present(_ sessions: [NowPlaying]) {
+        let chosen = selection.update(with: sessions)
+        if chosen?.sessionID != nowPlaying?.sessionID {
+            AppLog.notice(
+                .media,
+                "presented session -> \(chosen?.app?.bundleIdentifier ?? (chosen == nil ? "none" : "elected")) of \(sessions.count)"
+            )
+        }
+        if self.sessions != sessions { self.sessions = sessions }
+        nowPlaying = chosen
+        let controllable = chosen.map { bridge?.canSend(to: $0) ?? false } ?? false
+        if canControl != controllable { canControl = controllable }
+        reconcileAutoPauseClaim(with: sessions)
+        updateArtwork(for: sessions, presented: chosen)
+        reconcileCompactVisibility()
+        reconcileSpectrumTap()
+    }
+
+    /// Present the session the user picked, and keep presenting it until it ends or a different
+    /// session starts playing.
+    func select(sessionID: String) {
+        selection.pin(sessionID)
+        present(sessions)
+    }
+
+    /// Begin holding an optimistic play state for `session`'s track until a read confirms it.
+    private func setExpectedPlaying(_ playing: Bool, for session: NowPlaying) {
+        expectedPlaying = ExpectedPlaying(
+            sessionID: session.sessionID, trackIdentity: session.trackIdentity, playing: playing)
         expectedPlayingTimeout?.cancel()
         expectedPlayingTimeout = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
             guard let self, !Task.isCancelled else { return }
+            // No read confirmed the toggle, so the command may not have taken effect. The
+            // stream reports only changes, so the real state has to be read back.
             self.clearExpectedPlaying()
+            self.refresh()
         }
     }
 
     private func clearExpectedPlaying() {
         expectedPlaying = nil
-        expectedTrackIdentity = nil
         expectedPlayingTimeout?.cancel()
         expectedPlayingTimeout = nil
     }
 
-    /// Decode the artwork once per track and cache it, so views read a ready `NSImage`. The
-    /// bytes are stable per track (see `reconcileArtwork`), so this is a cache hit across the
-    /// repeated polls of a single track and only re-decodes when the track changes.
-    private func updateArtwork(for snapshot: NowPlaying?) {
-        guard let snapshot, let data = snapshot.artworkData, !data.isEmpty else {
-            decodedArtwork = nil
+    /// Decode each session's artwork once per track and cache it, so views read a ready
+    /// `NSImage`. The bytes are stable per track (see `reconcileArtwork`), so this is a cache hit
+    /// across the repeated reads of a track and only re-decodes when a track changes. The
+    /// dominant color is extracted only for a session that gets presented.
+    private func updateArtwork(for sessions: [NowPlaying], presented: NowPlaying?) {
+        var decoded: [String: (identity: String, image: NSImage, accent: Color?)] = [:]
+        for session in sessions {
+            guard let data = session.artworkData, !data.isEmpty else { continue }
+            if let cached = decodedArtwork[session.sessionID], cached.identity == session.trackIdentity {
+                decoded[session.sessionID] = cached
+            } else if let image = MediaArtworkDecoder.image(from: data) {
+                decoded[session.sessionID] = (session.trackIdentity, image, nil)
+            }
+        }
+
+        if let presented, var entry = decoded[presented.sessionID] {
+            let accent = entry.accent
+                ?? MediaArtworkColor.dominant(of: entry.image)
+                ?? MediaArtworkColor.fallback
+            entry.accent = accent
+            decoded[presented.sessionID] = entry
+            if artworkImage !== entry.image { artworkImage = entry.image }
+            setAccent(accent)
+        } else {
             if artworkImage != nil { artworkImage = nil }
             setAccent(MediaArtworkColor.fallback)
-            return
         }
-        if let cached = decodedArtwork, cached.identity == snapshot.trackIdentity {
-            if artworkImage !== cached.image { artworkImage = cached.image }
-            setAccent(cached.accent)
-            return
-        }
-        guard let image = NSImage(data: data) else {
-            decodedArtwork = nil
-            if artworkImage != nil { artworkImage = nil }
-            setAccent(MediaArtworkColor.fallback)
-            return
-        }
-        let accent = MediaArtworkColor.dominant(of: image) ?? MediaArtworkColor.fallback
-        decodedArtwork = (snapshot.trackIdentity, image, accent)
-        if artworkImage !== image { artworkImage = image }
-        setAccent(accent)
+        decodedArtwork = decoded
+
+        let unchanged = decoded.count == sessionArtwork.count
+            && decoded.allSatisfy { sessionArtwork[$0.key] === $0.value.image }
+        if !unchanged { sessionArtwork = decoded.mapValues(\.image) }
     }
 
     private func setAccent(_ color: Color) {
@@ -445,11 +522,8 @@ final class MediaModule: NotchModule, ObservableObject {
     /// the Music app, hardware keys) from one long-lived helper that pushes snapshots as they
     /// change, so no process is spawned per update.
     private func startStreaming() {
-        stream.onSnapshot = { [weak self] snapshot in
-            guard let self else { return }
-            // A snapshot arriving from the stream settles any read that was in flight.
-            self.isReading = false
-            self.finishRead(snapshot)
+        stream.onCapture = { [weak self] capture in
+            self?.finishRead(capture)
         }
         stream.onUnavailable = { [weak self] in
             guard let self else { return }
@@ -491,19 +565,24 @@ final class MediaModule: NotchModule, ObservableObject {
         pollTask = nil
     }
 
-    /// Re-inject cached artwork when the daemon transiently drops it from a poll, and refresh
-    /// the cache whenever fresh artwork arrives. Keyed by track identity so artwork never
-    /// leaks across tracks.
-    private func reconcileArtwork(_ snapshot: NowPlaying) -> NowPlaying {
-        var snapshot = snapshot
-        if let data = snapshot.artworkData, !data.isEmpty {
-            cachedArtwork = (snapshot.trackIdentity, data)
-        } else if let cached = cachedArtwork, cached.identity == snapshot.trackIdentity {
-            snapshot.artworkData = cached.data
-        } else {
-            cachedArtwork = nil
+    /// Re-inject cached artwork into a session whose read transiently dropped it, and refresh
+    /// the cache whenever fresh artwork arrives. Each entry is tied to its track, so artwork
+    /// never leaks across tracks, and entries for sessions that ended are dropped.
+    private func reconcileArtwork(_ sessions: [NowPlaying]) -> [NowPlaying] {
+        var cache: [String: (identity: String, data: Data)] = [:]
+        let reconciled = sessions.map { session -> NowPlaying in
+            var session = session
+            if let data = session.artworkData, !data.isEmpty {
+                cache[session.sessionID] = (session.trackIdentity, data)
+            } else if let cached = cachedArtwork[session.sessionID],
+                      cached.identity == session.trackIdentity {
+                session.artworkData = cached.data
+                cache[session.sessionID] = cached
+            }
+            return session
         }
-        return snapshot
+        cachedArtwork = cache
+        return reconciled
     }
 
     /// Tell the engine to re-lay-out the pill only when our compact contribution's presence
@@ -566,17 +645,33 @@ final class MediaModule: NotchModule, ObservableObject {
         }
 
         let requestID = UUID()
+        let sessionID = snapshot.sessionID
         let trackIdentity = snapshot.trackIdentity
         autoPauseRequestID = requestID
-        bridge.fetchNowPlayingApplicationPID(on: .main) { [weak self] processID in
+        fetchProcessID(of: snapshot, using: bridge) { [weak self] processID in
+            self?.completeAutoPauseRequest(
+                requestID: requestID,
+                processID: processID,
+                sessionID: sessionID,
+                trackIdentity: trackIdentity
+            )
+        }
+    }
+
+    /// The process behind `session`: its app's when the session names one, else whichever app
+    /// macOS elects as now-playing, which takes a daemon round trip to learn.
+    private func fetchProcessID(
+        of session: NowPlaying,
+        using bridge: MediaRemoteBridge,
+        _ completion: @escaping @MainActor (pid_t?) -> Void
+    ) {
+        if let app = session.app {
+            completion(app.processID)
+            return
+        }
+        bridge.fetchNowPlayingApplicationPID(on: .main) { processID in
             DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    self?.completeAutoPauseRequest(
-                        requestID: requestID,
-                        processID: processID,
-                        trackIdentity: trackIdentity
-                    )
-                }
+                MainActor.assumeIsolated { completion(processID) }
             }
         }
     }
@@ -584,13 +679,14 @@ final class MediaModule: NotchModule, ObservableObject {
     private func completeAutoPauseRequest(
         requestID: UUID,
         processID: pid_t?,
+        sessionID: String,
         trackIdentity: String
     ) {
         guard autoPauseRequestID == requestID,
               SettingsStore.shared.callAutoPausesMusic,
               callMonitor.isCallLikely,
               let bridge,
-              let snapshot = nowPlaying,
+              let snapshot = session(sessionID),
               snapshot.trackIdentity == trackIdentity,
               snapshot.isPlaying else {
             if autoPauseRequestID == requestID {
@@ -601,8 +697,9 @@ final class MediaModule: NotchModule, ObservableObject {
 
         autoPauseRequestID = nil
         clearExpectedPlaying()
-        guard bridge.send(.pause) else { return }
+        guard bridge.send(.pause, to: snapshot) else { return }
         autoPauseClaim = AutoPauseClaim(
+            sessionID: sessionID,
             processID: processID,
             trackIdentity: trackIdentity,
             phase: .awaitingPause
@@ -621,10 +718,15 @@ final class MediaModule: NotchModule, ObservableObject {
         refreshAfterTransportCommand()
     }
 
-    /// Keep the claim only while its original now-playing session reaches and remains paused.
-    private func reconcileAutoPauseClaim(with snapshot: NowPlaying?) {
+    private func session(_ sessionID: String) -> NowPlaying? {
+        sessions.first { $0.sessionID == sessionID }
+    }
+
+    /// Keep the claim only while the session it paused reaches and remains paused on the same
+    /// track. The claim follows that session, whichever one is presented.
+    private func reconcileAutoPauseClaim(with sessions: [NowPlaying]) {
         guard var claim = autoPauseClaim else { return }
-        guard let snapshot,
+        guard let snapshot = sessions.first(where: { $0.sessionID == claim.sessionID }),
               snapshot.trackIdentity == claim.trackIdentity else {
             clearAutoPauseClaim(droppedBecause: .trackChange)
             return
@@ -652,26 +754,22 @@ final class MediaModule: NotchModule, ObservableObject {
 
         guard let claim = autoPauseClaim,
               claim.phase == .paused,
-              let snapshot = nowPlaying,
+              let snapshot = session(claim.sessionID),
               snapshot.trackIdentity == claim.trackIdentity,
               !snapshot.isPlaying,
               let bridge else {
-            clearAutoPauseClaim(droppedBecause: autoPauseClaimDropReason(for: nowPlaying))
+            clearAutoPauseClaim(droppedBecause: autoPauseClaimDropReason())
             return
         }
 
         let requestID = UUID()
         autoPauseRequestID = requestID
-        bridge.fetchNowPlayingApplicationPID(on: .main) { [weak self] processID in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    self?.completeAutoResumeRequest(
-                        requestID: requestID,
-                        processID: processID,
-                        bridge: bridge
-                    )
-                }
-            }
+        fetchProcessID(of: snapshot, using: bridge) { [weak self] processID in
+            self?.completeAutoResumeRequest(
+                requestID: requestID,
+                processID: processID,
+                bridge: bridge
+            )
         }
     }
 
@@ -686,32 +784,28 @@ final class MediaModule: NotchModule, ObservableObject {
               let claim = autoPauseClaim,
               claim.phase == .paused,
               claim.processID == processID,
-              let snapshot = nowPlaying,
+              let snapshot = session(claim.sessionID),
               snapshot.trackIdentity == claim.trackIdentity,
               !snapshot.isPlaying else {
             if autoPauseRequestID == requestID {
-                clearAutoPauseClaim(
-                    droppedBecause: autoPauseClaimDropReason(for: nowPlaying)
-                )
+                clearAutoPauseClaim(droppedBecause: autoPauseClaimDropReason())
             }
             return
         }
 
         clearAutoPauseClaim()
-        if bridge.send(.play) {
+        if bridge.send(.play, to: snapshot) {
             AppLog.notice(.media, "auto-resume issued")
             refreshAfterTransportCommand()
         }
     }
 
-    private func autoPauseClaimDropReason(
-        for snapshot: NowPlaying?
-    ) -> AutoPauseClaimDropReason {
+    private func autoPauseClaimDropReason() -> AutoPauseClaimDropReason {
         if !SettingsStore.shared.callAutoPausesMusic {
             return .disabled
         }
         guard let claim = autoPauseClaim,
-              let snapshot,
+              let snapshot = session(claim.sessionID),
               snapshot.trackIdentity == claim.trackIdentity else {
             return .trackChange
         }
@@ -733,12 +827,12 @@ final class MediaModule: NotchModule, ObservableObject {
 
     // MARK: Transport commands
 
-    /// Send a transport command (still permitted via MediaRemote), then refresh shortly after
-    /// so the UI reflects the new state even before a change notification arrives.
-    private func sendCommand(_ command: MediaRemoteBridge.Command) {
+    /// Send a transport command to `session`, then refresh shortly after so the UI reflects the
+    /// new state even before the helper reports it.
+    private func sendCommand(_ command: MediaRemoteBridge.Command, to session: NowPlaying) {
         guard let bridge else { return }
         Task.detached(priority: .userInitiated) { [weak self, bridge] in
-            bridge.send(command)
+            bridge.send(command, to: session)
             try? await Task.sleep(for: .milliseconds(250))
             await self?.refresh()
         }
@@ -752,31 +846,48 @@ final class MediaModule: NotchModule, ObservableObject {
         }
     }
 
+    /// Whether a play/pause can reach `session`.
+    func canToggle(_ session: NowPlaying) -> Bool {
+        bridge?.canSend(to: session) ?? false
+    }
+
+    /// Toggle the presented session.
     func togglePlayPause() {
-        if callMonitor.isCallLikely {
+        guard let nowPlaying else { return }
+        togglePlayPause(sessionID: nowPlaying.sessionID)
+    }
+
+    /// Toggle one session, presented or not.
+    func togglePlayPause(sessionID: String) {
+        guard let index = sessions.firstIndex(where: { $0.sessionID == sessionID }) else { return }
+        if callMonitor.isCallLikely, autoPauseClaim?.sessionID == sessionID {
             clearAutoPauseClaim(droppedBecause: .manualChange)
         }
-        // Optimistically flip the play state so the button, scrubber, and poll respond
+        // Optimistically flip the play state so the button, scrubber, and selection respond
         // instantly; the post-command read reconciles with the daemon's actual state.
-        if var snapshot = nowPlaying {
-            let target = !snapshot.isPlaying
-            snapshot.setPlaying(target)
-            nowPlaying = snapshot
-            setExpectedPlaying(target, track: snapshot.trackIdentity)
-        }
-        sendCommand(.togglePlayPause)
+        var updated = sessions
+        let target = !updated[index].isPlaying
+        updated[index].setPlaying(target)
+        setExpectedPlaying(target, for: updated[index])
+        present(updated)
+        sendCommand(.togglePlayPause, to: updated[index])
     }
 
     // Track changes invalidate any pending play/pause expectation (new track, new state).
     func nextTrack() {
-        clearExpectedPlaying()
-        clearAutoPauseClaim(droppedBecause: .trackChange)
-        sendCommand(.nextTrack)
+        skip(.nextTrack)
     }
 
     func previousTrack() {
+        skip(.previousTrack)
+    }
+
+    private func skip(_ command: MediaRemoteBridge.Command) {
+        guard let nowPlaying else { return }
         clearExpectedPlaying()
-        clearAutoPauseClaim(droppedBecause: .trackChange)
-        sendCommand(.previousTrack)
+        if autoPauseClaim?.sessionID == nowPlaying.sessionID {
+            clearAutoPauseClaim(droppedBecause: .trackChange)
+        }
+        sendCommand(command, to: nowPlaying)
     }
 }

@@ -1,11 +1,50 @@
 import Foundation
 
-/// Immutable snapshot of the system-wide now-playing session, parsed from the
-/// MediaRemote info dict. A `nil` `NowPlaying` means no track is loaded in any app.
+/// The app a now-playing session belongs to, as MediaRemote identifies it.
+struct NowPlayingApp: Hashable, Sendable {
+    let bundleIdentifier: String
+    let processID: Int32
+}
+
+/// One read of every app's now-playing session, as the entitled helper reported it.
+struct NowPlayingCapture: Sendable {
+    /// Sessions in a stable order (app name, then process), so a list of them does not
+    /// reshuffle between captures.
+    let sessions: [NowPlaying]
+    /// When the helper took the read. Orders captures that arrive from two helpers at once.
+    let capturedAt: Date?
+
+    /// Sessions past this count are ignored; the helper applies the same bound.
+    static let maxSessions = 8
+
+    /// Parse one line of the helper's output — `{"capturedAt": …, "sessions": [...]}`. Returns
+    /// `nil` when the line carries no session list, which is how the helper reports a read that
+    /// could not be completed; that is distinct from an empty list, which means no app has a
+    /// session. Unusable entries are dropped, and a second entry for a session already seen is
+    /// ignored.
+    init?(json: [String: Any]) {
+        guard let entries = json["sessions"] as? [Any] else { return nil }
+        var seen = Set<String>()
+        self.sessions = entries
+            .compactMap { ($0 as? [String: Any]).flatMap(NowPlaying.init(json:)) }
+            .filter { seen.insert($0.sessionID).inserted }
+            .prefix(Self.maxSessions)
+            .sorted { first, second in
+                let firstName = (first.appName ?? first.app?.bundleIdentifier ?? "").lowercased()
+                let secondName = (second.appName ?? second.app?.bundleIdentifier ?? "").lowercased()
+                if firstName != secondName { return firstName < secondName }
+                return first.sessionID < second.sessionID
+            }
+        self.capturedAt = (json["capturedAt"] as? Double)
+            .flatMap { $0.isFinite && $0 > 0 ? Date(timeIntervalSince1970: $0) : nil }
+    }
+}
+
+/// Immutable snapshot of one app's now-playing session, parsed from the entitled helper's JSON.
+/// Several apps can hold a session at once; `NowPlayingSelection` decides which one is shown.
 ///
 /// `Sendable` so a snapshot parsed on the background work queue can hop to the main
-/// actor for publishing. All stored members are value types (`String`, `Data`,
-/// `TimeInterval`, `Bool`, `Date`).
+/// actor for publishing. All stored members are value types.
 struct NowPlaying: Equatable, Sendable {
     var title: String
     var artist: String?
@@ -14,8 +53,23 @@ struct NowPlaying: Equatable, Sendable {
     var artworkData: Data?
     /// Total track length in seconds (`0` when unknown).
     var duration: TimeInterval
-    /// Whether the session is actively playing (playback rate > 0).
+    /// Whether the session is actively playing.
     var isPlaying: Bool
+
+    /// The app that owns the session. `nil` when the helper could only read the app macOS
+    /// elects as now-playing, which it reports without an identity.
+    var app: NowPlayingApp?
+    /// The owning app's display name, e.g. "Spotify".
+    var appName: String?
+    /// Whether macOS currently elects this session's app as the system now-playing app.
+    var isElected: Bool
+
+    /// Stable identity of the session across snapshots: its app, or a fixed value for the
+    /// identity-less elected session.
+    var sessionID: String {
+        guard let app else { return "elected" }
+        return "\(app.bundleIdentifier):\(app.processID)"
+    }
 
     /// Stable identity for the current track, used to reuse cached artwork across the
     /// daemon's transient artwork drops (e.g. while scrubbing). Prefers MediaRemote's artwork
@@ -29,6 +83,10 @@ struct NowPlaying: Equatable, Sendable {
     private var elapsedTimestamp: Date
     /// Playback rate (1.0 == normal speed, 0 == paused).
     private var playbackRate: Double
+
+    /// When the session's position was last sampled. An app re-samples on play, pause, and seek,
+    /// so the latest sample marks the session touched most recently.
+    var positionSampledAt: Date { elapsedTimestamp }
 
     /// The live elapsed position, extrapolated from the sampled position using the
     /// playback rate and the time since the sample was taken. Clamped to `[0, duration]`.
@@ -68,49 +126,30 @@ struct NowPlaying: Equatable, Sendable {
             && lhs.baseElapsed == rhs.baseElapsed
             && lhs.playbackRate == rhs.playbackRate
             && lhs.artworkData == rhs.artworkData
+            && lhs.app == rhs.app
+            && lhs.appName == rhs.appName
+            && lhs.isElected == rhs.isElected
     }
 
-    /// Parse a MediaRemote info dict into a `NowPlaying`. Returns `nil` when the dict has
-    /// no usable title (no active session).
-    init?(infoDict info: [String: Any], isPlayingHint: Bool?) {
-        guard let title = info[MediaRemoteBridge.InfoKey.title] as? String,
-              !title.isEmpty else {
-            return nil
-        }
-        self.title = title
-        self.artist = (info[MediaRemoteBridge.InfoKey.artist] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        self.album = (info[MediaRemoteBridge.InfoKey.album] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        self.artworkData = info[MediaRemoteBridge.InfoKey.artworkData] as? Data
-        self.trackIdentity = Self.makeIdentity(
-            artworkIdentifier: info[MediaRemoteBridge.InfoKey.artworkIdentifier] as? String,
-            title: title, artist: self.artist, album: self.album)
+    /// Longest title/artist/album/app name kept. Another app sets these and they reach views;
+    /// the helper applies the same bound.
+    static let maxTextLength = 300
 
-        self.duration = (info[MediaRemoteBridge.InfoKey.duration] as? NSNumber)?.doubleValue ?? 0
-        self.baseElapsed = (info[MediaRemoteBridge.InfoKey.elapsedTime] as? NSNumber)?.doubleValue ?? 0
-
-        let rate = (info[MediaRemoteBridge.InfoKey.playbackRate] as? NSNumber)?.doubleValue ?? 0
-        self.playbackRate = rate
-
-        // MediaRemote stamps when elapsed was measured; honor it so the scrubber stays
-        // accurate even if the info dict was fetched a moment ago. Fall back to now.
-        if let stamp = info[MediaRemoteBridge.InfoKey.timestamp] as? Date {
-            self.elapsedTimestamp = stamp
-        } else {
-            self.elapsedTimestamp = Date()
-        }
-
-        // Prefer the explicit isPlaying signal; otherwise infer from the playback rate.
-        self.isPlaying = isPlayingHint ?? (rate > 0)
+    /// A non-empty string field, cut to `maxTextLength`.
+    private static func text(_ value: Any?) -> String? {
+        guard let string = value as? String, !string.isEmpty else { return nil }
+        return String(string.prefix(maxTextLength))
     }
 
-    /// Parse the JSON emitted by `NowPlayingReader`'s entitled helper. Returns `nil` when no
-    /// usable title is present (no active session). Numbers arrive as `NSNumber`, artwork as
-    /// a base64 string.
+    /// Parse one session object from the helper's JSON. Returns `nil` when it has no usable
+    /// title, or names an app with a malformed identity — that identity addresses transport
+    /// commands, so such a session is dropped. Numbers arrive as `NSNumber`, artwork as a base64
+    /// string.
     init?(json: [String: Any]) {
-        guard let title = json["title"] as? String, !title.isEmpty else { return nil }
+        guard let title = Self.text(json["title"]) else { return nil }
         self.title = title
-        self.artist = (json["artist"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        self.album = (json["album"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        self.artist = Self.text(json["artist"])
+        self.album = Self.text(json["album"])
 
         if let b64 = json["artwork"] as? String, !b64.isEmpty {
             self.artworkData = Data(base64Encoded: b64)
@@ -137,7 +176,21 @@ struct NowPlaying: Equatable, Sendable {
         } else {
             self.elapsedTimestamp = Date()
         }
-        self.isPlaying = rate > 0
+        self.isPlaying = (json["playing"] as? Bool) ?? (rate > 0)
+
+        if json["bundleIdentifier"] != nil {
+            guard let bundleIdentifier = json["bundleIdentifier"] as? String,
+                  !bundleIdentifier.isEmpty, bundleIdentifier.utf8.count <= 255,
+                  let processID = json["processIdentifier"] as? Int,
+                  processID > 0, processID <= Int(Int32.max) else {
+                return nil
+            }
+            self.app = NowPlayingApp(bundleIdentifier: bundleIdentifier, processID: Int32(processID))
+        } else {
+            self.app = nil
+        }
+        self.appName = Self.text(json["appName"])
+        self.isElected = (json["elected"] as? Bool) ?? false
     }
 
     /// Build a stable per-track identity. Prefers MediaRemote's artwork identifier (stable

@@ -133,6 +133,8 @@ A single morphing surface, driven by a small state machine, that modules feed co
   themselves**: each keeps its own list short by default and folds the remainder behind a count
   (SwarmVisor's **N idle**, the agenda's **N later** and **N dismissed**), because a fixed budget
   spent by whoever renders first is what overflows in the first place.
+  A takeover raised through `SheetTakeoverCenter` (see Shared Services) replaces the section stack
+  while it is presented.
 
 ## Geometry
 
@@ -211,32 +213,60 @@ Private system frameworks (MediaRemote, DisplayServices, etc.) are reached with 
 or custom module map (both break SPM builds). Match the C signature exactly; guard every
 `dlopen`/`dlsym` and degrade gracefully when a symbol is missing.
 
-## Now-Playing: the macOS 15.4+ gate (non-obvious)
+## Now-Playing: the macOS 15.4+ gate and per-app sessions (non-obvious)
 
-Since macOS 15.4, `mediaremoted` gates the now-playing **info read**
-(`MRMediaRemoteGetNowPlayingInfo`, the only path that inlines artwork bytes) to callers whose
-**host process** is Apple-signed (`com.apple.*`). An ad-hoc-signed third-party app gets a `nil`
-info dict. Workaround:
+Since macOS 15.4, `mediaremoted` gates now-playing **info reads** to callers whose **host
+process** is Apple-signed (`com.apple.*`). An ad-hoc-signed third-party app gets a `nil` dict from
+`MRMediaRemoteGetNowPlayingInfo` and "Operation not permitted" from `MRNowPlayingRequest`.
+Workaround:
 
 - `make-app.sh` compiles **`Sources/MediaRemoteAdapter/mediaremote_adapter.m`** into
   `mediaremote_adapter.dylib`, shipped in the bundle's `Resources/`. It exports two entry points.
+- **It reads every app's session, never just the elected one.** macOS elects ONE app as "the"
+  now-playing app, and that election lags behind what is audible: a video started in a browser
+  can play for minutes while a paused music app stays elected. The helper therefore lists every
+  now-playing client (`MRMediaRemoteGetNowPlayingClients`, the list Control Center renders) and
+  asks each for its playback state, info dict, and artwork through `MRNowPlayingRequest`,
+  printing `{"capturedAt":…,"sessions":[…]}`. It caches each session's artwork per track, so a
+  steady-state re-read moves no image bytes, and stops asking a track for artwork after five
+  empty answers. A capture missing any client's state or info reply by its deadline is
+  **incomplete and not reported** (the one-shot prints `{}`; the stream skips it, reporting a
+  partial one only after two in a row) — otherwise a slow reply would make a session vanish for
+  one read. The Swift side keeps its state on an unanswered read and ignores a capture older
+  than the one it last applied, since the stream and a one-shot read are separate helpers. When
+  the per-app surface cannot be resolved, or yields no session, the helper reads the elected app
+  alone (`MRMediaRemoteGetNowPlayingInfo`), reported as a session with no app identity. `MRMediaRemoteGetActivePlayerPathsForOrigin` is **not** a substitute for the client
+  list: it returns only the elected app's path.
+- **Which session the notch presents** is `NowPlayingSelection` (pure, in `Modules/Media`): a
+  session that starts playing takes over; the presented one stays while it plays, yields to one
+  still playing once it stops, and stays put when nothing plays; a session picked from the
+  session list is pinned until it ends or a different session starts playing. The election is
+  only the cold-start tie-break.
 - **Streaming (the live path).** `Modules/Media/NowPlayingStream.swift` spawns **`/usr/bin/perl`**
   (Apple-signed, `com.apple.perl`, which the gate admits) **once**, has it `DynaLoader`-load the
   dylib and enter `run_mediaremote_adapter_stream`, which never returns: it prints one JSON object
-  per line (artwork as base64) as the now-playing state changes. Inside that entitled host it both
-  observes MediaRemote's change notifications and re-reads on a timer (2 s playing / 4 s paused),
-  because the notifications are silent for some players. It emits only when the state actually
-  moved — `elapsed`/`timestampEpoch` advance on every daemon re-sample, so they are compared
-  against where the previous sample predicted playback would be, which detects a seek and ignores
-  drift. It exits on stdin EOF, so it can never outlive the app. The Swift side respawns it with a
+  per line (artwork as base64) as any session changes. Inside that entitled host it both
+  observes MediaRemote's change notifications (the elected app's and the per-player ones) and
+  re-reads on a timer (2 s while any session plays / 4 s otherwise), because the notifications
+  are silent for some players. It emits only when the state actually moved —
+  `elapsed`/`timestampEpoch` advance on every daemon re-sample, so they are compared against
+  where the previous sample predicted playback would be, which detects a seek and ignores drift.
+  It exits on stdin EOF, so it can never outlive the app. The Swift side respawns it with a
   widening backoff and, after 4 failures in 60 s, falls back permanently to the one-shot reader.
 - **One-shot.** `Modules/Media/NowPlayingReader.swift` spawns the same helper per read and calls
   `run_mediaremote_adapter`, which prints a single JSON object and exits. Used for user-initiated
   refreshes (right after a transport command) and as the fallback poll. Each call costs a process
   spawn (~10 ms CPU), which is why it is not the steady-state path.
 - **Transport commands** (play/pause/skip) are *not* gated and go direct via
-  `Modules/Media/MediaRemoteBridge.swift` (the `dlopen`/`dlsym` bridge). The block-typed callbacks
-  there are `@convention(block)`, not `@convention(c)`.
+  `Modules/Media/MediaRemoteBridge.swift`, addressed to the presented session's app: the bridge
+  builds an `MRPlayerPath` for that app (a nil player addresses the app's own now-playing player)
+  and sends through `MRNowPlayingRequest`. The untargeted `MRMediaRemoteSendCommand` reaches only
+  the elected app, so it serves only a session that carries no app identity. The per-app surface
+  is Objective-C classes, called through each method's implementation pointer cast to its exact
+  C signature; the block-typed callbacks are `@convention(block)`, not `@convention(c)`.
+- **Playback state read from this app's own process is wrong, not refused.**
+  `MRNowPlayingRequest.requestPlaybackState…` returns "paused" with no error for a session the
+  entitled helper reports as playing. Every read — state included — goes through the helper.
 
 ## Untrusted Input
 
@@ -253,7 +283,13 @@ sink. Preserve these guards when touching the relevant code:
   (which reaches command execution via `-TT`).
 - **Now-playing metadata** is set by any other running app. `mediaremote_adapter.m` drops non-finite
   numbers and validates the payload (`isValidJSONObject`) before serializing, so a malicious source
-  cannot abort the entitled perl helper with an uncaught exception.
+  cannot abort the entitled perl helper with an uncaught exception. It reads at most 8 sessions
+  (of at most 32 listed clients), drops artwork over 3 MiB, and cuts each text field to 300
+  UTF-16 units, which bounds a line to what `NowPlayingStream` buffers; the Swift parser applies
+  the same session and text caps and drops a session whose app identity is malformed, since that
+  identity addresses transport commands. `MediaArtworkDecoder` reads an image's pixel
+  dimensions from its header, refuses one over 64 million pixels, and decodes the rest straight
+  to a thumbnail, so a small file declaring a huge canvas is never decoded at full size.
 - **Agent hook socket payloads** are arbitrary local input. Each connection is size-capped and
   defensively parsed, and a tty must match `\A/dev/ttys[0-9]+\z` before it is stored or reaches
   AppleScript interpolation. The text fields (`message`, `last_assistant_message`,
@@ -324,18 +360,23 @@ names below are the code paths.
   (`UI/BeatAuraView`, layered behind the morphing surface in `NotchRootView`) glows around the
   notch in the artwork color, following the music's bass envelope. Both are toggleable in
   Settings (`media.trueSpectrum`, `media.beatAura`). Expanded: large artwork, title/artist, a live
-  scrubber, transport, and an **audio-output device switcher**. Info streams from one long-lived
-  perl adapter (`NowPlayingStream`), which pushes a snapshot only when the state changes; commands
-  via `MediaRemoteBridge`. While `calls.autoPauseMusic` is on, a detected call pauses active
-  playback and resumes it only when the automatic pause claim still owns the same paused
-  now-playing session.
+  scrubber, and a transport row flanked by a **sessions button** (leading, shown only while more
+  than one app holds a session) and the **audio-output device switcher** (trailing). Each hands
+  the whole sheet to its list as a takeover (`SheetTakeoverCenter`): the session list
+  (`MediaSessionList`) shows every app's session with its own play/pause, and tapping a row pins
+  that session as the presented one. Every app's session streams from one long-lived perl
+  adapter (`NowPlayingStream`), which pushes only when something changes; the module presents the
+  one `NowPlayingSelection` picks and sends commands to that session's app via
+  `MediaRemoteBridge`. While `calls.autoPauseMusic` is on, a detected call pauses the presented
+  session and resumes it only when the automatic pause claim still owns that same paused session
+  — the claim follows the session it paused, whichever one is presented by then.
 - **Calendar** (`Modules/Calendar`) — next-meeting countdown chip in compact; an agenda with a
   one-tap **Join** button (Zoom / Meet / Teams / Webex link detection) in expanded. EventKit via
   `CalendarService`. **Meeting Mode:** while a meeting with a join link is in progress, Calendar
   contributes no compact mic indicator because macOS already shows microphone activity in the
   menu bar; the sheet leads with a call HUD — the meeting rendered in the agenda's row style
   (calendar-accent dot, green elapsed/ends-in line) above a system-wide **mic-mute** toggle
-  (`MicController`), an audio-output switcher, and Join. The agenda carries no header, so the
+  (`MicController`), an audio-output switcher (a sheet takeover, as in the media section), and Join. The agenda carries no header, so the
   in-progress row and upcoming meetings read as one list. A mute applied via the notch is
   auto-restored when the meeting ends. CallSense also raises Meeting Mode for ad-hoc calls from
   the public CoreMediaIO/CoreAudio "running somewhere" camera and microphone properties, with a
@@ -567,6 +608,16 @@ at runtime.
   pinned media section, which urgency never displaces — so the sheet's finite height goes to what
   cannot wait. Setting an unchanged flag publishes nothing, so a module
   may raise it from a periodic tick; a module clears its own flag on `deactivate`.
+- **`Services/Sheet/SheetTakeoverCenter.swift`** — a module-agnostic way for one view to take
+  over the whole expanded sheet (a picker, a list) and hand it back. `ExpandedPanelView` renders
+  the current takeover under a back-button header (`UI/SheetTakeoverView`) in place of the
+  section stack, and the sheet resizes to the takeover's own height. The sections stay mounted
+  underneath at zero claimed height — invisible and untouchable — so an opened disclosure or a
+  running timer is as the user left it on return. One takeover shows at a time; a presenter
+  dismisses only its own (`dismiss(id:)`), and `NotchEngine` dismisses whatever is presented when
+  the sheet closes, so it always reopens on its sections. The dismissal lives in the engine
+  because a hover-exit close unmounts the panel in the same transaction, so nothing inside the
+  panel can observe it.
 - **`Services/FileSystem/FileChangeWatcher.swift`** — calls back when a file or directory is
   written, created, replaced, or removed. A vnode `DispatchSource` watches an open descriptor — an
   *inode*, not a path — so a writer that updates atomically (write temp, `rename` into place)
@@ -596,7 +647,8 @@ at runtime.
   exactly when the last client releases the monitor.
 - **`Services/Audio/`** — CoreAudio helpers shared by modules (these are plain services, not
   `NotchModule`s, so modules stay decoupled). `AudioOutputController` + `AudioOutputSelector` (the
-  default-output device and its inline picker, used by Media and Meeting Mode) and `MicController`
+  default-output device and its picker — `OutputRouteButton` presents the device list as a sheet
+  takeover on its own, so a consumer only places the button — used by Media and Meeting Mode) and `MicController`
   (default-input hardware mute for Meeting Mode; the mute follows the default input across device
   changes, so switching mics mid-call never orphans a system-wide mute on the old device). Live
   updates come through **`AudioPropertyListener`**, a shared wrapper over CoreAudio's **proc-based**

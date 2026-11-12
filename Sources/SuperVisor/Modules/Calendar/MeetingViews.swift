@@ -159,8 +159,6 @@ private struct CallAudioControls<Trailing: View>: View {
     let onToggleMute: () -> Void
     let trailing: Trailing
 
-    @State private var showOutputPicker = false
-
     init(
         mic: MicController,
         audioOutput: AudioOutputController,
@@ -174,23 +172,12 @@ private struct CallAudioControls<Trailing: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                muteButton
-                OutputRouteButton(controller: audioOutput, active: showOutputPicker) {
-                    showOutputPicker.toggle()
-                }
-                Spacer(minLength: 6)
-                trailing
-            }
-            if showOutputPicker {
-                AudioOutputDeviceList(controller: audioOutput) {
-                    showOutputPicker = false
-                }
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            }
+        HStack(spacing: 10) {
+            muteButton
+            OutputRouteButton(controller: audioOutput)
+            Spacer(minLength: 6)
+            trailing
         }
-        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showOutputPicker)
     }
 
     private var muteButton: some View {

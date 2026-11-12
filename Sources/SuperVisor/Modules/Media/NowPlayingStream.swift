@@ -1,11 +1,11 @@
 import Foundation
 
-/// Delivers now-playing snapshots from one long-lived entitled helper.
+/// Delivers every app's now-playing session from one long-lived entitled helper.
 ///
 /// `NowPlayingReader` pays a process spawn — perl, dyld, the adapter dylib — for every read, so
 /// keeping the UI current costs a spawn every couple of seconds for as long as the app runs.
-/// This spawns the same helper once and reads the JSON objects it prints, one per line, as the
-/// now-playing state changes. The helper writes nothing while nothing changes.
+/// This spawns the same helper once and reads the JSON objects it prints, one per line, as any
+/// session changes. The helper writes nothing while nothing changes.
 ///
 /// The helper is expected to outlive individual reads but not the app: it exits when its stdin
 /// reaches EOF, which happens when this object closes the pipe or the process dies. If it
@@ -14,8 +14,8 @@ import Foundation
 @MainActor
 final class NowPlayingStream {
 
-    /// A parsed snapshot, or `nil` when nothing is playing.
-    var onSnapshot: ((NowPlaying?) -> Void)?
+    /// Every session as of the latest change; a capture with none means no app has one.
+    var onCapture: ((NowPlayingCapture) -> Void)?
     /// The helper could not be started or could not stay up. Never called after `stop()`.
     var onUnavailable: (() -> Void)?
 
@@ -36,9 +36,10 @@ final class NowPlayingStream {
     /// More restarts than this inside `restartWindow` means the helper is not viable here.
     private static let maxRestarts = 4
     private static let restartWindow: TimeInterval = 60
-    /// A line carries base64 artwork, normally a few hundred KB. Anything past this is a
-    /// runaway or a corrupt stream, and the buffer is dropped rather than grown without bound.
-    private static let maxBufferedBytes = 8 << 20
+    /// A line carries base64 artwork for each session, normally a few hundred KB apiece; the
+    /// helper caps a line at 8 sessions of 4 MiB. Anything past this is a runaway or a corrupt
+    /// stream, and the buffer is dropped rather than grown without bound.
+    private static let maxBufferedBytes = 40 << 20
 
     private let dylibPath: String?
     private var process: Process?
@@ -194,7 +195,7 @@ final class NowPlayingStream {
                 let dict = object as? [String: Any]
             else { continue }
 
-            onSnapshot?(NowPlaying(json: dict))
+            if let capture = NowPlayingCapture(json: dict) { onCapture?(capture) }
         }
     }
 }

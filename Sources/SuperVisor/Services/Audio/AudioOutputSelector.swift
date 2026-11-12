@@ -1,24 +1,28 @@
 import SwiftUI
 
-/// The output-route trigger shown in the transport row: an icon reflecting the current output
-/// device kind. Tapping it toggles the inline device list. Lives in its own view so it observes
-/// the controller directly and updates its glyph when the route changes.
+/// The output-route trigger: an icon reflecting the current output device kind. Tapping it hands
+/// the whole sheet to the device list (`SheetTakeoverCenter`), which hands it back once a device
+/// is chosen. Lives in its own view so it observes the controller directly and updates its glyph
+/// when the route changes.
 struct OutputRouteButton: View {
     @ObservedObject var controller: AudioOutputController
-    /// Whether the device list is currently shown (drives the active tint).
-    let active: Bool
-    let action: () -> Void
+
+    private static let takeoverID = "audio-output"
 
     var body: some View {
         let tooltip = "Audio output: \(controller.currentName.isEmpty ? "Unknown" : controller.currentName)"
-        Button(action: action) {
+        Button {
+            SheetTakeoverCenter.shared.present(
+                id: Self.takeoverID,
+                title: "Audio Output",
+                content: AnyView(AudioOutputDeviceList(controller: controller) {
+                    SheetTakeoverCenter.shared.dismiss(id: Self.takeoverID)
+                })
+            )
+        } label: {
             Image(systemName: AudioOutputDeviceList.icon(for: controller.currentName))
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(
-                    active
-                        ? AnyShapeStyle(NotchTheme.brandGradient)
-                        : AnyShapeStyle(NotchTheme.primaryForeground)
-                )
+                .foregroundStyle(NotchTheme.primaryForeground)
                 .frame(width: 36, height: 36)
                 .contentShape(Circle())
         }
@@ -28,13 +32,12 @@ struct OutputRouteButton: View {
     }
 }
 
-/// The inline list of available audio output devices, shown below the transport row when the
-/// output button is tapped. An inline disclosure (rather than an `NSMenu`) is used deliberately:
-/// the notch panel is a non-activating window that never becomes key, so a popup menu can't
-/// reliably take focus — and the auto-sizing sheet grows to fit the list naturally.
+/// The list of available audio output devices, presented as a sheet takeover. A list in the
+/// sheet (rather than an `NSMenu`) is used deliberately: the notch panel is a non-activating
+/// window that never becomes key, so a popup menu can't reliably take focus.
 struct AudioOutputDeviceList: View {
     @ObservedObject var controller: AudioOutputController
-    /// Called after a device is chosen, so the caller can collapse the list.
+    /// Called after a device is chosen, so the presenter can dismiss the list.
     var onSelect: () -> Void = {}
 
     var body: some View {
@@ -60,15 +63,15 @@ struct AudioOutputDeviceList: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: Self.icon(for: device.name))
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 20)
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 22)
                     .foregroundStyle(
                         isCurrent
                             ? AnyShapeStyle(NotchTheme.brandGradient)
                             : AnyShapeStyle(NotchTheme.secondaryForeground)
                     )
                 Text(device.name)
-                    .font(.system(size: 12, weight: isCurrent ? .semibold : .regular))
+                    .font(.system(size: 13, weight: isCurrent ? .semibold : .regular))
                     .lineLimit(1)
                     .foregroundStyle(NotchTheme.primaryForeground)
                 Spacer(minLength: 6)
@@ -79,7 +82,7 @@ struct AudioOutputDeviceList: View {
                 }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }

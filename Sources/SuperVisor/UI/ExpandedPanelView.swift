@@ -11,9 +11,15 @@ import SwiftUI
 /// the tallest surface it will render. Content past that height dissolves into the sheet's bottom
 /// edge rather than ending on a hard cut. When no module contributes a section it shows a quiet
 /// empty state so the surface is never blank.
+///
+/// A takeover raised through `SheetTakeoverCenter` replaces the section stack for as long as it
+/// is presented, and the sheet resizes to the takeover's own height. The sections stay mounted
+/// underneath — invisible, untouchable, and collapsed to no height — so their state (an opened
+/// disclosure, a running timer) is exactly as the user left it when the takeover is dismissed.
 struct ExpandedPanelView: View {
     @EnvironmentObject private var engine: NotchEngine
     @ObservedObject private var urgency = SectionUrgencyCenter.shared
+    @ObservedObject private var takeovers = SheetTakeoverCenter.shared
 
     /// Fixed sheet width. Content is laid out to this width, so the sheet never scrolls
     /// horizontally; overflow (there should be none) is clipped by the surface shape.
@@ -24,16 +30,24 @@ struct ExpandedPanelView: View {
     @State private var contentHeight: CGFloat = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: NotchTheme.sectionSpacing) {
-            if sections.isEmpty {
-                emptyState
-            } else {
-                ForEach(sections, id: \.moduleID) { entry in
-                    entry.view
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+        let takeover = takeovers.current
+        return ZStack(alignment: .top) {
+            sectionStack
+                // The stack keeps its natural height for its own layout; only the space it
+                // claims in the sheet collapses, so the sections lay out identically whether or
+                // not a takeover covers them.
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(height: takeover == nil ? nil : 0, alignment: .top)
+                .opacity(takeover == nil ? 1 : 0)
+                .allowsHitTesting(takeover == nil)
+                .accessibilityHidden(takeover != nil)
+
+            if let takeover {
+                SheetTakeoverView(takeover: takeover) { takeovers.dismiss() }
+                    .transition(.opacity)
             }
         }
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: takeover?.id)
         .padding(.horizontal, 26)
         .padding(.bottom, 22)
         // Lay out at the fixed sheet width and adopt the content's natural height regardless of
@@ -59,6 +73,19 @@ struct ExpandedPanelView: View {
         .mask(
             LinearGradient(stops: overflowFadeStops, startPoint: .top, endPoint: .bottom)
         )
+    }
+
+    private var sectionStack: some View {
+        VStack(alignment: .leading, spacing: NotchTheme.sectionSpacing) {
+            if sections.isEmpty {
+                emptyState
+            } else {
+                ForEach(sections, id: \.moduleID) { entry in
+                    entry.view
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
     }
 
     private var emptyState: some View {

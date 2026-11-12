@@ -524,6 +524,10 @@ public final class NotchEngine: ObservableObject {
         // The window is a constant-size canvas; only the SwiftUI content morphs, so the
         // Dynamic-Island animation is never clipped by a window resize. `NotchRootView` owns
         // the springs (keyed on the published `state`), so we just publish the new state.
+        // A takeover belongs to the open sheet; closing hands the sheet back to its sections, so
+        // it never reopens on a picker. Done here because the panel view is unmounted in the
+        // same transaction as a hover-exit close and cannot observe it.
+        if state == .expanded { SheetTakeoverCenter.shared.dismiss() }
         state = newState
         AppLog.debug(.engine, "state -> \(String(describing: newState))")
         // Interactivity depends on both hover and the new state; recompute outside animation.

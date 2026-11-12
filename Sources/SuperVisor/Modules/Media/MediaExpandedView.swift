@@ -2,12 +2,10 @@ import SwiftUI
 
 /// Expanded media section, styled after the system Now-Playing card: artwork beside the
 /// title/artist with a now-playing waveform, a full-width scrubber, and a transport row
-/// (favorite · previous · play-pause · next · output device). Rendered directly on the sheet's
+/// (sessions · previous · play-pause · next · output device). Rendered directly on the sheet's
 /// black surface — no card of its own.
 struct MediaExpandedView: View {
     @ObservedObject var module: MediaModule
-    /// Whether the inline audio-output device list is shown (toggled by the transport-row icon).
-    @State private var showOutputPicker = false
 
     var body: some View {
         Group {
@@ -54,15 +52,7 @@ struct MediaExpandedView: View {
             MediaScrubberView(nowPlaying: nowPlaying)
 
             transportRow(for: nowPlaying)
-
-            if showOutputPicker {
-                AudioOutputDeviceList(controller: module.audioOutput) {
-                    showOutputPicker = false
-                }
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            }
         }
-        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showOutputPicker)
     }
 
     @ViewBuilder
@@ -91,8 +81,8 @@ struct MediaExpandedView: View {
     // MARK: Transport
 
     private func transportRow(for nowPlaying: NowPlaying) -> some View {
-        // The play/prev/next triad stays centered; the output-route icon sits at the trailing
-        // edge as a separate layer so it isn't dimmed/disabled by the `canControl` gate.
+        // The play/prev/next triad stays centered; the sessions and output-route icons sit at
+        // the edges as a separate layer so they aren't dimmed/disabled by the `canControl` gate.
         ZStack {
             HStack(spacing: 44) {
                 TransportButton(systemName: "backward.fill", size: 22) { module.previousTrack() }
@@ -106,13 +96,40 @@ struct MediaExpandedView: View {
             .opacity(module.canControl ? 1 : 0.4)
 
             HStack(spacing: 0) {
-                Spacer(minLength: 0)
-                OutputRouteButton(controller: module.audioOutput, active: showOutputPicker) {
-                    showOutputPicker.toggle()
+                // With one session there is nothing to switch to.
+                if module.sessions.count > 1 {
+                    MediaSessionsButton(module: module)
                 }
+                Spacer(minLength: 0)
+                OutputRouteButton(controller: module.audioOutput)
             }
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+/// The sessions trigger in the transport row: hands the whole sheet to the list of every app's
+/// session (`SheetTakeoverCenter`).
+private struct MediaSessionsButton: View {
+    let module: MediaModule
+
+    var body: some View {
+        Button {
+            SheetTakeoverCenter.shared.present(
+                id: MediaModule.sessionsTakeoverID,
+                title: "Now Playing",
+                content: AnyView(MediaSessionList(module: module))
+            )
+        } label: {
+            Image(systemName: "rectangle.stack.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(NotchTheme.primaryForeground)
+                .frame(width: 36, height: 36)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .notchTooltip("All sessions")
+        .help("All sessions")
     }
 }
 
