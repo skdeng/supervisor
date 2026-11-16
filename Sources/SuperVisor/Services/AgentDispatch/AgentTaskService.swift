@@ -826,11 +826,20 @@ final class AgentTaskService {
     }
 
     /// Claude CLI discovery uses absolute paths because an LSUIElement app has no login-shell
-    /// PATH. The first executable regular-file target is used.
+    /// PATH.
     private nonisolated static func resolveExecutable() -> URL? {
-        for path in executableCandidates {
+        firstExecutable(among: executableCandidates)
+    }
+
+    /// The first path that is an executable regular file, or a symbolic link to one, returned
+    /// as listed so the CLI launches under its installed name.
+    nonisolated static func firstExecutable(among paths: [String]) -> URL? {
+        for path in paths {
             let url = URL(fileURLWithPath: path)
-            let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
+            // Resource values describe a symbolic link itself, so the kind is read from the
+            // link's destination.
+            let values = try? url.resolvingSymlinksInPath()
+                .resourceValues(forKeys: [.isRegularFileKey])
             guard values?.isRegularFile == true,
                   FileManager.default.isExecutableFile(atPath: path)
             else { continue }
