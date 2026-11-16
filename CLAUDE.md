@@ -362,15 +362,16 @@ sink. Preserve these guards when touching the relevant code:
   allowed: each must come back denied.
 - **A standing approval lets a ProVisor action run that nobody looked at first**, so a claim to
   be under one is worth only what the code grants it (`StandingApprovals`). A rule exists only
-  because the user tapped **Always** beside its full text — an offered rule over 200 characters
-  is dropped, never truncated — and the agent, which is told the rules in its prompt, cannot
-  write the file they live in. A proposal's `under` counts only when it names a rule in force on
+  because the user tapped **Always** beside its condition and action in full — an offer with
+  either part missing or over 200 characters is dropped, never truncated — and the agent, which
+  is told the rules in its prompt, cannot write the file they live in. A proposal's `under` counts only when it names a rule in force on
   a proposal still `proposed` and unexpired. The run gets its own tool list, `auto` in
   `access.json` (by default label, trash, and mark: a subset of the approved list, with nothing
   that sends or drafts and nothing that cannot be undone); an absent or empty `auto` switches
   standing approvals off. At most five run per scouting pass, and the rest wait for a tap. The
-  run is also told the rule and to do nothing that falls outside it, but that is the model's
-  judgment and the tool list is the guarantee: the worst a hostile message can do through a
+  run is also told the rule and the current weekday and local time, and to do nothing unless
+  the condition holds and the action falls inside the rule, but that is the model's judgment
+  and the tool list is the guarantee: the worst a hostile message can do through a
   standing approval is get some mail wrongly labelled or trashed, a handful at a time, in rows
   the user sees afterwards with a way to revoke the rule.
 
@@ -660,13 +661,23 @@ names below are the code paths.
     dismisses; it cannot approve. **Do It** on the review screen queues the acting run (one at
     a time; it may overlap a scouting pass). By default an approved action can label, trash,
     and mark mail and write drafts, and cannot send.
-  - **Standing approvals** are how "ask me" becomes "just do it", one kind of thing at a time,
-    and **which kinds is the agent's to work out** — there is no per-kind switch in Swift. When
-    the decision history shows a recurring, undoable kind being approved again and again, the
-    agent adds `"standing": "<rule>"` to a proposal; the review screen then shows the rule and
-    offers **Always** beside **Just Once**. **Always** appends the rule to `standing.json`
+  - **Standing approvals** are how "ask me" becomes "just do it", and **both the rule and its
+    condition are the agent's to work out from the decision history** — there is no per-kind
+    switch and no condition grammar in Swift. A rule is two sentences, a condition and an
+    action ("when mail arrives from Maya Chen" / "label it 'Reply today'"; "when it is Tuesday"
+    / "trash unopened promotional mail"). The protocol tells the agent to compare what was
+    approved with what was dismissed and offer the narrowest condition that separates them —
+    who, when, or what — and never to reach past that evidence. It offers by adding
+    `"standing": {"when", "do", "because"}` to a proposal; the review screen shows all three
+    (`because` is the pattern it found, with counts, so the user can judge where the line was
+    drawn) and **Always** beside **Just Once**. **Always** appends the rule to `standing.json`
     (`s-<8 hex>` id); either answer is written back as `standingDecision`, so "just once"
-    teaches the agent to keep asking for that kind. From then on the scout is told the rules in
+    teaches the agent to keep asking. **Time is spelled out for the agent, never left to
+    derive**: each decision is stamped `decidedLocal` ("Tuesday 2026-11-17 09:12") and each run
+    is told today's weekday and local time (`ProVisorClock`), because a rule can turn on the
+    weekday and working one out from a UTC timestamp is where a model slips. A rule with a
+    time condition is acted on once per occurrence, and only on a pass that happens to run
+    then — the schedule is not driven by the rules. From then on the scout is told the rules in
     force and may mark a proposal `"under": "<id>"`; `ProVisorCenter` admits it without a tap,
     carries it out with the `auto` tool list, records `automatic: true`, and shows it as a
     **Done automatically** row that leaves by itself after a day. Its review screen names the

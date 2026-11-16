@@ -1,13 +1,44 @@
 import Foundation
 
-/// A rule the user agreed to in advance: do this kind of thing from now on without asking.
+/// A rule the agent offers to make standing, attached to a proposal: a condition, what to do
+/// when it holds, and the pattern in the user's past decisions that it was drawn from.
 ///
-/// The text is the agent's wording, offered on a proposal and accepted by the user after
-/// reading it in full. Whether a later action falls under it is the agent's judgment; what such
-/// an action is *able* to do is not — see `StandingApprovals`.
+/// The agent works the condition out — this person, that weekday — from what the user approved
+/// and what they dismissed. The basis is shown so the user can judge whether the line was drawn
+/// in the right place; it is persuasion, not instruction, and never reaches a run.
+struct StandingOffer: Equatable, Sendable {
+    let condition: String
+    let action: String
+    let basis: String?
+
+    static let basisLimit = 300
+
+    /// Reads `{"when": …, "do": …, "because": …}`. The two parts that would govern later runs
+    /// are never shortened to fit: an offer that cannot be shown whole is no offer.
+    static func parse(_ value: Any?) -> StandingOffer? {
+        guard let fields = value as? [String: Any],
+              let condition = StandingRule.part(fields["when"]),
+              let action = StandingRule.part(fields["do"])
+        else { return nil }
+        return StandingOffer(
+            condition: condition,
+            action: action,
+            basis: Proposal.displayText(fields["because"], limit: basisLimit)
+        )
+    }
+}
+
+/// A rule the user agreed to in advance: when this holds, do that, without asking.
+///
+/// Both parts are the agent's wording, offered on a proposal and accepted by the user after
+/// reading them in full. Whether a later action falls under the rule is the agent's judgment;
+/// what such an action is *able* to do is not — see `StandingApprovals`.
 struct StandingRule: Identifiable, Equatable, Sendable {
     let id: String
-    let text: String
+    /// When the rule applies: "Mail arrives from Maya Chen", "It is Tuesday".
+    let condition: String
+    /// What is done when it does.
+    let action: String
     let since: Date
     /// When the user took it back. A revoked rule grants nothing. It is kept on file so the
     /// agent can be told never to offer it again.
@@ -15,7 +46,13 @@ struct StandingRule: Identifiable, Equatable, Sendable {
 
     var isActive: Bool { revoked == nil }
 
-    static let textLimit = 200
+    /// The most either part may run to.
+    static let partLimit = 200
+
+    /// One part of a rule, cleaned, or nil when it is missing or too long to show whole.
+    static func part(_ value: Any?) -> String? {
+        Proposal.displayText(value, limit: partLimit, truncates: false)
+    }
 
     /// Anchored with `\A` and `\z`: ICU's `$` also matches before a trailing line terminator.
     static func isValidID(_ id: String) -> Bool {
@@ -28,7 +65,8 @@ struct StandingRule: Identifiable, Equatable, Sendable {
 ///
 /// Letting an agent that reads mail from anyone act without review is safe only to the extent
 /// the code bounds it, because everything the agent decides can be steered by what it read:
-/// - A rule exists only because the user tapped **Always** on a proposal showing its full text.
+/// - A rule exists only because the user tapped **Always** on a proposal showing its condition
+///   and action in full.
 /// - A proposal's `under` is a claim. It counts only when it names a rule in force.
 /// - A run under a rule gets its own, narrower tool list (`ProVisorAccess.auto`: by default
 ///   label, trash, and mark — nothing that sends or drafts, nothing that cannot be undone).
@@ -51,10 +89,10 @@ enum StandingApprovals {
         return rules.first { $0.id == under && $0.isActive }
     }
 
-    /// A new rule with `text`, or nil when the text is unusable or a rule in force already says
-    /// the same thing.
+    /// A new rule from an accepted offer, or nil when a part is unusable or a rule in force
+    /// already says the same thing.
     static func rule(
-        adding text: String,
+        adding offer: StandingOffer,
         to rules: [StandingRule],
         now: Date,
         id: String = newID()
@@ -62,14 +100,19 @@ enum StandingApprovals {
         guard rules.count < maximumRules,
               StandingRule.isValidID(id),
               !rules.contains(where: { $0.id == id }),
-              let cleaned = Proposal.displayText(
-                  text,
-                  limit: StandingRule.textLimit,
-                  truncates: false
-              ),
-              !rules.contains(where: { $0.isActive && $0.text == cleaned })
+              let condition = StandingRule.part(offer.condition),
+              let action = StandingRule.part(offer.action),
+              !rules.contains(where: {
+                  $0.isActive && $0.condition == condition && $0.action == action
+              })
         else { return nil }
-        return StandingRule(id: id, text: cleaned, since: now, revoked: nil)
+        return StandingRule(
+            id: id,
+            condition: condition,
+            action: action,
+            since: now,
+            revoked: nil
+        )
     }
 
     static func revoking(_ id: String, in rules: [StandingRule], now: Date) -> [StandingRule] {
@@ -109,15 +152,13 @@ enum StandingApprovals {
                   let id = entry["id"] as? String,
                   StandingRule.isValidID(id),
                   !rules.contains(where: { $0.id == id }),
-                  let text = Proposal.displayText(
-                      entry["rule"],
-                      limit: StandingRule.textLimit,
-                      truncates: false
-                  )
+                  let condition = StandingRule.part(entry["when"]),
+                  let action = StandingRule.part(entry["do"])
             else { continue }
             rules.append(StandingRule(
                 id: id,
-                text: text,
+                condition: condition,
+                action: action,
                 since: date(entry["since"]) ?? .distantPast,
                 revoked: date(entry["revoked"])
             ))
@@ -129,7 +170,8 @@ enum StandingApprovals {
         let entries: [[String: Any]] = rules.map { rule in
             var entry: [String: Any] = [
                 "id": rule.id,
-                "rule": rule.text,
+                "when": rule.condition,
+                "do": rule.action,
                 "since": rule.since.formatted(.iso8601),
             ]
             if let revoked = rule.revoked {

@@ -98,15 +98,42 @@ struct ProposalParsingTests {
         let offered = parse([
             "title": "t",
             "action": "a",
-            "standing": "Trash promotional mail from senders I have not opened in 90 days.",
+            "standing": [
+                "when": "Mail arrives\nfrom Maya Chen",
+                "do": "Label the thread 'Reply today'",
+                "because": "Approved four times, each for Maya.",
+            ],
         ])
-        #expect(offered?.standingOffer?.hasPrefix("Trash promotional mail") == true)
+        #expect(offered?.standingOffer == StandingOffer(
+            condition: "Mail arrives from Maya Chen",
+            action: "Label the thread 'Reply today'",
+            basis: "Approved four times, each for Maya."
+        ))
         #expect(offered?.under == nil)
 
-        let tooLong = String(repeating: "r", count: StandingRule.textLimit + 1)
-        let dropped = parse(["title": "t", "action": "a", "standing": tooLong])
-        #expect(dropped != nil)
-        #expect(dropped?.standingOffer == nil)
+        // Either governing part too long to show whole drops the offer and keeps the proposal.
+        // So does an offer that is not the two-part object: a bare sentence has no condition.
+        let tooLong = String(repeating: "r", count: StandingRule.partLimit + 1)
+        let unusable: [Any] = [
+            ["when": tooLong, "do": "x"],
+            ["when": "x", "do": tooLong],
+            ["when": "x"],
+            "Trash promotional mail.",
+        ]
+        for standing in unusable {
+            let dropped = parse(["title": "t", "action": "a", "standing": standing])
+            #expect(dropped != nil)
+            #expect(dropped?.standingOffer == nil)
+        }
+
+        // The basis only informs the decision, so a long one is cut rather than refused.
+        let longBasis = String(repeating: "b", count: StandingOffer.basisLimit + 50)
+        let cut = parse([
+            "title": "t",
+            "action": "a",
+            "standing": ["when": "x", "do": "y", "because": longBasis],
+        ])
+        #expect(cut?.standingOffer?.basis?.count == StandingOffer.basisLimit)
 
         let claimed = parse([
             "title": "t",
@@ -285,10 +312,14 @@ struct ProVisorCommandTests {
     )
     private let rule = StandingRule(
         id: "s-0000abcd",
-        text: "Trash promotional mail from senders I have not opened in 90 days.",
+        condition: "It is Tuesday",
+        action: "Move promotional mail from senders they have not opened in 90 days to Trash",
         since: Date(timeIntervalSince1970: 0),
         revoked: nil
     )
+    /// 09:12 on Sunday 15 November 2026 in Los Angeles.
+    private let now = Date(timeIntervalSince1970: 1_794_762_720)
+    private let losAngeles = TimeZone(identifier: "America/Los_Angeles")!
     private let proposal = Proposal(
         id: "a",
         title: "Cancel Foo Pro",
@@ -314,8 +345,8 @@ struct ProVisorCommandTests {
             brief: "BRIEF",
             access: access,
             standing: [],
-            now: Date(timeIntervalSince1970: 1_794_762_720),
-            timeZone: TimeZone(identifier: "America/Los_Angeles")!
+            now: now,
+            timeZone: losAngeles
         )
 
         #expect(arguments.contains("--restricted"))
@@ -329,6 +360,8 @@ struct ProVisorCommandTests {
         ])
         // The prompt tells the scout what an approved action could use, by name.
         #expect(arguments[1].contains("mcp__mail__create_draft"))
+        // A rule can turn on the weekday, so the scout is told it rather than left to derive it.
+        #expect(arguments[1].contains("Sunday 2026-11-15 09:12"))
         #expect(arguments[1].contains("America/Los_Angeles"))
     }
 
@@ -351,7 +384,9 @@ struct ProVisorCommandTests {
         let arguments = ProVisorCommand.actArguments(
             proposal: proposal,
             access: access,
-            under: rule
+            under: rule,
+            now: now,
+            timeZone: losAngeles
         )
 
         #expect(arguments.contains("--restricted"))
@@ -361,7 +396,10 @@ struct ProVisorCommandTests {
             "mcp__mail__trash_*",
         ])
         #expect(!arguments.contains("mcp__mail__create_draft"))
-        #expect(arguments[1].contains(rule.text))
+        #expect(arguments[1].contains("When: It is Tuesday"))
+        #expect(arguments[1].contains("Do: Move promotional mail"))
+        // The run checks the condition for itself, so it needs the weekday too.
+        #expect(arguments[1].contains("Sunday 2026-11-15 09:12"))
         #expect(arguments[1].contains("Nobody has reviewed"))
     }
 
@@ -369,15 +407,16 @@ struct ProVisorCommandTests {
     func standingBriefing() {
         var revoked = StandingRule(
             id: "s-0000beef",
-            text: "Label receipts 'Receipts'.",
+            condition: "A receipt arrives",
+            action: "Label it 'Receipts'",
             since: Date(timeIntervalSince1970: 0),
             revoked: nil
         )
         revoked.revoked = Date(timeIntervalSince1970: 10)
 
         let briefing = ProVisorCommand.standingBriefing(rules: [rule, revoked], access: access)
-        #expect(briefing.contains("[s-0000abcd] Trash promotional mail"))
-        #expect(briefing.contains("Revoked"))
+        #expect(briefing.contains(#"[s-0000abcd] when "It is Tuesday", do "Move promotional"#))
+        #expect(briefing.contains(#"Revoked, never to be acted on or offered again: when "A rec"#))
         #expect(!briefing.contains("[s-0000beef]"))
         #expect(briefing.contains("mcp__mail__trash_*"))
 
@@ -417,6 +456,19 @@ struct ProVisorScheduleTests {
             now: now
         )
         #expect(delay == 5 * 3600)
+    }
+
+    @Test("A time is written for the agent with its weekday, in the user's zone")
+    func localStamp() {
+        let instant = Date(timeIntervalSince1970: 1_794_762_720)  // 2026-11-15T17:12:00Z
+        let losAngeles = TimeZone(identifier: "America/Los_Angeles")!
+        let tokyo = TimeZone(identifier: "Asia/Tokyo")!
+
+        let west = ProVisorClock.localStamp(instant, timeZone: losAngeles)
+        let east = ProVisorClock.localStamp(instant, timeZone: tokyo)
+        #expect(west == "Sunday 2026-11-15 09:12")
+        // The same instant is already Monday further east: the weekday is the user's, not UTC's.
+        #expect(east == "Monday 2026-11-16 02:12")
     }
 
     @Test("An overdue pass that just failed backs off instead of repeating")
@@ -505,18 +557,32 @@ struct ProposalStoreTests {
         let directory = try makeDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         try write(
-            ["title": "Real", "action": "a", "standing": "Trash unopened promos."],
+            [
+                "title": "Real",
+                "action": "a",
+                "standing": ["when": "It is Tuesday", "do": "Trash unopened promos"],
+            ],
             named: "real.json",
             in: directory
         )
 
         try ProposalStore.record(id: "real", in: directory, standingDecision: "declined")
-        try ProposalStore.record(id: "real", in: directory, status: .done, automatic: true)
+        try ProposalStore.record(
+            id: "real",
+            in: directory,
+            status: .done,
+            automatic: true,
+            now: Date(timeIntervalSince1970: 1_794_762_720),
+            timeZone: TimeZone(identifier: "America/Los_Angeles")!
+        )
 
         let data = try Data(contentsOf: directory.appendingPathComponent("real.json"))
         let fields = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(fields["standingDecision"] as? String == "declined")
-        #expect(fields["standing"] as? String == "Trash unopened promos.")
+        #expect((fields["standing"] as? [String: String])?["when"] == "It is Tuesday")
+        // The weekday is spelled out for the agent: a pattern in *when* things are approved is
+        // one it is asked to find.
+        #expect(fields["decidedLocal"] as? String == "Sunday 2026-11-15 09:12")
 
         let loaded = try #require(ProposalStore.load(from: directory).first)
         #expect(loaded.isAutomatic)
@@ -539,10 +605,20 @@ struct ProposalStoreTests {
 @Suite("ProVisor standing approvals")
 struct StandingApprovalTests {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
-    private let trashRule = "Trash promotional mail from senders I have not opened in 90 days."
+    private let offer = StandingOffer(
+        condition: "Mail arrives from Maya Chen",
+        action: "Label the thread 'Reply today'",
+        basis: "Approved four times, each for Maya."
+    )
 
     private func rule(_ id: String, revoked: Bool = false) -> StandingRule {
-        StandingRule(id: id, text: trashRule, since: now, revoked: revoked ? now : nil)
+        StandingRule(
+            id: id,
+            condition: offer.condition,
+            action: offer.action,
+            since: now,
+            revoked: revoked ? now : nil
+        )
     }
 
     private func proposal(
@@ -583,28 +659,39 @@ struct StandingApprovalTests {
         #expect(admitted(proposal(under: "s-0000aaaa", expiresIn: 60)) == "s-0000aaaa")
     }
 
-    @Test("A rule is added once, cleaned, and never from text too long to have been shown")
+    @Test("A rule is added once, cleaned, and never from a part too long to have been shown")
     func adding() {
-        let added = StandingApprovals.rule(
-            adding: "Trash\npromos \u{202E}now",
-            to: [],
-            now: now,
-            id: "s-0000aaaa"
+        let messy = StandingOffer(
+            condition: "It is\nTuesday",
+            action: "Trash promos \u{202E}now",
+            basis: nil
         )
-        #expect(added?.text == "Trash promos now")
+        let added = StandingApprovals.rule(adding: messy, to: [], now: now, id: "s-0000aaaa")
+        #expect(added?.condition == "It is Tuesday")
+        #expect(added?.action == "Trash promos now")
         #expect(added?.isActive == true)
 
         let existing = [rule("s-0000aaaa")]
-        #expect(StandingApprovals.rule(adding: trashRule, to: existing, now: now) == nil)
+        #expect(StandingApprovals.rule(adding: offer, to: existing, now: now) == nil)
+
+        // The same action under a different condition is a different rule.
+        let onTuesdays = StandingOffer(
+            condition: "It is Tuesday",
+            action: offer.action,
+            basis: nil
+        )
+        #expect(StandingApprovals.rule(adding: onTuesdays, to: existing, now: now) != nil)
 
         // A rule that was taken back can be granted afresh; it is a new rule with a new id.
         let revoked = [rule("s-0000aaaa", revoked: true)]
-        #expect(StandingApprovals.rule(adding: trashRule, to: revoked, now: now) != nil)
+        #expect(StandingApprovals.rule(adding: offer, to: revoked, now: now) != nil)
 
-        let tooLong = String(repeating: "r", count: StandingRule.textLimit + 1)
-        #expect(StandingApprovals.rule(adding: tooLong, to: [], now: now) == nil)
-        #expect(StandingApprovals.rule(adding: "  ", to: [], now: now) == nil)
-        #expect(StandingApprovals.rule(adding: "x", to: [], now: now, id: "bad id") == nil)
+        let tooLong = String(repeating: "r", count: StandingRule.partLimit + 1)
+        let overlong = StandingOffer(condition: tooLong, action: "x", basis: nil)
+        let blank = StandingOffer(condition: "x", action: "  ", basis: nil)
+        #expect(StandingApprovals.rule(adding: overlong, to: [], now: now) == nil)
+        #expect(StandingApprovals.rule(adding: blank, to: [], now: now) == nil)
+        #expect(StandingApprovals.rule(adding: offer, to: [], now: now, id: "bad id") == nil)
     }
 
     @Test("Revoking keeps the rule on file, out of force")
@@ -642,16 +729,19 @@ struct StandingApprovalTests {
 
         let handEdited = Data(#"""
         {"rules": [
-          {"id": "s-0000aaaa", "rule": "Label receipts.", "since": "2026-11-15T17:12:00Z"},
-          {"id": "not-an-id", "rule": "Do anything."},
-          {"id": "s-0000aaaa", "rule": "A second rule reusing the first one's id."},
-          {"id": "s-0000cccc"},
+          {"id": "s-0000aaaa", "when": "It is Tuesday", "do": "File receipts",
+           "since": "2026-11-15T17:12:00Z"},
+          {"id": "not-an-id", "when": "Always", "do": "Do anything"},
+          {"id": "s-0000aaaa", "when": "Reusing an id", "do": "Should not load"},
+          {"id": "s-0000cccc", "do": "No condition"},
+          {"id": "s-0000dddd", "rule": "A one-sentence rule from before conditions"},
           "junk"
         ]}
         """#.utf8)
         let parsed = StandingApprovals.parse(handEdited)
         #expect(parsed.map(\.id) == ["s-0000aaaa"])
-        #expect(parsed.first?.text == "Label receipts.")
+        #expect(parsed.first?.condition == "It is Tuesday")
+        #expect(parsed.first?.action == "File receipts")
         #expect(parsed.first?.since == Date(timeIntervalSince1970: 1_794_762_720))
         #expect(StandingApprovals.parse(Data("[]".utf8)).isEmpty)
     }

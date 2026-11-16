@@ -35,9 +35,9 @@ struct Proposal: Identifiable, Equatable, Sendable {
     /// Set when the user clears a finished proposal's row. The status stays `done`, so the
     /// agent still reads the proposal as one that was wanted.
     let isCleared: Bool
-    /// A rule the agent offers to make standing: do this kind of thing from now on without
+    /// A rule the agent offers to make standing: when this holds, do that, from now on without
     /// asking. Shown in full beside the action; it becomes a rule only if the user says so.
-    var standingOffer: String?
+    var standingOffer: StandingOffer?
     /// The standing approval the agent says this falls under. It is a claim, not a grant:
     /// `StandingApprovals.rule(for:in:now:)` decides whether a rule in force matches it.
     var under: String?
@@ -95,13 +95,9 @@ extension Proposal {
             status: status,
             result: displayText(fields["result"], limit: resultLimit),
             isCleared: fields["cleared"] as? Bool ?? false,
-            // Like the action, an offered rule is never shortened to fit: a rule that cannot be
+            // Like the action, an offered rule is never shortened to fit: one that cannot be
             // shown whole is dropped, and the proposal stays an ordinary one.
-            standingOffer: displayText(
-                fields["standing"],
-                limit: StandingRule.textLimit,
-                truncates: false
-            ),
+            standingOffer: StandingOffer.parse(fields["standing"]),
             under: (fields["under"] as? String).flatMap { StandingRule.isValidID($0) ? $0 : nil },
             isAutomatic: fields["automatic"] as? Bool ?? false,
             decided: date(fields["decided"])
@@ -229,7 +225,8 @@ enum ProposalStore {
         cleared: Bool? = nil,
         standingDecision: String? = nil,
         automatic: Bool? = nil,
-        now: Date = Date()
+        now: Date = Date(),
+        timeZone: TimeZone = .current
     ) throws {
         guard Proposal.isValidID(id) else { throw CocoaError(.fileWriteInvalidFileName) }
         let url = directory.appendingPathComponent("\(id).json", isDirectory: false)
@@ -241,6 +238,10 @@ enum ProposalStore {
         if let status {
             fields["status"] = status.rawValue
             fields["decided"] = now.formatted(.iso8601)
+            // The weekday and local hour, spelled out. Whether the user approves something on
+            // Tuesdays, or first thing in the morning, is a pattern the agent is asked to find,
+            // and working a weekday out from a UTC timestamp is where a model slips.
+            fields["decidedLocal"] = ProVisorClock.localStamp(now, timeZone: timeZone)
         }
         if let result {
             fields["result"] = result

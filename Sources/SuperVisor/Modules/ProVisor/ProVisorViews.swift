@@ -209,8 +209,9 @@ private struct ProVisorMarker: View {
 ///
 /// The action shown here is the text the acting run is instructed with, in full — a proposal
 /// whose action is too long to show whole is rejected when its file is read. The same holds for
-/// a rule the agent offers to make standing: **Always** appears only beside the rule's full
-/// text, so a standing approval is always something the user read before granting.
+/// a rule the agent offers to make standing: **Always** appears only beside the rule's
+/// condition and action in full, with the pattern in the user's own decisions it was drawn
+/// from, so a standing approval is always something the user read before granting.
 ///
 /// For something already done under a standing approval, this is where the user sees which
 /// rule it was done under — and can take that rule back.
@@ -252,15 +253,21 @@ struct ProVisorDetailView: View {
             )
 
             if state == .open || state == .failed, let offer = proposal.standingOffer {
-                block("From now on, without asking", offer)
+                ruleBlock(
+                    "From now on, without asking",
+                    condition: offer.condition,
+                    action: offer.action,
+                    basis: offer.basis
+                )
             }
 
             if let rule = standingRule(for: proposal) {
-                block(
+                ruleBlock(
                     rule.isActive
                         ? "Done under your standing approval"
                         : "Done under a standing approval you have since taken back",
-                    rule.text
+                    condition: rule.condition,
+                    action: rule.action
                 )
             }
 
@@ -281,6 +288,43 @@ struct ProVisorDetailView: View {
             Text(text)
                 .font(.subheadline)
                 .foregroundStyle(NotchTheme.primaryForeground)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// A rule set out as its parts: when it applies, what is done, and — on an offer — the
+    /// pattern in the user's decisions that the agent drew the condition from.
+    private func ruleBlock(
+        _ label: String,
+        condition: String,
+        action: String,
+        basis: String? = nil
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(NotchTheme.secondaryForeground)
+
+            rulePart("When", condition)
+            rulePart("Do", action)
+            if let basis {
+                rulePart("Why", basis, isQuiet: true)
+            }
+        }
+    }
+
+    private func rulePart(_ label: String, _ text: String, isQuiet: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(NotchTheme.secondaryForeground)
+                .frame(width: 34, alignment: .leading)
+
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(
+                    isQuiet ? NotchTheme.secondaryForeground : NotchTheme.primaryForeground
+                )
                 .fixedSize(horizontal: false, vertical: true)
         }
     }

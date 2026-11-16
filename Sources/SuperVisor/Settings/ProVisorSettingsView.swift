@@ -45,7 +45,7 @@ struct ProVisorSettingsView: View {
 
             standingApprovals
 
-            Text("Runs Claude Code in the background on this Mac to read your mail and calendar through the connectors you added in Claude, and lists what it thinks you would want done. While looking it can only read. Nothing changes until you approve a proposal, and by default an approved action can organize mail and write drafts but cannot send. When a proposal offers to handle its kind from now on and you choose Always, later ones under that rule are done without asking, limited to steps that can be undone, and shown to you afterwards. Its brief (CHARTER.md) and the connector tools it may use (access.json) are in its folder and are yours to edit. Uses your Claude plan, and needs a recent Claude Code signed in with your Claude account.")
+            Text("Runs Claude Code in the background on this Mac to read your mail and calendar through the connectors you added in Claude, and lists what it thinks you would want done. While looking it can only read. Nothing changes until you approve a proposal, and by default an approved action can organize mail and write drafts but cannot send. When it sees a pattern in what you approve (always for one person, always on a certain day), a proposal offers a rule with that condition; choose Always and later ones under it are done without asking, limited to steps that can be undone, and shown to you afterwards. Its brief (CHARTER.md) and the connector tools it may use (access.json) are in its folder and are yours to edit. Uses your Claude plan, and needs a recent Claude Code signed in with your Claude account.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -63,10 +63,14 @@ struct ProVisorSettingsView: View {
 
                 ForEach(inForce) { rule in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(rule.text)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(rule.condition)
+                                .font(.caption)
+                            Text(rule.action)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
 
                         Spacer(minLength: 8)
 
