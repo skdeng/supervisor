@@ -689,7 +689,13 @@ names below are the code paths.
     not yet cleared, three unprompted and the rest behind **N more**. A row opens the **review
     window** (`ProVisorReviewWindow`) or dismisses; it cannot approve. The review is an
     ordinary window because deciding can involve typing and the notch panel never takes
-    keyboard focus; opening it closes the sheet. It shows the options as
+    keyboard focus; opening it closes the sheet. **The window sizes itself to its content
+    (`FittedWindow`) and its hosting controller carries no sizing options**: with
+    `.standardBounds`, AppKit resizes the window from inside its layout pass, the hosting view
+    asks for another constraints pass, and the excess is an uncaught `NSGenericException` that
+    kills the app when the content changes height. No test reproduces it, so after touching
+    the window's sizing, open a proposal in the running app and switch between an option and
+    **Something else…** several times. It shows the options as
     chips with the recommended one selected and that option's action in full, plus **Something
     else…**, which swaps the action for a text box. **Do It** queues the acting run for the
     selected option or the typed instruction (one at a time; it may overlap a scouting pass).

@@ -98,8 +98,7 @@ enum ProposalReview {
 final class ProVisorReviewWindow {
     static let shared = ProVisorReviewWindow()
 
-    private var window: NSWindow?
-    private var hosting: NSHostingController<AnyView>?
+    private var window: FittedWindow?
 
     private init() {}
 
@@ -111,16 +110,15 @@ final class ProVisorReviewWindow {
             .id(UUID())
         )
 
-        if let hosting {
-            hosting.rootView = root
+        if let window {
+            window.setContent(root)
         } else {
-            let (window, hosting) = Self.makeWindow(rootView: root)
+            let window = FittedWindow(width: ProVisorReviewView.width, content: root)
             window.title = "ProVisor"
             // The review is drawn in the sheet's palette, light text on a dark ground.
             window.appearance = NSAppearance(named: .darkAqua)
             window.collectionBehavior = [.moveToActiveSpace]
             window.center()
-            self.hosting = hosting
             self.window = window
         }
 
@@ -133,26 +131,90 @@ final class ProVisorReviewWindow {
     func close() {
         window?.close()
         // A closed window keeps its root view alive; an empty one observes nothing.
-        hosting?.rootView = AnyView(EmptyView())
-    }
-
-    /// A fixed-width window whose height follows its content, which changes as the selection
-    /// changes what is shown. The sizing options are what make it follow: a hosting controller
-    /// with none keeps the window at whatever size it first had.
-    static func makeWindow(rootView: AnyView) -> (NSWindow, NSHostingController<AnyView>) {
-        let hosting = NSHostingController(rootView: rootView)
-        hosting.sizingOptions = [.standardBounds, .preferredContentSize]
-
-        let window = ReviewWindow(contentViewController: hosting)
-        window.styleMask = [.titled, .closable]
-        window.isReleasedWhenClosed = false
-        return (window, hosting)
+        window?.setContent(AnyView(EmptyView()))
     }
 }
 
-/// Closes on Escape whether or not a view inside holds keyboard focus.
-private final class ReviewWindow: NSWindow {
+/// A fixed-width window whose height follows its SwiftUI content, and which closes on Escape.
+///
+/// **The window sizes itself; the hosting controller is given no sizing options.** With
+/// `.standardBounds` the hosting view carries size constraints, and AppKit resizes the window
+/// to satisfy them from inside its own layout pass
+/// (`_changeWindowFrameFromConstraintsIfNecessary`). That resize makes the hosting view ask for
+/// another constraints pass, AppKit allows only as many passes as the window has views, and
+/// the excess is an uncaught `NSGenericException` from `_postWindowNeedsUpdateConstraints`
+/// that takes the whole app down when the content changes height — in the review, on choosing
+/// **Something else…**. So the content's height is measured in SwiftUI and applied on the next
+/// turn of the run loop, outside any layout pass.
+///
+/// No test reproduces that exception: the same content under the same options resizes without
+/// complaint in the test process, hand-pumped or inside `NSApplication.run()`. After changing
+/// how this window is sized, open a proposal in the running app and switch between an option
+/// and **Something else…** several times.
+@MainActor
+final class FittedWindow: NSWindow {
     private static let escapeKeyCode: UInt16 = 53
+
+    private let hosting: NSHostingController<AnyView>
+    private let contentWidth: CGFloat
+
+    init(width: CGFloat, content: AnyView) {
+        contentWidth = width
+        hosting = NSHostingController(rootView: AnyView(EmptyView()))
+        hosting.sizingOptions = []
+        super.init(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: 1),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: true
+        )
+        isReleasedWhenClosed = false
+        contentViewController = hosting
+        setContent(content)
+    }
+
+    /// Replaces the content and sizes the window to it at once, so it never appears at the
+    /// previous content's height.
+    func setContent(_ content: AnyView) {
+        hosting.rootView = AnyView(
+            content
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGFloat.self) { geometry in
+                    geometry.size.height
+                } action: { [weak self] height in
+                    // The next turn of the run loop, once the layout pass reporting this
+                    // height has finished.
+                    RunLoop.main.perform(inModes: [.common]) {
+                        MainActor.assumeIsolated {
+                            self?.fit(contentHeight: height)
+                        }
+                    }
+                }
+                // Between a change in the content's height and the window catching up, the
+                // content stays pinned to the top edge.
+                .frame(maxHeight: .infinity, alignment: .top)
+        )
+        // Proposed no height, the top-pinning frame reports the content's own: it stretches
+        // to whatever it is offered, so an unbounded offer would come back unbounded.
+        let fitting = hosting.sizeThatFits(in: CGSize(width: contentWidth, height: 0))
+        fit(contentHeight: fitting.height)
+    }
+
+    /// Resizes to hold content of this height, keeping the title bar where it is.
+    func fit(contentHeight: CGFloat) {
+        let height = contentHeight.rounded(.up)
+        let current = contentRect(forFrameRect: frame)
+        guard height.isFinite, height >= 1,
+              abs(current.height - height) > 0.5 || current.width != contentWidth
+        else { return }
+        let fitted = NSRect(
+            x: current.minX,
+            y: current.maxY - height,
+            width: contentWidth,
+            height: height
+        )
+        setFrame(frameRect(forContentRect: fitted), display: true)
+    }
 
     override func cancelOperation(_ sender: Any?) {
         close()
