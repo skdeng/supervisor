@@ -339,7 +339,12 @@ sink. Preserve these guards when touching the relevant code:
   CLI's flags and never by its prompt (`ProVisorCommand`). Every run carries `--restricted` (no
   shell or web tools, file tools confined to the working directory, the user's settings and hooks
   ignored) and `--permission-prompts none` (anything not allowed is denied, not prompted), with
-  `--tools Read,Write,Edit,Glob,Grep`. The **scout** is allowed writes only under `proposals/`
+  `--tools Read,Write,Edit,Glob,Grep,ToolSearch`. **`ToolSearch` is load-bearing, not a
+  convenience**: it is what makes the CLI defer connector tools and load a schema only when the
+  agent looks one up. With it absent, every tool of every connector on the account rides in the
+  first request (248,000 tokens for seven connectors, measured), the run ends on its spending
+  limit after one turn, and the only symptom is "The agent reached its spending limit before
+  finishing". It grants nothing: looking a tool up does not allow calling it. The **scout** is allowed writes only under `proposals/`
   and `memory/` (`Edit(/proposals/**)` — a leading slash on a command-line rule anchors at the
   working directory, and `Edit` rules cover every file-writing tool) plus the **read** connector
   tools in `access.json`, so nothing it reads can make it send, change, or delete. The tools

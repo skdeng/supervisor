@@ -250,7 +250,12 @@ struct ProVisorAccess: Equatable, Sendable {
 /// writes allowed are inside the folders named here. What differs between runs is the list of
 /// connector tools.
 enum ProVisorCommand {
-    static let builtInTools = "Read,Write,Edit,Glob,Grep"
+    /// `ToolSearch` keeps a run's context small. With it in the list the CLI defers connector
+    /// tools and loads a tool's schema when the agent looks it up. Absent it, the full schema of
+    /// every tool of every connector on the account rides in the first request — measured at
+    /// 248,000 tokens for seven connectors, which costs more than a pass's whole budget, so the
+    /// run ends on its spending limit after one turn.
+    static let builtInTools = "Read,Write,Edit,Glob,Grep,ToolSearch"
 
     static func scoutArguments(
         brief: String,

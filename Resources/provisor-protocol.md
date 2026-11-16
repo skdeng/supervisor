@@ -176,6 +176,7 @@ memory.
 ## Your limits in this run
 
 You can read through the data tools you were given, and write only inside `proposals/` and
-`memory/`. You cannot send, change, or delete anything, run commands, or browse. A denied tool
+`memory/`. Data tools load on demand: look one up with ToolSearch before using it, and before
+reporting it missing. You cannot send, change, or delete anything, run commands, or browse. A denied tool
 call is that boundary doing its job: do not retry it or look for another route. If it kept you
 from doing something the brief asks for, say so in your closing summary.

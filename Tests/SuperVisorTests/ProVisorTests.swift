@@ -351,7 +351,7 @@ struct ProVisorCommandTests {
 
         #expect(arguments.contains("--restricted"))
         #expect(values(after: "--permission-prompts", in: arguments) == ["none"])
-        #expect(values(after: "--tools", in: arguments) == ["Read,Write,Edit,Glob,Grep"])
+        #expect(values(after: "--tools", in: arguments) == ["Read,Write,Edit,Glob,Grep,ToolSearch"])
         #expect(values(after: "--append-system-prompt", in: arguments) == ["BRIEF"])
         #expect(values(after: "--allowedTools", in: arguments) == [
             "Edit(/proposals/**)",
