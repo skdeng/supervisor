@@ -432,6 +432,64 @@ struct ProVisorAccessTests {
         #expect(parse(scout: ["mcp__a__get_*"], act: ["mcp__a__send", 7]) == nil)
         #expect(ProVisorAccess.parse(Data(#"{"scout": []}"#.utf8)) == nil)
     }
+
+    @Test("The shipped access is sealed: every scout rule is a known read-only rule")
+    func defaultAccessIsSealed() throws {
+        let access = try #require(
+            ProVisorAccess.parse(Data(ProVisorAccess.defaultFileContents.utf8))
+        )
+
+        #expect(access.scoutIsSealed)
+        #expect(!access.scout.isEmpty)
+    }
+
+    @Test("Any scout rule off the known list unseals the access")
+    func otherScoutRulesUnseal() throws {
+        let defaults = try #require(
+            ProVisorAccess.parse(Data(ProVisorAccess.defaultFileContents.utf8))
+        )
+
+        for extra in [
+            "mcp__claude_ai_Google_Calendar__create_event",
+            "mcp__claude_ai_Notion__notion-fetch",
+            "mcp__claude_ai_Notion__notion-search",
+            "mcp__claude_ai_Gmail__send_message",
+            "mcp__claude_ai_Gmail__*",
+            "mcp__claude_ai_Gmail__get_thread",
+            "mcp__other__search_*",
+        ] {
+            let widened = ProVisorAccess(scout: defaults.scout + [extra], act: defaults.act, auto: defaults.auto)
+            #expect(!widened.scoutIsSealed, "\(extra)")
+            #expect(!ProVisorAccess(scout: [extra], act: [], auto: []).scoutIsSealed, "\(extra)")
+        }
+    }
+
+    @Test("An empty scout list is sealed, and the acting lists play no part")
+    func sealedIgnoresActingLists() {
+        #expect(ProVisorAccess(scout: [], act: [], auto: []).scoutIsSealed)
+        #expect(
+            ProVisorAccess(
+                scout: ["mcp__claude_ai_Gmail__get_*"],
+                act: ["mcp__claude_ai_Gmail__create_draft", "mcp__claude_ai_Notion__notion-fetch"],
+                auto: ["mcp__claude_ai_Gmail__trash_*"]
+            ).scoutIsSealed
+        )
+    }
+
+    @Test("The sealed rules hold only valid read rules, and cover the shipped scout list")
+    func sealedRulesCoverTheDefaults() throws {
+        let access = try #require(
+            ProVisorAccess.parse(Data(ProVisorAccess.defaultFileContents.utf8))
+        )
+
+        #expect(!ProVisorAccess.sealedReadRules.isEmpty)
+        #expect(Set(access.scout).isSubset(of: ProVisorAccess.sealedReadRules))
+        for rule in ProVisorAccess.sealedReadRules {
+            #expect(ProVisorAccess.isValidRule(rule), "\(rule)")
+            let tool = rule.components(separatedBy: "__").last ?? ""
+            #expect(["search_*", "get_*", "list_*"].contains(tool), "\(rule)")
+        }
+    }
 }
 
 @Suite("ProVisor command line")

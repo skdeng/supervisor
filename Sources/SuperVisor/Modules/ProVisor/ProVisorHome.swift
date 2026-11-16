@@ -179,6 +179,21 @@ struct ProVisorAccess: Equatable, Sendable {
 
     static let maximumRules = 64
 
+    /// Connector rules known to read and nothing else: none can send, invite, post, or fetch an
+    /// address. Site and text tools are attached to a run only while every scout rule is on this
+    /// list, because a tool that can carry data out would make them a way to leak it.
+    static let sealedReadRules: Set<String> = [
+        "mcp__claude_ai_Gmail__search_*",
+        "mcp__claude_ai_Gmail__get_*",
+        "mcp__claude_ai_Gmail__list_*",
+        "mcp__claude_ai_Google_Calendar__list_*",
+        "mcp__claude_ai_Google_Calendar__get_*",
+        "mcp__claude_ai_Google_Calendar__search_*",
+    ]
+
+    /// Whether every scout rule is on `sealedReadRules`. An empty scout list is sealed.
+    var scoutIsSealed: Bool { scout.allSatisfy(Self.sealedReadRules.contains) }
+
     /// A rule names one connector tool, or a family of them by a trailing `*`, under a literal
     /// server: `mcp__claude_ai_Gmail__search_*`. Nothing else is accepted — no built-in tool
     /// (so the file can never grant a shell), no parenthesized specifier, and no pattern
