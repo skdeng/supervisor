@@ -39,8 +39,9 @@ final class ProVisorCenter: ObservableObject {
 
     /// Called when the set of proposals on disk changes.
     var onProposalsChanged: (() -> Void)?
-    /// Called with how many proposals a scouting pass added.
-    var onScoutAdded: ((Int) -> Void)?
+    /// Called with how many proposals needing a decision a finished run added: a scouting
+    /// pass, or a reviewed run raising something it found and could not settle.
+    var onProposalsAdded: ((Int) -> Void)?
 
     private static let lastScoutKey = "provisor.lastScoutAt"
     private static let scoutTimeout: Duration = .seconds(20 * 60)
@@ -87,6 +88,7 @@ final class ProVisorCenter: ObservableObject {
     /// Proposals already admitted under a standing approval, so a reload never admits one twice.
     private var automaticIDs: Set<String> = []
     private var automaticRunsThisPass = 0
+    private var announcer = ProposalAnnouncer()
     private var lastAttempt: Date?
     /// Bumped on every start and stop, so a run that outlives its activation reports to nobody.
     private var activation = 0
@@ -116,6 +118,8 @@ final class ProVisorCenter: ObservableObject {
         }
 
         standingRules = StandingApprovals.load(from: ProVisorHome.standingURL)
+        // Items a run raised just before the app last quit are still waiting in the folder.
+        admitRaisedItems()
 
         let watcher = DirectoryTreeWatcher(url: ProVisorHome.proposalsURL) { [weak self] in
             DispatchQueue.main.async {
@@ -198,6 +202,7 @@ final class ProVisorCenter: ObservableObject {
         standingRules = []
         automaticIDs = []
         automaticRunsThisPass = 0
+        announcer = ProposalAnnouncer()
     }
 
     // MARK: - Scouting
@@ -265,7 +270,6 @@ final class ProVisorCenter: ObservableObject {
 
         let service = AgentTaskService()
         scoutService = service
-        let knownIDs = Set(proposals.map(\.id))
         let activation = self.activation
         Task { [weak self] in
             let outcome: Result<AgentTaskResult, any Error>
@@ -278,13 +282,12 @@ final class ProVisorCenter: ObservableObject {
             } catch {
                 outcome = .failure(error)
             }
-            await self?.finishScout(outcome, knownIDs: knownIDs, activation: activation)
+            await self?.finishScout(outcome, activation: activation)
         }
     }
 
     private func finishScout(
         _ outcome: Result<AgentTaskResult, any Error>,
-        knownIDs: Set<String>,
         activation: Int
     ) async {
         guard activation == self.activation else { return }
@@ -315,18 +318,27 @@ final class ProVisorCenter: ObservableObject {
         // count is taken from disk either way.
         let loaded = await reload()
         guard activation == self.activation else { return }
-        // Only what needs a decision is announced. Something admitted under a standing
-        // approval is being dealt with, which is the point of having given one.
-        let added = loaded.filter { proposal in
-            proposal.status == .proposed
-                && !knownIDs.contains(proposal.id)
-                && !automaticIDs.contains(proposal.id)
-        }.count
-        if added > 0 {
-            AppLog.notice(.provisor, "scout added \(added)")
-            onScoutAdded?(added)
-        }
+        announceAdded(in: loaded)
         armSchedule()
+    }
+
+    private func announceAdded(in loaded: [Proposal]) {
+        let added = announcer.countNew(in: loaded, automatic: automaticIDs)
+        if added > 0 {
+            AppLog.notice(.provisor, "proposals added \(added)")
+            onProposalsAdded?(added)
+        }
+    }
+
+    /// Brings anything a reviewed run raised into the queue. The run cannot write there itself.
+    private func admitRaisedItems() {
+        let admitted = RaisedItems.admit(
+            from: ProVisorHome.raisedURL,
+            into: ProVisorHome.proposalsURL
+        )
+        if admitted > 0 {
+            AppLog.notice(.provisor, "raised items admitted \(admitted)")
+        }
     }
 
     // MARK: - Decisions
@@ -628,6 +640,14 @@ final class ProVisorCenter: ObservableObject {
                 automatic: isAutomatic ? true : nil
             )
         }
+        // A reviewed run may have raised something it found and could not settle.
+        admitRaisedItems()
+        Task { [weak self] in
+            guard let loaded = await self?.reload(), activation == self?.activation else {
+                return
+            }
+            self?.announceAdded(in: loaded)
+        }
         startNextAct()
     }
 
@@ -675,6 +695,7 @@ final class ProVisorCenter: ObservableObject {
 
         // A slower, older read must not replace a newer one.
         if sequence == reloadSequence, isActive {
+            announcer.seedIfNeeded(with: loaded)
             if loaded != proposals {
                 proposals = loaded
                 onProposalsChanged?()

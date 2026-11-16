@@ -74,8 +74,23 @@ enum ProVisorHome {
         workspaceURL.appendingPathComponent(memoryDirectoryName, isDirectory: true)
     }
 
+    static var followUpsURL: URL {
+        workspaceURL.appendingPathComponent(followUpsDirectoryName, isDirectory: true)
+    }
+
+    static var raisedURL: URL {
+        workspaceURL.appendingPathComponent(raisedDirectoryName, isDirectory: true)
+    }
+
     static let proposalsDirectoryName = "proposals"
     static let memoryDirectoryName = "memory"
+    /// Checks the agent owes after a decision: things it could not confirm at the time and is
+    /// to look at again on a later pass, without involving the user unless one turns out wrong.
+    static let followUpsDirectoryName = "followups"
+    /// Where a reviewed run leaves an item it wants put to the user. The app brings each into
+    /// the queue under an id of its own (`RaisedItems`), so the run never writes in
+    /// `proposals/` and can neither replace a proposal nor claim a standing approval.
+    static let raisedDirectoryName = "raised"
 
     static var bundledCharterURL: URL? {
         Bundle.main.url(forResource: "provisor-charter", withExtension: "md")
@@ -88,7 +103,9 @@ enum ProVisorHome {
     /// Creates the folders and seeds the brief and the access list where they are absent.
     /// Existing files are never overwritten: both are the user's once they exist.
     static func prepare() throws {
-        for directory in [rootURL, workspaceURL, proposalsURL, memoryURL] {
+        for directory in [
+            rootURL, workspaceURL, proposalsURL, memoryURL, followUpsURL, raisedURL,
+        ] {
             try FileManager.default.createDirectory(
                 at: directory,
                 withIntermediateDirectories: true,
@@ -282,6 +299,7 @@ enum ProVisorCommand {
             writableDirectories: [
                 ProVisorHome.proposalsDirectoryName,
                 ProVisorHome.memoryDirectoryName,
+                ProVisorHome.followUpsDirectoryName,
             ],
             connectorTools: access.scout
         )
@@ -327,7 +345,9 @@ enum ProVisorCommand {
     static func approvedArguments(
         proposal: Proposal,
         option: ProposalOption,
-        access: ProVisorAccess
+        access: ProVisorAccess,
+        now: Date = Date(),
+        timeZone: TimeZone = .current
     ) -> [String] {
         let prompt = """
         The person you work for approved the proposal below in SuperVisor after reading its \
@@ -339,8 +359,7 @@ enum ProVisorCommand {
         part that is safe and stop there. Do not substitute a different action, and do not \
         retry a tool call that was denied.
 
-        Finish with one or two plain sentences saying what you did and what, if anything, is \
-        left for them to do. That text is shown to them as the result.
+        \(closingInstructions(proposalID: proposal.id, now: now, timeZone: timeZone))
 
         Title: \(proposal.title)
         Why it was proposed: \(proposal.why ?? "not stated")
@@ -351,7 +370,7 @@ enum ProVisorCommand {
             systemPrompt: nil,
             maximumTurns: 40,
             budget: "1.00",
-            writableDirectories: [],
+            writableDirectories: reviewedRunDirectories,
             connectorTools: access.scout + access.act
         )
     }
@@ -368,7 +387,9 @@ enum ProVisorCommand {
         proposal: Proposal,
         instruction: String,
         reference: ProposalOption,
-        access: ProVisorAccess
+        access: ProVisorAccess,
+        now: Date = Date(),
+        timeZone: TimeZone = .current
     ) -> [String] {
         let prompt = """
         The person you work for read the proposal below in SuperVisor and, in place of the \
@@ -383,8 +404,7 @@ enum ProVisorCommand {
         stop there. Do not substitute a different action, do not fall back to the suggested \
         one, and do not retry a tool call that was denied.
 
-        Finish with one or two plain sentences saying what you did and what, if anything, is \
-        left for them to do. That text is shown to them as the result.
+        \(closingInstructions(proposalID: proposal.id, now: now, timeZone: timeZone))
 
         Their instruction: \(instruction)
 
@@ -398,9 +418,58 @@ enum ProVisorCommand {
             systemPrompt: nil,
             maximumTurns: 40,
             budget: "1.00",
-            writableDirectories: [],
+            writableDirectories: reviewedRunDirectories,
             connectorTools: access.scout + access.act
         )
+    }
+
+    /// The folders a reviewed run may write in: a note for a later pass, and an item to put to
+    /// the user when something it checked is wrong or cannot be checked.
+    static let reviewedRunDirectories = [
+        ProVisorHome.raisedDirectoryName,
+        ProVisorHome.followUpsDirectoryName,
+    ]
+
+    /// How a reviewed run ends: it settles what it can by reading, leaves a note for a later
+    /// pass where the answer is not available yet, and raises an item — at once — for whatever
+    /// turned out wrong or lies beyond its tools, naming the access that would settle it.
+    static func closingInstructions(proposalID: String, now: Date, timeZone: TimeZone) -> String {
+        """
+        Before you finish, deal with anything you would otherwise leave them to verify or look \
+        up. Checking is your job: use every reading tool you have, and look with ToolSearch \
+        for one that could answer it before deciding none can. Reading, and the notes \
+        described here, are part of finishing and never "something further"; only changing \
+        something in their accounts is. Then sort what remains:
+
+        - Settled by what you read: say in a few words what you confirmed. They have nothing \
+        to do.
+        - Not knowable yet, but it will be (a receipt, a confirmation, or a charge that has not \
+        arrived): write a note to `followups/\(proposalID).md` whose first line is \
+        `Status: open`, stating what to check, why it matters to them, what would show it is \
+        fine and what would show a problem, the date it can first be checked, and the date \
+        after which it no longer matters. A later run checks it and involves them only if it \
+        turns out wrong. Do not mention it to them.
+        - Wrong, or out of reach of the tools you have (it needs a sign-in to a site, or a \
+        tool you were denied): raise it now as an item of its own. First look in `proposals/` \
+        and `followups/`: if an item about the same thing is already waiting, or they have \
+        already answered it, raise nothing, because an answer they gave settles the question. \
+        Otherwise write `raised/<short-name>.json` holding one JSON object: `title` (at most \
+        100 characters: the thing to confirm or fix), `why` (at most 400: what depends on \
+        it, what you tried, and exactly what access would let you check it yourself next \
+        time), `options` (one to three of `{"label", "action"}`: the answers or next steps \
+        they are likely to want, no two labels alike, each label at most 24 characters and \
+        each action at most 600, complete on its own, and within what a run with your tools \
+        can do, such as recording their answer in a note under `followups/`), `kind` \
+        (`"confirm"`), and `created` (the time now in UTC, like 2026-11-15T17:12:00Z). \
+        SuperVisor puts it in their queue, and they can also answer in their own words. Raise \
+        at most three.
+        - Theirs alone (a payment, a signature, a judgment only they can make): say what it is.
+
+        Finish with one or two plain sentences: what you did, anything that is theirs alone, \
+        and, if you raised an item, that you did. That text is shown to them as the result. \
+        It is \(ProVisorClock.localStamp(now, timeZone: timeZone)) where they are \
+        (\(timeZone.identifier)); in UTC, \(now.formatted(.iso8601)).
+        """
     }
 
     /// The run that carries out a proposal admitted under a standing approval. Nobody saw this

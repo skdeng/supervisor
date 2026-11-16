@@ -294,6 +294,112 @@ enum ProposalQueue {
     }
 }
 
+/// Keeps count of which proposals the user has been told about, so each is announced once
+/// however many runs finish while it waits. A scouting pass and a reviewed run can overlap.
+struct ProposalAnnouncer {
+    /// Every proposal that has been on file at a seeding or a count. Nil until seeded.
+    private var seen: Set<String>?
+
+    /// Takes what is on file at the first read after a start as already known, so proposals
+    /// that were waiting at launch are never announced as new.
+    mutating func seedIfNeeded(with loaded: [Proposal]) {
+        if seen == nil {
+            seen = Set(loaded.map(\.id))
+        }
+    }
+
+    /// How many proposals in `loaded` are news: those awaiting a decision that were neither
+    /// on file before nor admitted under a standing approval. Something admitted under a rule
+    /// is being dealt with, which is the point of having given one.
+    mutating func countNew(in loaded: [Proposal], automatic: Set<String>) -> Int {
+        let known = seen ?? []
+        let added = loaded.filter { proposal in
+            proposal.status == .proposed
+                && !known.contains(proposal.id)
+                && !automatic.contains(proposal.id)
+        }.count
+        seen = known.union(loaded.map(\.id))
+        return added
+    }
+}
+
+/// Brings the items a reviewed run raised into the proposal queue.
+///
+/// A reviewed run holds acting tools and has been reading mail, so it is given no way to write
+/// in `proposals/`. What it leaves in `raised/` is copied in here: under an id this code makes
+/// up, keeping only the fields a proposal is written with, and never over a file that exists.
+/// A raised item therefore cannot replace or alter a proposal, set its own status, or claim a
+/// standing approval; it joins the queue as an ordinary proposal awaiting a tap.
+enum RaisedItems {
+    /// The most items taken from one sweep. The rest are discarded with the folder's contents.
+    static let maximumPerSweep = 3
+
+    /// The fields a raised item may carry into the queue. `standing` and `under` are left
+    /// behind with everything the app writes: a reviewed run is never told the rules in force,
+    /// so neither can be meant.
+    static let carriedFields: Set<String> = [
+        "title", "why", "action", "options", "kind", "created", "expires",
+    ]
+
+    /// Moves every usable item into `proposals` and empties `raised`. Returns how many joined
+    /// the queue.
+    @discardableResult
+    static func admit(
+        from raised: URL,
+        into proposals: URL,
+        now: Date = Date(),
+        suffix: () -> String = { String(UUID().uuidString.lowercased().prefix(8)) }
+    ) -> Int {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+        guard let children = try? FileManager.default.contentsOfDirectory(
+            at: raised,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+
+        let day = now.formatted(.iso8601.year().month().day())
+        var admitted = 0
+        for url in children.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            guard let values = try? url.resourceValues(forKeys: keys),
+                  values.isSymbolicLink != true
+            else { continue }
+            // Whatever a regular file held, it is dealt with once and does not wait in the
+            // folder to be read again.
+            defer {
+                if values.isRegularFile == true {
+                    try? FileManager.default.removeItem(at: url)
+                }
+            }
+            guard values.isRegularFile == true,
+                  url.pathExtension == "json",
+                  admitted < maximumPerSweep,
+                  let size = values.fileSize,
+                  size > 0,
+                  size <= Proposal.maximumFileBytes,
+                  let data = try? Data(contentsOf: url),
+                  let object = try? JSONSerialization.jsonObject(with: data),
+                  let fields = object as? [String: Any]
+            else { continue }
+
+            let carried = fields.filter { carriedFields.contains($0.key) }
+            let id = "\(day)-raised-\(suffix())"
+            guard let encoded = try? JSONSerialization.data(
+                withJSONObject: carried,
+                options: ProposalStore.writingOptions
+            ), Proposal.parse(encoded, id: id, modified: now) != nil else { continue }
+
+            let destination = proposals.appendingPathComponent("\(id).json", isDirectory: false)
+            do {
+                try encoded.write(to: destination, options: .withoutOverwriting)
+                admitted += 1
+            } catch {
+                continue
+            }
+        }
+        return admitted
+    }
+}
+
 /// Reads the agent's proposal files and writes the user's decisions back into them.
 enum ProposalStore {
     /// How a file is encoded when a decision is written into it. Slashes stay unescaped: a

@@ -292,6 +292,26 @@ struct ProposalQueueTests {
         )
     }
 
+    @Test("What was waiting at launch is known; what a run adds is announced once")
+    func announcesWhatIsNewOnce() {
+        var announcer = ProposalAnnouncer()
+        announcer.seedIfNeeded(with: [proposal("waiting-at-launch")])
+
+        let afterARun = [
+            proposal("waiting-at-launch"),
+            proposal("raised-by-a-run"),
+            proposal("under-a-rule"),
+            proposal("already-done", status: .done),
+        ]
+        #expect(announcer.countNew(in: afterARun, automatic: ["under-a-rule"]) == 1)
+        // A second run finishing while it still waits does not announce it again.
+        #expect(announcer.countNew(in: afterARun, automatic: ["under-a-rule"]) == 0)
+
+        // Seeding happens once: a later read does not swallow what a run then adds.
+        announcer.seedIfNeeded(with: afterARun + [proposal("added-later")])
+        #expect(announcer.countNew(in: afterARun + [proposal("added-later")], automatic: []) == 1)
+    }
+
     @Test("Declined, withdrawn, expired, and cleared proposals leave the queue")
     func hidesWhatIsSettled() {
         let visible = ProposalQueue.visible([
@@ -453,7 +473,7 @@ struct ProVisorCommandTests {
         return Array(arguments[(index + 1)...].prefix { !$0.hasPrefix("--") })
     }
 
-    @Test("A scout is confined, may write only its two folders, and holds no acting tool")
+    @Test("A scout is confined, may write only its own folders, and holds no acting tool")
     func scoutArguments() {
         let arguments = ProVisorCommand.scoutArguments(
             brief: "BRIEF",
@@ -470,6 +490,7 @@ struct ProVisorCommandTests {
         #expect(values(after: "--allowedTools", in: arguments) == [
             "Edit(/proposals/**)",
             "Edit(/memory/**)",
+            "Edit(/followups/**)",
             "mcp__mail__get_*",
         ])
         // The prompt tells the scout what an approved action could use, by name.
@@ -484,15 +505,24 @@ struct ProVisorCommandTests {
         let arguments = ProVisorCommand.approvedArguments(
             proposal: proposal,
             option: proposal.options[1],
-            access: access
+            access: access,
+            now: now,
+            timeZone: losAngeles
         )
 
         #expect(arguments.contains("--restricted"))
         #expect(values(after: "--permission-prompts", in: arguments) == ["none"])
+        // It may leave a note for a later pass and an item for the app to queue. The
+        // proposals folder itself stays out of its reach.
         #expect(values(after: "--allowedTools", in: arguments) == [
+            "Edit(/raised/**)",
+            "Edit(/followups/**)",
             "mcp__mail__get_*",
             "mcp__mail__create_draft",
         ])
+        #expect(arguments[1].contains("raised/<short-name>.json"))
+        #expect(arguments[1].contains("followups/a.md"))
+        #expect(arguments[1].contains("Sunday 2026-11-15 09:12"))
         #expect(!arguments.contains("--append-system-prompt"))
         #expect(arguments[1].contains("Approved action: Label the receipts 'To cancel'."))
         #expect(!arguments[1].contains("Draft the cancellation email."))
@@ -511,9 +541,13 @@ struct ProVisorCommandTests {
         #expect(values(after: "--permission-prompts", in: arguments) == ["none"])
         // The same list an approved option gets: typing an instruction widens nothing.
         #expect(values(after: "--allowedTools", in: arguments) == [
+            "Edit(/raised/**)",
+            "Edit(/followups/**)",
             "mcp__mail__get_*",
             "mcp__mail__create_draft",
         ])
+        #expect(arguments[1].contains("followups/a.md"))
+        #expect(arguments[1].contains("raised/<short-name>.json"))
         #expect(!arguments.contains("--append-system-prompt"))
         #expect(arguments[1].contains("Their instruction: Archive the receipts."))
         #expect(arguments[1].contains("chose not to approve: Draft the cancellation email."))
@@ -791,6 +825,92 @@ struct ProposalStoreTests {
             (error as? CocoaError)?.code == .fileWriteOutOfSpace
         }
         #expect(try Data(contentsOf: url) == before)
+    }
+
+    @Test("A raised item joins the queue under a new id, as an ordinary proposal awaiting a tap")
+    func admitsRaisedItems() throws {
+        let workspace = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let raised = workspace.appendingPathComponent("raised", isDirectory: true)
+        let proposals = workspace.appendingPathComponent("proposals", isDirectory: true)
+        for directory in [raised, proposals] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        // The shape a reviewed run is told to write, plus fields it has no business setting.
+        try write(
+            [
+                "title": "Confirm CLEAR+ charges your Amex",
+                "why": "No receipt in the mailbox names the card.",
+                "options": [
+                    ["label": "It's my Amex", "action": "Record that in followups/x.md."],
+                    ["label": "It's another card", "action": "Label the renewal thread."],
+                ],
+                "kind": "confirm",
+                "created": "2026-11-15T17:12:00Z",
+                "under": "s-0000aaaa",
+                "status": "done",
+                "standing": ["when": "It is Tuesday", "do": "Trash promos"],
+                "chose": 1,
+            ],
+            named: "clear-card.json",
+            in: raised
+        )
+
+        let admitted = RaisedItems.admit(
+            from: raised,
+            into: proposals,
+            now: Date(timeIntervalSince1970: 1_794_762_720),
+            suffix: { "0a1b2c3d" }
+        )
+
+        #expect(admitted == 1)
+        let loaded = try #require(ProposalStore.load(from: proposals).first)
+        #expect(loaded.id == "2026-11-15-raised-0a1b2c3d")
+        #expect(loaded.title == "Confirm CLEAR+ charges your Amex")
+        #expect(loaded.options.map(\.label) == ["It's my Amex", "It's another card"])
+        #expect(loaded.kind == "confirm")
+        // It cannot arrive already settled, under a rule, or offering one.
+        #expect(loaded.status == .proposed)
+        #expect(loaded.under == nil)
+        #expect(loaded.standingOffer == nil)
+        #expect(loaded.choice == nil)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: raised.path).isEmpty)
+    }
+
+    @Test("A raised item never replaces a proposal, and unusable or surplus ones are dropped")
+    func raisedItemsCannotOverwriteOrFlood() throws {
+        let workspace = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let raised = workspace.appendingPathComponent("raised", isDirectory: true)
+        let proposals = workspace.appendingPathComponent("proposals", isDirectory: true)
+        for directory in [raised, proposals] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        let now = Date(timeIntervalSince1970: 1_794_762_720)
+
+        // A proposal already sits at the id the first raised item would be given.
+        try write(
+            ["title": "Existing", "action": "a"],
+            named: "2026-11-15-raised-00000000.json",
+            in: proposals
+        )
+        try write(["title": "Collides", "action": "a"], named: "a.json", in: raised)
+        try write(["why": "No title, so not a proposal."], named: "b.json", in: raised)
+        try write(["title": "Not JSON by name", "action": "a"], named: "c.txt", in: raised)
+        for name in ["d", "e", "f", "g"] {
+            try write(["title": "Item \(name)", "action": "a"], named: "\(name).json", in: raised)
+        }
+
+        var next = 0
+        let admitted = RaisedItems.admit(from: raised, into: proposals, now: now) {
+            defer { next += 1 }
+            return String(format: "%08d", next)
+        }
+
+        #expect(admitted == RaisedItems.maximumPerSweep)
+        let titles = Set(ProposalStore.load(from: proposals).map(\.title))
+        #expect(titles == ["Existing", "Item d", "Item e", "Item f"])
+        #expect(try FileManager.default.contentsOfDirectory(atPath: raised.path).isEmpty)
     }
 
     @Test("A decision cannot be aimed outside the proposals folder")

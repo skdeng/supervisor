@@ -40,7 +40,7 @@ final class ProVisorModule: NotchModule, ObservableObject {
         center.onProposalsChanged = { [weak self] in
             self?.reconcileExpandedPresence()
         }
-        center.onScoutAdded = { [weak self] count in
+        center.onProposalsAdded = { [weak self] count in
             self?.announce(count)
         }
         // Opening the sheet clears the glow, and that is the signal that the user looked.
@@ -62,7 +62,7 @@ final class ProVisorModule: NotchModule, ObservableObject {
         retireTask?.cancel()
         retireTask = nil
         center.onProposalsChanged = nil
-        center.onScoutAdded = nil
+        center.onProposalsAdded = nil
         center.stop()
         ProVisorReviewWindow.shared.close()
 
@@ -107,11 +107,12 @@ final class ProVisorModule: NotchModule, ObservableObject {
         !ProposalQueue.visible(center.proposals, now: Date()).isEmpty
     }
 
-    /// Raises the banner for proposals a scouting pass just added, and holds the surface for
-    /// it. `retireAnnouncement` is the single exit: the timeout, the sheet opening, or the
-    /// module deactivating.
+    /// Raises the banner for proposals a finished run just added, and holds the surface for
+    /// it. A second run finishing while the banner is up adds to its count.
+    /// `retireAnnouncement` is the single exit: the timeout, the sheet opening, or the module
+    /// deactivating.
     private func announce(_ count: Int) {
-        announcedCount = count
+        announcedCount = (announcedCount ?? 0) + count
         AttentionGlowCenter.shared.raise()
         context?.requestPeek(.infinity)
         // With another module's banner already holding the peek the request publishes no

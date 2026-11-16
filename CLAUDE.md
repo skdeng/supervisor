@@ -344,12 +344,22 @@ sink. Preserve these guards when touching the relevant code:
   agent looks one up. With it absent, every tool of every connector on the account rides in the
   first request (248,000 tokens for seven connectors, measured), the run ends on its spending
   limit after one turn, and the only symptom is "The agent reached its spending limit before
-  finishing". It grants nothing: looking a tool up does not allow calling it. The **scout** is allowed writes only under `proposals/`
-  and `memory/` (`Edit(/proposals/**)` — a leading slash on a command-line rule anchors at the
-  working directory, and `Edit` rules cover every file-writing tool) plus the **read** connector
-  tools in `access.json`, so nothing it reads can make it send, change, or delete. The tools
-  that change something are granted only to the **acting run**, which exists only after the
-  user approved one proposal. The brief, `access.json`, and `standing.json` sit *outside* the
+  finishing". It grants nothing: looking a tool up does not allow calling it. The **scout** is
+  allowed writes only under `proposals/`, `memory/`, and `followups/` (`Edit(/proposals/**)` —
+  a leading slash on a command-line rule anchors at the working directory, and `Edit` rules
+  cover every file-writing tool) plus the **read** connector tools in `access.json`, so nothing
+  it reads can make it send, change, or delete. The tools that change something are granted
+  only to the **acting run**, which exists only after the user approved one proposal or typed
+  an instruction. A reviewed acting run may write under `followups/` and `raised/`
+  (`ProVisorCommand.reviewedRunDirectories`): a note for a later pass, and an item to put to
+  the user when something it checked is wrong or beyond its tools. **It is given no way to
+  write in `proposals/`**: it holds acting tools and has been reading mail, and a rule
+  covering that folder would let it overwrite any proposal, its own included, or write one
+  claiming a standing approval. `RaisedItems.admit` copies what it left in `raised/` into the
+  queue under an id the app makes up, keeping only the fields a proposal is written with
+  (never `under`, `standing`, or anything the app writes) and never over an existing file, at
+  most three per sweep. A follow-up is the agent's own note about a read-only check. Memory
+  stays the scout's, and a run under a standing approval writes no files at all. The brief, `access.json`, and `standing.json` sit *outside* the
   working directory, where the agent's file tools cannot reach them. `access.json` accepts only connector rules
   under a literal server (`\Amcp__<server>__<tool or tool*>\z`), and one malformed rule rejects
   the file: it can never name a built-in tool, so it cannot grant a shell. **A proposal file is
@@ -384,8 +394,8 @@ sink. Preserve these guards when touching the relevant code:
   starts from the recommended option and an empty box, because a box pre-filled from a file
   the scout can rewrite would run the scout's words as the user's. The banner carries a count only, and `AppLog` records names and counts —
   never proposal text or a failure's message, which can quote the agent's output. Verify a change
-  to the flags by running the CLI in a scratch directory and asking it to write outside its two
-  folders, read outside the directory, run a command, and call a connector tool that is not
+  to the flags by running the CLI in a scratch directory and asking it to write outside the
+  folders that run is allowed, read outside the directory, run a command, and call a connector tool that is not
   allowed: each must come back denied.
 - **A standing approval lets a ProVisor action run that nobody looked at first**, so a claim to
   be under one is worth only what the code grants it (`StandingApprovals`). A rule exists only
@@ -659,9 +669,21 @@ names below are the code paths.
     (its standing brief, seeded once from `Resources/provisor-charter.md` and then the user's to
     edit), `access.json` (which connector tools each kind of run may call), `standing.json`
     (the standing approvals), and `workspace/` — the run's working directory — holding
-    `proposals/` (one JSON file each) and `memory/` (the agent's own notes: what it has learned
-    about the user, what it has already examined). Each run starts with no recollection, so
-    those notes and the statuses on past proposals are all it knows.
+    `proposals/` (one JSON file each), `memory/` (the agent's own notes: what it has learned
+    about the user, what it has already examined), and `followups/` (checks owed after a
+    decision, one short note each). Each run starts with no recollection, so those notes and
+    the statuses on past proposals are all it knows.
+  - **The agent does the checking, and the user hears only when a check goes wrong.** A run
+    never hands the user something it could look up (`ProVisorCommand.closingInstructions`,
+    and "Do the checking yourself" in the protocol). What a reviewed run cannot confirm yet —
+    a receipt that has not arrived — it writes to `followups/<proposal id>.md`; each scouting
+    pass re-checks the open ones and settles them silently when they pass. One that turns out
+    wrong, or that the agent's tools cannot reach at all, is raised at once as a new proposal
+    of kind `confirm`, whose `why` names the access that would let the agent check it itself:
+    a connector tool to allow in `access.json`, or a site that needs the user's sign-in. The
+    scout writes that proposal itself; a reviewed run leaves it in `raised/` for
+    `RaisedItems.admit`. Follow-up notes are free text the agent writes for itself; the app
+    never parses them.
   - **The brief is two documents with two owners**, joined and passed as
     `--append-system-prompt`. `CHARTER.md` is the user's: what to look for and what is worth
     proposing. `Resources/provisor-protocol.md` is the app's, read from the bundle on every run
@@ -727,8 +749,10 @@ names below are the code paths.
     rule and offers **Stop Doing This**; Settings lists every rule in force with **Remove**. A
     revoked rule stays on file, and the scout is told never to offer it again. Something
     admitted under a rule is not announced: only what needs a decision raises the banner.
-  - **Attention:** a pass that adds proposals raises the attention glow and an 8-second banner
-    carrying a count only. No compact presence.
+  - **Attention:** a finished run that adds proposals needing a decision — a scouting pass, or
+    a reviewed run raising something it could not settle — raises the attention glow and an
+    8-second banner carrying a count only (`ProposalAnnouncer`; each proposal is announced
+    once, since a pass and a reviewed run can overlap). No compact presence.
 
 **`Modules/SystemHUD/`** (volume / brightness / keyboard-backlight HUD — `VolumeController`,
 `BrightnessController`, `KeyboardBacklightController`, `MediaKeyMonitor`) is present but **NOT wired
