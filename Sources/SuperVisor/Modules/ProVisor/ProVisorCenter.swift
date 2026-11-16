@@ -32,6 +32,8 @@ final class ProVisorCenter: ObservableObject {
     /// Approved proposals waiting behind the acting run.
     @Published private(set) var queuedIDs: [String] = []
     @Published private(set) var lastScout: ScoutReport?
+    /// The user's standing approvals, in force and revoked, as last read from disk.
+    @Published private(set) var standingRules: [StandingRule] = []
     /// Whether the module is enabled and the center is watching and scheduling.
     @Published private(set) var isActive = false
 
@@ -51,8 +53,17 @@ final class ProVisorCenter: ObservableObject {
     private var workspaceObservers: [NSObjectProtocol] = []
     private var scoutService: AgentTaskService?
     private var actService: AgentTaskService?
-    /// Approved proposals, each captured as the user saw it when they approved.
-    private var pendingActs: [Proposal] = []
+    /// A proposal waiting to be carried out: approved by a tap, or — with `rule` — admitted
+    /// under a standing approval. Each is captured as it stood at that moment.
+    private struct PendingAct {
+        let proposal: Proposal
+        let rule: StandingRule?
+    }
+
+    private var pendingActs: [PendingAct] = []
+    /// Proposals already admitted under a standing approval, so a reload never admits one twice.
+    private var automaticIDs: Set<String> = []
+    private var automaticRunsThisPass = 0
     private var lastAttempt: Date?
     /// Bumped on every start and stop, so a run that outlives its activation reports to nobody.
     private var activation = 0
@@ -80,6 +91,8 @@ final class ProVisorCenter: ObservableObject {
         } catch {
             report(setupFailure: error)
         }
+
+        standingRules = StandingApprovals.load(from: ProVisorHome.standingURL)
 
         let watcher = DirectoryTreeWatcher(url: ProVisorHome.proposalsURL) { [weak self] in
             DispatchQueue.main.async {
@@ -158,6 +171,9 @@ final class ProVisorCenter: ObservableObject {
         actingID = nil
         isScouting = false
         proposals = []
+        standingRules = []
+        automaticIDs = []
+        automaticRunsThisPass = 0
     }
 
     // MARK: - Scouting
@@ -196,12 +212,16 @@ final class ProVisorCenter: ObservableObject {
     private func startScout() {
         guard isActive, !isScouting else { return }
 
+        // Read fresh: the file is the user's, and may have been edited by hand since.
+        standingRules = StandingApprovals.load(from: ProVisorHome.standingURL)
+
         let arguments: [String]
         do {
             try ProVisorHome.prepare()
             arguments = try ProVisorCommand.scoutArguments(
-                charter: ProVisorHome.loadCharter(),
+                brief: ProVisorHome.loadBrief(),
                 access: ProVisorHome.loadAccess(),
+                standing: standingRules,
                 now: Date()
             )
         } catch {
@@ -215,6 +235,7 @@ final class ProVisorCenter: ObservableObject {
 
         isScouting = true
         lastAttempt = Date()
+        automaticRunsThisPass = 0
         cancelSchedule()
         AppLog.notice(.provisor, "scout started")
 
@@ -270,7 +291,13 @@ final class ProVisorCenter: ObservableObject {
         // count is taken from disk either way.
         let loaded = await reload()
         guard activation == self.activation else { return }
-        let added = loaded.filter { $0.status == .proposed && !knownIDs.contains($0.id) }.count
+        // Only what needs a decision is announced. Something admitted under a standing
+        // approval is being dealt with, which is the point of having given one.
+        let added = loaded.filter { proposal in
+            proposal.status == .proposed
+                && !knownIDs.contains(proposal.id)
+                && !automaticIDs.contains(proposal.id)
+        }.count
         if added > 0 {
             AppLog.notice(.provisor, "scout added \(added)")
             onScoutAdded?(added)
@@ -280,8 +307,9 @@ final class ProVisorCenter: ObservableObject {
 
     // MARK: - Decisions
 
-    /// Approves a proposal and queues the run that carries it out.
-    func approve(_ id: String) {
+    /// Approves a proposal and queues the run that carries it out. With `always`, the rule the
+    /// proposal offered also becomes a standing approval.
+    func approve(_ id: String, always: Bool = false) {
         guard isActive,
               actingID != id,
               !queuedIDs.contains(id),
@@ -289,9 +317,87 @@ final class ProVisorCenter: ObservableObject {
               proposal.isOpen
         else { return }
         // Captured as displayed: the run is instructed from this copy, so nothing written to
-        // the file after the tap can change what was approved.
-        pendingActs.append(proposal)
+        // the file after the tap can change what was approved. This run was reviewed, so it
+        // gets the reviewed tool list whether or not a rule comes of it.
+        pendingActs.append(PendingAct(proposal: proposal, rule: nil))
         queuedIDs.append(id)
+
+        // An offer is answered either way, and the answer is written where the agent reads it:
+        // "just this once" is how it learns that this kind of thing is to keep being asked.
+        if let offer = proposal.standingOffer {
+            if always {
+                updateStanding { rules in
+                    guard let rule = StandingApprovals.rule(adding: offer, to: rules, now: Date())
+                    else { return rules }
+                    return rules + [rule]
+                }
+            }
+            record(id, standingDecision: always ? "accepted" : "declined")
+        }
+        startNextAct()
+    }
+
+    /// Takes a standing approval back. Anything still waiting to run under it is dropped and
+    /// goes back to being an ordinary proposal awaiting a tap.
+    func revokeStanding(_ ruleID: String) {
+        updateStanding { StandingApprovals.revoking(ruleID, in: $0, now: Date()) }
+
+        let dropped = Set(pendingActs.filter { $0.rule?.id == ruleID }.map(\.proposal.id))
+        pendingActs.removeAll { dropped.contains($0.proposal.id) }
+        queuedIDs.removeAll { dropped.contains($0) }
+        AppLog.notice(.provisor, "standing approval revoked")
+    }
+
+    /// Reads the rules from disk, applies `change`, and writes them back. Read first because
+    /// the file is the user's to edit; kept in memory only once the write has succeeded, so a
+    /// failed save never leaves a rule in force that is not on file.
+    private func updateStanding(_ change: ([StandingRule]) -> [StandingRule]) {
+        let current = StandingApprovals.load(from: ProVisorHome.standingURL)
+        let updated = change(current)
+        guard updated != current else {
+            standingRules = current
+            return
+        }
+        do {
+            try StandingApprovals.save(updated, to: ProVisorHome.standingURL)
+            standingRules = updated
+        } catch {
+            standingRules = current
+            AppLog.error(.provisor, "standing approvals not saved")
+        }
+    }
+
+    /// Admits proposals that name a standing approval in force, up to the per-pass limit.
+    ///
+    /// `under` is the agent's claim, and the agent has been reading mail from anyone, so the
+    /// claim buys only what the code allows: a rule that exists and is in force, the shorter
+    /// tool list, and a handful per pass. Whatever is not admitted stays an ordinary proposal.
+    private func admitStandingActions(from loaded: [Proposal]) {
+        guard isActive else { return }
+        let now = Date()
+        let candidates = loaded.filter { proposal in
+            !automaticIDs.contains(proposal.id)
+                && actingID != proposal.id
+                && !queuedIDs.contains(proposal.id)
+                && StandingApprovals.rule(for: proposal, in: standingRules, now: now) != nil
+        }
+        guard !candidates.isEmpty,
+              automaticRunsThisPass < StandingApprovals.actionsPerPass,
+              // No tools set aside for unreviewed runs means standing approvals are off.
+              let access = try? ProVisorHome.loadAccess(),
+              !access.auto.isEmpty
+        else { return }
+
+        for proposal in candidates {
+            guard automaticRunsThisPass < StandingApprovals.actionsPerPass,
+                  let rule = StandingApprovals.rule(for: proposal, in: standingRules, now: now)
+            else { break }
+            automaticRunsThisPass += 1
+            automaticIDs.insert(proposal.id)
+            pendingActs.append(PendingAct(proposal: proposal, rule: rule))
+            queuedIDs.append(proposal.id)
+        }
+        AppLog.notice(.provisor, "standing actions admitted \(automaticRunsThisPass)")
         startNextAct()
     }
 
@@ -300,7 +406,7 @@ final class ProVisorCenter: ObservableObject {
         guard actingID != id, let proposal = proposals.first(where: { $0.id == id }) else {
             return
         }
-        pendingActs.removeAll { $0.id == id }
+        pendingActs.removeAll { $0.proposal.id == id }
         queuedIDs.removeAll { $0 == id }
 
         switch proposal.status {
@@ -315,17 +421,25 @@ final class ProVisorCenter: ObservableObject {
 
     private func startNextAct() {
         guard isActive, actingID == nil, !pendingActs.isEmpty else { return }
-        let proposal = pendingActs.removeFirst()
+        let pending = pendingActs.removeFirst()
+        let proposal = pending.proposal
+        let isAutomatic = pending.rule != nil
         queuedIDs.removeAll { $0 == proposal.id }
 
         let arguments: [String]
         do {
             arguments = try ProVisorCommand.actArguments(
                 proposal: proposal,
-                access: ProVisorHome.loadAccess()
+                access: ProVisorHome.loadAccess(),
+                under: pending.rule
             )
         } catch {
-            record(proposal.id, status: .failed, result: error.localizedDescription)
+            record(
+                proposal.id,
+                status: .failed,
+                result: error.localizedDescription,
+                automatic: isAutomatic ? true : nil
+            )
             startNextAct()
             return
         }
@@ -347,13 +461,19 @@ final class ProVisorCenter: ObservableObject {
             } catch {
                 outcome = .failure(error)
             }
-            self?.finishAct(proposal.id, outcome: outcome, activation: activation)
+            self?.finishAct(
+                proposal.id,
+                outcome: outcome,
+                isAutomatic: isAutomatic,
+                activation: activation
+            )
         }
     }
 
     private func finishAct(
         _ id: String,
         outcome: Result<AgentTaskResult, any Error>,
+        isAutomatic: Bool,
         activation: Int
     ) {
         guard activation == self.activation else { return }
@@ -363,10 +483,20 @@ final class ProVisorCenter: ObservableObject {
         switch outcome {
         case let .success(result):
             AppLog.notice(.provisor, "action finished")
-            record(id, status: .done, result: result.text.isEmpty ? "Done." : result.text)
+            record(
+                id,
+                status: .done,
+                result: result.text.isEmpty ? "Done." : result.text,
+                automatic: isAutomatic ? true : nil
+            )
         case let .failure(error):
             AppLog.error(.provisor, "action failed: \(Self.logName(error))")
-            record(id, status: .failed, result: error.localizedDescription)
+            record(
+                id,
+                status: .failed,
+                result: error.localizedDescription,
+                automatic: isAutomatic ? true : nil
+            )
         }
         startNextAct()
     }
@@ -377,7 +507,9 @@ final class ProVisorCenter: ObservableObject {
         _ id: String,
         status: Proposal.Status? = nil,
         result: String? = nil,
-        cleared: Bool? = nil
+        cleared: Bool? = nil,
+        standingDecision: String? = nil,
+        automatic: Bool? = nil
     ) {
         do {
             try ProposalStore.record(
@@ -385,7 +517,9 @@ final class ProVisorCenter: ObservableObject {
                 in: ProVisorHome.proposalsURL,
                 status: status,
                 result: Proposal.displayText(result, limit: Proposal.resultLimit),
-                cleared: cleared
+                cleared: cleared,
+                standingDecision: standingDecision,
+                automatic: automatic
             )
         } catch {
             AppLog.error(.provisor, "decision not recorded")
@@ -412,9 +546,12 @@ final class ProVisorCenter: ObservableObject {
         }.value
 
         // A slower, older read must not replace a newer one.
-        if sequence == reloadSequence, isActive, loaded != proposals {
-            proposals = loaded
-            onProposalsChanged?()
+        if sequence == reloadSequence, isActive {
+            if loaded != proposals {
+                proposals = loaded
+                onProposalsChanged?()
+            }
+            admitStandingActions(from: loaded)
         }
         return loaded
     }

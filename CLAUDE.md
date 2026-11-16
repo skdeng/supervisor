@@ -344,8 +344,8 @@ sink. Preserve these guards when touching the relevant code:
   working directory, and `Edit` rules cover every file-writing tool) plus the **read** connector
   tools in `access.json`, so nothing it reads can make it send, change, or delete. The tools
   that change something are granted only to the **acting run**, which exists only after the
-  user approved one proposal. The brief and `access.json` sit *outside* the working directory,
-  where the agent's file tools cannot reach them. `access.json` accepts only connector rules
+  user approved one proposal. The brief, `access.json`, and `standing.json` sit *outside* the
+  working directory, where the agent's file tools cannot reach them. `access.json` accepts only connector rules
   under a literal server (`\Amcp__<server>__<tool or tool*>\z`), and one malformed rule rejects
   the file: it can never name a built-in tool, so it cannot grant a shell. **A proposal file is
   model output shaped by that mail**: `Proposal.parse` validates the id against
@@ -360,6 +360,19 @@ sink. Preserve these guards when touching the relevant code:
   to the flags by running the CLI in a scratch directory and asking it to write outside its two
   folders, read outside the directory, run a command, and call a connector tool that is not
   allowed: each must come back denied.
+- **A standing approval lets a ProVisor action run that nobody looked at first**, so a claim to
+  be under one is worth only what the code grants it (`StandingApprovals`). A rule exists only
+  because the user tapped **Always** beside its full text — an offered rule over 200 characters
+  is dropped, never truncated — and the agent, which is told the rules in its prompt, cannot
+  write the file they live in. A proposal's `under` counts only when it names a rule in force on
+  a proposal still `proposed` and unexpired. The run gets its own tool list, `auto` in
+  `access.json` (by default label, trash, and mark: a subset of the approved list, with nothing
+  that sends or drafts and nothing that cannot be undone); an absent or empty `auto` switches
+  standing approvals off. At most five run per scouting pass, and the rest wait for a tap. The
+  run is also told the rule and to do nothing that falls outside it, but that is the model's
+  judgment and the tool list is the guarantee: the worst a hostile message can do through a
+  standing approval is get some mail wrongly labelled or trashed, a handful at a time, in rows
+  the user sees afterwards with a way to revoke the rule.
 
 ## Module Roster
 
@@ -616,11 +629,18 @@ names below are the code paths.
   collectors, no typed action catalog, and no domain logic in Swift.
   - **The agent's home** is `~/Library/Application Support/SuperVisor/ProVisor/`: `CHARTER.md`
     (its standing brief, seeded once from `Resources/provisor-charter.md` and then the user's to
-    edit; passed as `--append-system-prompt`), `access.json` (which connector tools each kind of
-    run may call), and `workspace/` — the run's working directory — holding `proposals/` (one
-    JSON file each) and `memory/` (the agent's own notes: what it has learned about the user,
-    what it has already examined). Each run starts with no recollection, so those notes and the
-    statuses on past proposals are all it knows.
+    edit), `access.json` (which connector tools each kind of run may call), `standing.json`
+    (the standing approvals), and `workspace/` — the run's working directory — holding
+    `proposals/` (one JSON file each) and `memory/` (the agent's own notes: what it has learned
+    about the user, what it has already examined). Each run starts with no recollection, so
+    those notes and the statuses on past proposals are all it knows.
+  - **The brief is two documents with two owners**, joined and passed as
+    `--append-system-prompt`. `CHARTER.md` is the user's: what to look for and what is worth
+    proposing. `Resources/provisor-protocol.md` is the app's, read from the bundle on every run
+    and never seeded: the proposal file format, how standing approvals work, the agent's
+    limits. **A field the app parses is described in the protocol, never the charter** — a
+    seeded charter is not updated when the app is, so a format described there would go stale
+    against the parser in every existing install.
   - **Data comes from the claude.ai connectors** Claude Code exposes locally
     (`mcp__claude_ai_<Server>__<tool>`); the default `access.json` reads Gmail and Google
     Calendar. Connectors load only for a Claude-account sign-in, not an API key. The connector
@@ -640,6 +660,19 @@ names below are the code paths.
     dismisses; it cannot approve. **Do It** on the review screen queues the acting run (one at
     a time; it may overlap a scouting pass). By default an approved action can label, trash,
     and mark mail and write drafts, and cannot send.
+  - **Standing approvals** are how "ask me" becomes "just do it", one kind of thing at a time,
+    and **which kinds is the agent's to work out** — there is no per-kind switch in Swift. When
+    the decision history shows a recurring, undoable kind being approved again and again, the
+    agent adds `"standing": "<rule>"` to a proposal; the review screen then shows the rule and
+    offers **Always** beside **Just Once**. **Always** appends the rule to `standing.json`
+    (`s-<8 hex>` id); either answer is written back as `standingDecision`, so "just once"
+    teaches the agent to keep asking for that kind. From then on the scout is told the rules in
+    force and may mark a proposal `"under": "<id>"`; `ProVisorCenter` admits it without a tap,
+    carries it out with the `auto` tool list, records `automatic: true`, and shows it as a
+    **Done automatically** row that leaves by itself after a day. Its review screen names the
+    rule and offers **Stop Doing This**; Settings lists every rule in force with **Remove**. A
+    revoked rule stays on file, and the scout is told never to offer it again. Something
+    admitted under a rule is not announced: only what needs a decision raises the banner.
   - **Attention:** a pass that adds proposals raises the attention glow and an 8-second banner
     carrying a count only. No compact presence.
 

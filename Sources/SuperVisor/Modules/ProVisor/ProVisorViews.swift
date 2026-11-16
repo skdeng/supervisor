@@ -156,7 +156,8 @@ private struct ProVisorRow: View {
         case .working:
             return "Working…"
         case .done:
-            return proposal.result.map { "Done · \($0)" } ?? "Done"
+            let label = proposal.isAutomatic ? "Done automatically" : "Done"
+            return proposal.result.map { "\(label) · \($0)" } ?? label
         case .failed:
             return proposal.result.map { "Couldn't finish · \($0)" } ?? "Couldn't finish"
         }
@@ -207,7 +208,12 @@ private struct ProVisorMarker: View {
 /// approving does, and the decision.
 ///
 /// The action shown here is the text the acting run is instructed with, in full — a proposal
-/// whose action is too long to show whole is rejected when its file is read.
+/// whose action is too long to show whole is rejected when its file is read. The same holds for
+/// a rule the agent offers to make standing: **Always** appears only beside the rule's full
+/// text, so a standing approval is always something the user read before granting.
+///
+/// For something already done under a standing approval, this is where the user sees which
+/// rule it was done under — and can take that rule back.
 @MainActor
 struct ProVisorDetailView: View {
     @ObservedObject var center: ProVisorCenter
@@ -240,7 +246,23 @@ struct ProVisorDetailView: View {
                 block("Why", why)
             }
 
-            block("What approving does", proposal.action)
+            block(
+                proposal.isAutomatic && state == .done ? "What was done" : "What approving does",
+                proposal.action
+            )
+
+            if state == .open || state == .failed, let offer = proposal.standingOffer {
+                block("From now on, without asking", offer)
+            }
+
+            if let rule = standingRule(for: proposal) {
+                block(
+                    rule.isActive
+                        ? "Done under your standing approval"
+                        : "Done under a standing approval you have since taken back",
+                    rule.text
+                )
+            }
 
             if let result = proposal.result, state == .done || state == .failed {
                 block(state == .failed ? "Last attempt" : "Result", result)
@@ -273,8 +295,14 @@ struct ProVisorDetailView: View {
                     center.dismiss(proposal.id)
                     close()
                 }
+                if proposal.standingOffer != nil {
+                    ProVisorCapsuleButton(title: "Always") {
+                        center.approve(proposal.id, always: true)
+                        close()
+                    }
+                }
                 ProVisorCapsuleButton(
-                    title: state == .failed ? "Try Again" : "Do It",
+                    title: approveTitle(proposal, state: state),
                     isProminent: true
                 ) {
                     center.approve(proposal.id)
@@ -288,12 +316,29 @@ struct ProVisorDetailView: View {
         case .done:
             HStack(spacing: 8) {
                 Spacer(minLength: 0)
+                if let rule = standingRule(for: proposal), rule.isActive {
+                    ProVisorCapsuleButton(title: "Stop Doing This") {
+                        center.revokeStanding(rule.id)
+                    }
+                }
                 ProVisorCapsuleButton(title: "Clear") {
                     center.dismiss(proposal.id)
                     close()
                 }
             }
         }
+    }
+
+    /// The rule something was carried out under, in force or since revoked.
+    private func standingRule(for proposal: Proposal) -> StandingRule? {
+        guard proposal.isAutomatic, let under = proposal.under else { return nil }
+        return center.standingRules.first { $0.id == under }
+    }
+
+    /// Beside an offered rule the plain approval says what it is: this once, not from now on.
+    private func approveTitle(_ proposal: Proposal, state: ProposalRowState) -> String {
+        if state == .failed { return "Try Again" }
+        return proposal.standingOffer == nil ? "Do It" : "Just Once"
     }
 
     private func close() {

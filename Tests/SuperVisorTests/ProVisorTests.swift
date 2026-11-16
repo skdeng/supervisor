@@ -93,6 +93,35 @@ struct ProposalParsingTests {
         #expect(parse(["title": "t", "action": "a"], id: "../escape") == nil)
     }
 
+    @Test("An offered rule and a claimed one are read; a rule too long to show is dropped")
+    func standingFields() {
+        let offered = parse([
+            "title": "t",
+            "action": "a",
+            "standing": "Trash promotional mail from senders I have not opened in 90 days.",
+        ])
+        #expect(offered?.standingOffer?.hasPrefix("Trash promotional mail") == true)
+        #expect(offered?.under == nil)
+
+        let tooLong = String(repeating: "r", count: StandingRule.textLimit + 1)
+        let dropped = parse(["title": "t", "action": "a", "standing": tooLong])
+        #expect(dropped != nil)
+        #expect(dropped?.standingOffer == nil)
+
+        let claimed = parse([
+            "title": "t",
+            "action": "a",
+            "under": "s-0000abcd",
+            "automatic": true,
+            "decided": "2026-11-15T17:12:00Z",
+        ])
+        #expect(claimed?.under == "s-0000abcd")
+        #expect(claimed?.isAutomatic == true)
+        #expect(claimed?.decided == Date(timeIntervalSince1970: 1_794_762_720))
+
+        #expect(parse(["title": "t", "action": "a", "under": "everything"])?.under == nil)
+    }
+
     @Test("A file over the size cap is refused unread")
     func oversizedFileIsRefused() {
         let padding = String(repeating: "x", count: Proposal.maximumFileBytes)
@@ -141,6 +170,23 @@ struct ProposalQueueTests {
         #expect(Set(visible.map(\.id)) == ["waiting", "not-yet-expired", "done", "failed"])
     }
 
+    @Test("Something done under a standing approval shows for a day, then leaves by itself")
+    func automaticRowsExpire() {
+        var recent = proposal("recent", status: .done)
+        recent.isAutomatic = true
+        recent.decided = now.addingTimeInterval(-3600)
+
+        var old = proposal("old", status: .done)
+        old.isAutomatic = true
+        old.decided = now.addingTimeInterval(-StandingApprovals.automaticRowLifetime - 1)
+
+        var approvedByHand = proposal("by-hand", status: .done)
+        approvedByHand.decided = old.decided
+
+        let visible = ProposalQueue.visible([recent, old, approvedByHand], now: now)
+        #expect(Set(visible.map(\.id)) == ["recent", "by-hand"])
+    }
+
     @Test("Proposals awaiting a decision lead, newest first, and the id settles a tie")
     func ordering() {
         let visible = ProposalQueue.visible([
@@ -178,6 +224,21 @@ struct ProVisorAccessTests {
             #expect(["search_*", "get_*", "list_*"].contains(tool))
         }
         #expect(!access.act.contains { $0.contains("send") || $0.contains("reply") })
+        // Nobody reviews a run under a standing approval, so its list is the narrowest: what
+        // it may do is a subset of what an approved run may, and it cannot draft.
+        #expect(!access.auto.isEmpty)
+        #expect(Set(access.auto).isSubset(of: Set(access.act)))
+        #expect(!access.auto.contains { $0.contains("draft") || $0.contains("send") })
+    }
+
+    @Test("Leaving the unreviewed list out switches standing approvals off")
+    func autoListIsOptional() {
+        #expect(parse(scout: ["mcp__a__get_*"], act: [])?.auto == [])
+
+        let malformed = try? JSONSerialization.data(
+            withJSONObject: ["scout": [String](), "act": [String](), "auto": ["Bash"]]
+        )
+        #expect(malformed.flatMap(ProVisorAccess.parse) == nil)
     }
 
     @Test("A rule names connector tools under a literal server, and nothing else")
@@ -219,7 +280,26 @@ struct ProVisorAccessTests {
 struct ProVisorCommandTests {
     private let access = ProVisorAccess(
         scout: ["mcp__mail__get_*"],
-        act: ["mcp__mail__create_draft"]
+        act: ["mcp__mail__create_draft"],
+        auto: ["mcp__mail__trash_*"]
+    )
+    private let rule = StandingRule(
+        id: "s-0000abcd",
+        text: "Trash promotional mail from senders I have not opened in 90 days.",
+        since: Date(timeIntervalSince1970: 0),
+        revoked: nil
+    )
+    private let proposal = Proposal(
+        id: "a",
+        title: "Cancel Foo Pro",
+        why: nil,
+        action: "Draft the cancellation email.",
+        kind: nil,
+        created: Date(timeIntervalSince1970: 0),
+        expires: nil,
+        status: .proposed,
+        result: nil,
+        isCleared: false
     )
 
     /// The values following `flag`, up to the next flag.
@@ -231,8 +311,9 @@ struct ProVisorCommandTests {
     @Test("A scout is confined, may write only its two folders, and holds no acting tool")
     func scoutArguments() {
         let arguments = ProVisorCommand.scoutArguments(
-            charter: "BRIEF",
+            brief: "BRIEF",
             access: access,
+            standing: [],
             now: Date(timeIntervalSince1970: 1_794_762_720),
             timeZone: TimeZone(identifier: "America/Los_Angeles")!
         )
@@ -253,18 +334,6 @@ struct ProVisorCommandTests {
 
     @Test("An acting run gains the acting tools, writes no files, and is told the action")
     func actArguments() {
-        let proposal = Proposal(
-            id: "a",
-            title: "Cancel Foo Pro",
-            why: nil,
-            action: "Draft the cancellation email.",
-            kind: nil,
-            created: Date(timeIntervalSince1970: 0),
-            expires: nil,
-            status: .proposed,
-            result: nil,
-            isCleared: false
-        )
         let arguments = ProVisorCommand.actArguments(proposal: proposal, access: access)
 
         #expect(arguments.contains("--restricted"))
@@ -275,6 +344,52 @@ struct ProVisorCommandTests {
         ])
         #expect(!arguments.contains("--append-system-prompt"))
         #expect(arguments[1].contains("Approved action: Draft the cancellation email."))
+    }
+
+    @Test("A run nobody reviewed gets the shorter tool list, and is told the rule it is under")
+    func unreviewedActArguments() {
+        let arguments = ProVisorCommand.actArguments(
+            proposal: proposal,
+            access: access,
+            under: rule
+        )
+
+        #expect(arguments.contains("--restricted"))
+        #expect(values(after: "--permission-prompts", in: arguments) == ["none"])
+        #expect(values(after: "--allowedTools", in: arguments) == [
+            "mcp__mail__get_*",
+            "mcp__mail__trash_*",
+        ])
+        #expect(!arguments.contains("mcp__mail__create_draft"))
+        #expect(arguments[1].contains(rule.text))
+        #expect(arguments[1].contains("Nobody has reviewed"))
+    }
+
+    @Test("A scout is told the rules in force by id, the ones taken back, and the tool list")
+    func standingBriefing() {
+        var revoked = StandingRule(
+            id: "s-0000beef",
+            text: "Label receipts 'Receipts'.",
+            since: Date(timeIntervalSince1970: 0),
+            revoked: nil
+        )
+        revoked.revoked = Date(timeIntervalSince1970: 10)
+
+        let briefing = ProVisorCommand.standingBriefing(rules: [rule, revoked], access: access)
+        #expect(briefing.contains("[s-0000abcd] Trash promotional mail"))
+        #expect(briefing.contains("Revoked"))
+        #expect(!briefing.contains("[s-0000beef]"))
+        #expect(briefing.contains("mcp__mail__trash_*"))
+
+        let none = ProVisorCommand.standingBriefing(rules: [], access: access)
+        #expect(none.contains("No standing approvals are in force yet."))
+
+        let off = ProVisorCommand.standingBriefing(
+            rules: [rule],
+            access: ProVisorAccess(scout: [], act: [])
+        )
+        #expect(off.contains("switched off"))
+        #expect(!off.contains("s-0000abcd"))
     }
 }
 
@@ -385,6 +500,29 @@ struct ProposalStoreTests {
         #expect(loaded.isCleared)
     }
 
+    @Test("The answer to an offered rule, and that something ran unasked, are written back")
+    func recordsStandingAnswers() throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try write(
+            ["title": "Real", "action": "a", "standing": "Trash unopened promos."],
+            named: "real.json",
+            in: directory
+        )
+
+        try ProposalStore.record(id: "real", in: directory, standingDecision: "declined")
+        try ProposalStore.record(id: "real", in: directory, status: .done, automatic: true)
+
+        let data = try Data(contentsOf: directory.appendingPathComponent("real.json"))
+        let fields = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(fields["standingDecision"] as? String == "declined")
+        #expect(fields["standing"] as? String == "Trash unopened promos.")
+
+        let loaded = try #require(ProposalStore.load(from: directory).first)
+        #expect(loaded.isAutomatic)
+        #expect(loaded.decided != nil)
+    }
+
     @Test("A decision cannot be aimed outside the proposals folder")
     func recordRefusesForeignIDs() throws {
         let directory = try makeDirectory()
@@ -393,6 +531,129 @@ struct ProposalStoreTests {
         #expect(throws: (any Error).self) {
             try ProposalStore.record(id: "../escape", in: directory, status: .dismissed)
         }
+    }
+}
+
+/// A standing approval lets something run that nobody looked at first, so what is under test
+/// is how little a claim to be under one is worth on its own.
+@Suite("ProVisor standing approvals")
+struct StandingApprovalTests {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+    private let trashRule = "Trash promotional mail from senders I have not opened in 90 days."
+
+    private func rule(_ id: String, revoked: Bool = false) -> StandingRule {
+        StandingRule(id: id, text: trashRule, since: now, revoked: revoked ? now : nil)
+    }
+
+    private func proposal(
+        under: String?,
+        status: Proposal.Status = .proposed,
+        expiresIn: TimeInterval? = nil
+    ) -> Proposal {
+        var proposal = Proposal(
+            id: "p",
+            title: "t",
+            why: nil,
+            action: "a",
+            kind: nil,
+            created: now,
+            expires: expiresIn.map { now.addingTimeInterval($0) },
+            status: status,
+            result: nil,
+            isCleared: false
+        )
+        proposal.under = under
+        return proposal
+    }
+
+    @Test("A claim counts only when it names a rule in force, on a proposal still waiting")
+    func claimNeedsARuleInForce() {
+        let rules = [rule("s-0000aaaa"), rule("s-0000bbbb", revoked: true)]
+        func admitted(_ proposal: Proposal) -> String? {
+            StandingApprovals.rule(for: proposal, in: rules, now: now)?.id
+        }
+
+        #expect(admitted(proposal(under: "s-0000aaaa")) == "s-0000aaaa")
+        #expect(admitted(proposal(under: nil)) == nil)
+        #expect(admitted(proposal(under: "s-0000bbbb")) == nil)
+        #expect(admitted(proposal(under: "s-0000cccc")) == nil)
+        #expect(admitted(proposal(under: "s-0000aaaa", status: .failed)) == nil)
+        #expect(admitted(proposal(under: "s-0000aaaa", status: .done)) == nil)
+        #expect(admitted(proposal(under: "s-0000aaaa", expiresIn: -1)) == nil)
+        #expect(admitted(proposal(under: "s-0000aaaa", expiresIn: 60)) == "s-0000aaaa")
+    }
+
+    @Test("A rule is added once, cleaned, and never from text too long to have been shown")
+    func adding() {
+        let added = StandingApprovals.rule(
+            adding: "Trash\npromos \u{202E}now",
+            to: [],
+            now: now,
+            id: "s-0000aaaa"
+        )
+        #expect(added?.text == "Trash promos now")
+        #expect(added?.isActive == true)
+
+        let existing = [rule("s-0000aaaa")]
+        #expect(StandingApprovals.rule(adding: trashRule, to: existing, now: now) == nil)
+
+        // A rule that was taken back can be granted afresh; it is a new rule with a new id.
+        let revoked = [rule("s-0000aaaa", revoked: true)]
+        #expect(StandingApprovals.rule(adding: trashRule, to: revoked, now: now) != nil)
+
+        let tooLong = String(repeating: "r", count: StandingRule.textLimit + 1)
+        #expect(StandingApprovals.rule(adding: tooLong, to: [], now: now) == nil)
+        #expect(StandingApprovals.rule(adding: "  ", to: [], now: now) == nil)
+        #expect(StandingApprovals.rule(adding: "x", to: [], now: now, id: "bad id") == nil)
+    }
+
+    @Test("Revoking keeps the rule on file, out of force")
+    func revoking() {
+        let rules = StandingApprovals.revoking("s-0000aaaa", in: [rule("s-0000aaaa")], now: now)
+
+        #expect(rules.count == 1)
+        #expect(rules.first?.isActive == false)
+        #expect(rules.first?.revoked == now)
+        #expect(StandingApprovals.revoking("s-0000ffff", in: rules, now: now) == rules)
+    }
+
+    @Test("Generated ids are well formed")
+    func ids() {
+        for _ in 0..<50 {
+            #expect(StandingRule.isValidID(StandingApprovals.newID()))
+        }
+        let malformed = ["", "s-", "s-0000AAAA", "s-0000aaa", "s-0000aaaaa", "x-0000aaaa"]
+        for id in malformed + ["s-0000aaaa\n"] {
+            #expect(!StandingRule.isValidID(id))
+        }
+    }
+
+    @Test("Rules survive a save and a load; a malformed entry only ever withholds a rule")
+    func fileRoundTrip() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("provisor-standing-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(StandingApprovals.load(from: url).isEmpty)
+
+        let saved = [rule("s-0000aaaa"), rule("s-0000bbbb", revoked: true)]
+        try StandingApprovals.save(saved, to: url)
+        #expect(StandingApprovals.load(from: url) == saved)
+
+        let handEdited = Data(#"""
+        {"rules": [
+          {"id": "s-0000aaaa", "rule": "Label receipts.", "since": "2026-11-15T17:12:00Z"},
+          {"id": "not-an-id", "rule": "Do anything."},
+          {"id": "s-0000aaaa", "rule": "A second rule reusing the first one's id."},
+          {"id": "s-0000cccc"},
+          "junk"
+        ]}
+        """#.utf8)
+        let parsed = StandingApprovals.parse(handEdited)
+        #expect(parsed.map(\.id) == ["s-0000aaaa"])
+        #expect(parsed.first?.text == "Label receipts.")
+        #expect(parsed.first?.since == Date(timeIntervalSince1970: 1_794_762_720))
+        #expect(StandingApprovals.parse(Data("[]".utf8)).isEmpty)
     }
 }
 

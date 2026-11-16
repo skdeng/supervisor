@@ -35,6 +35,16 @@ struct Proposal: Identifiable, Equatable, Sendable {
     /// Set when the user clears a finished proposal's row. The status stays `done`, so the
     /// agent still reads the proposal as one that was wanted.
     let isCleared: Bool
+    /// A rule the agent offers to make standing: do this kind of thing from now on without
+    /// asking. Shown in full beside the action; it becomes a rule only if the user says so.
+    var standingOffer: String?
+    /// The standing approval the agent says this falls under. It is a claim, not a grant:
+    /// `StandingApprovals.rule(for:in:now:)` decides whether a rule in force matches it.
+    var under: String?
+    /// Whether it was carried out under a standing approval rather than on a tap.
+    var isAutomatic = false
+    /// When the user, or a standing approval, settled it.
+    var decided: Date?
 
     /// Whether the proposal still awaits a decision — a failed one can be approved again.
     var isOpen: Bool { status == .proposed || status == .failed }
@@ -84,7 +94,17 @@ extension Proposal {
             expires: date(fields["expires"]),
             status: status,
             result: displayText(fields["result"], limit: resultLimit),
-            isCleared: fields["cleared"] as? Bool ?? false
+            isCleared: fields["cleared"] as? Bool ?? false,
+            // Like the action, an offered rule is never shortened to fit: a rule that cannot be
+            // shown whole is dropped, and the proposal stays an ordinary one.
+            standingOffer: displayText(
+                fields["standing"],
+                limit: StandingRule.textLimit,
+                truncates: false
+            ),
+            under: (fields["under"] as? String).flatMap { StandingRule.isValidID($0) ? $0 : nil },
+            isAutomatic: fields["automatic"] as? Bool ?? false,
+            decided: date(fields["decided"])
         )
     }
 
@@ -127,8 +147,10 @@ enum ProposalQueue {
     static let leadCount = 3
 
     /// The proposals worth a row: those awaiting a decision and not yet expired, then those
-    /// carried out and not yet cleared. Within each group the newest leads, and the id settles
-    /// a tie so a reload never reshuffles the rows.
+    /// carried out and not yet cleared. Something done under a standing approval is shown so
+    /// the user can see what happened, and then leaves by itself after a day — rows that had to
+    /// be cleared by hand would turn "stop asking me" into a different chore. Within each group
+    /// the newest leads, and the id settles a tie so a reload never reshuffles the rows.
     static func visible(_ proposals: [Proposal], now: Date) -> [Proposal] {
         proposals
             .filter { proposal in
@@ -137,7 +159,10 @@ enum ProposalQueue {
                     guard let expires = proposal.expires else { return true }
                     return expires > now
                 case .done:
-                    return !proposal.isCleared
+                    guard !proposal.isCleared else { return false }
+                    guard proposal.isAutomatic else { return true }
+                    let settled = proposal.decided ?? proposal.created
+                    return now.timeIntervalSince(settled) < StandingApprovals.automaticRowLifetime
                 case .dismissed, .withdrawn:
                     return false
                 }
@@ -202,6 +227,8 @@ enum ProposalStore {
         status: Proposal.Status? = nil,
         result: String? = nil,
         cleared: Bool? = nil,
+        standingDecision: String? = nil,
+        automatic: Bool? = nil,
         now: Date = Date()
     ) throws {
         guard Proposal.isValidID(id) else { throw CocoaError(.fileWriteInvalidFileName) }
@@ -220,6 +247,12 @@ enum ProposalStore {
         }
         if let cleared {
             fields["cleared"] = cleared
+        }
+        if let standingDecision {
+            fields["standingDecision"] = standingDecision
+        }
+        if let automatic {
+            fields["automatic"] = automatic
         }
 
         let updated = try JSONSerialization.data(
