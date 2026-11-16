@@ -3,8 +3,8 @@ import Combine
 
 /// Persistent app settings backed by `UserDefaults`.
 ///
-/// Owns the per-module enabled flags (default on) and hover sensitivity. Both
-/// `ModuleRegistry`/engine (to filter modules) and the settings
+/// Owns the per-module enabled flags (default on, except opt-in modules) and hover
+/// sensitivity. Both `ModuleRegistry`/engine (to filter modules) and the settings
 /// UI consult and mutate this store. Changes publish so the settings window and engine
 /// react live.
 @MainActor
@@ -28,7 +28,15 @@ public final class SettingsStore: ObservableObject {
         static let flowDeferDuringMeetings = "flow.deferDuringMeetings"
         static let swarmShowMessages = "swarm.showMessages"
         static let swarmJumpHotKey = "swarm.jumpHotKey"
+        static let provisorScoutHours = "provisor.scoutHours"
     }
+
+    /// Modules that stay off until the user turns them on. ProVisor reads the user's mail and
+    /// spends their Claude quota in the background, which is a choice to make, not a default.
+    private static let optInModules: Set<String> = ["provisor"]
+
+    /// The scouting cadences Settings offers, in hours; 0 means only when asked.
+    public static let provisorScoutHourChoices = [0, 3, 6, 24]
 
     /// Hover sensitivity in the range 0...1. Higher means a larger activation rect and a
     /// shorter dwell before expanding.
@@ -102,7 +110,13 @@ public final class SettingsStore: ObservableObject {
         didSet { defaults.set(swarmJumpHotKeyEnabled, forKey: Key.swarmJumpHotKey) }
     }
 
-    /// Per-module enabled flags, keyed by `moduleID`. Absent ids default to enabled.
+    /// ProVisor: hours between automatic scouting passes; 0 runs one only when asked.
+    @Published public var provisorScoutHours: Int {
+        didSet { defaults.set(provisorScoutHours, forKey: Key.provisorScoutHours) }
+    }
+
+    /// Per-module enabled flags, keyed by `moduleID`. Absent ids default to enabled, except
+    /// opt-in modules.
     @Published public private(set) var moduleEnabled: [String: Bool]
 
     public init(defaults: UserDefaults = .standard) {
@@ -135,6 +149,11 @@ public final class SettingsStore: ObservableObject {
             (defaults.object(forKey: Key.swarmShowMessages) as? Bool) ?? false
         self.swarmJumpHotKeyEnabled =
             (defaults.object(forKey: Key.swarmJumpHotKey) as? Bool) ?? true
+        // Read as an object, not `integer(forKey:)`: 0 is a real choice here, and an absent key
+        // must not be mistaken for it.
+        let storedScoutHours = defaults.object(forKey: Key.provisorScoutHours) as? Int
+        self.provisorScoutHours = storedScoutHours
+            .flatMap { Self.provisorScoutHourChoices.contains($0) ? $0 : nil } ?? 6
 
         // Reconstruct the per-module map from any persisted keys.
         var map: [String: Bool] = [:]
@@ -148,9 +167,9 @@ public final class SettingsStore: ObservableObject {
         self.moduleEnabled = map
     }
 
-    /// Whether a module is enabled. Unknown ids default to `true`.
+    /// Whether a module is enabled. Unknown ids default to `true`, opt-in modules to `false`.
     public func isEnabled(_ moduleID: String) -> Bool {
-        moduleEnabled[moduleID] ?? true
+        moduleEnabled[moduleID] ?? !Self.optInModules.contains(moduleID)
     }
 
     /// Set a module's enabled flag and persist it.
@@ -160,10 +179,10 @@ public final class SettingsStore: ObservableObject {
     }
 
     /// Ensure an entry exists for a module id so the settings UI can render a toggle even
-    /// before the user has changed it. Defaults to enabled.
+    /// before the user has changed it. Defaults to enabled, except for opt-in modules.
     public func registerModuleIfNeeded(_ moduleID: String) {
         if moduleEnabled[moduleID] == nil {
-            moduleEnabled[moduleID] = true
+            moduleEnabled[moduleID] = !Self.optInModules.contains(moduleID)
         }
     }
 }

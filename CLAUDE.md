@@ -83,8 +83,8 @@ A single morphing surface, driven by a small state machine, that modules feed co
   **appears or disappears** (which changes pill size/layout) — internal value changes inside an
   already-shown compact view update automatically via `@ObservedObject`.
 - **`App/ModuleRegistry.swift`** — THE single place modules are wired in (`allModules()`).
-  Array order is irrelevant; modules sort by `order`. Currently lists 8 modules
-  (Media, Calendar, Reminders, FileShelf, Flow, SwarmVisor, Battery, AI Usage).
+  Array order is irrelevant; modules sort by `order`. Currently lists 9 modules
+  (Media, Calendar, Reminders, FileShelf, Flow, SwarmVisor, ProVisor, Battery, AI Usage).
 - **`Core/HoverMonitor.swift`** — hover detection through a global mouse-moved monitor, which
   wakes the process on every cursor movement anywhere on screen; its handler reads the position
   the event already carries, per the file's doc comment.
@@ -335,6 +335,31 @@ sink. Preserve these guards when touching the relevant code:
   directive) and a delegate that refuses redirects, so the header can never follow one to
   another host. The response body is size-capped and parsed defensively; failure reasons are
   fixed strings and never carry the token.
+- **ProVisor's agent reads mail from anyone, unattended**, so what it can do is bounded by the
+  CLI's flags and never by its prompt (`ProVisorCommand`). Every run carries `--restricted` (no
+  shell or web tools, file tools confined to the working directory, the user's settings and hooks
+  ignored) and `--permission-prompts none` (anything not allowed is denied, not prompted), with
+  `--tools Read,Write,Edit,Glob,Grep`. The **scout** is allowed writes only under `proposals/`
+  and `memory/` (`Edit(/proposals/**)` — a leading slash on a command-line rule anchors at the
+  working directory, and `Edit` rules cover every file-writing tool) plus the **read** connector
+  tools in `access.json`, so nothing it reads can make it send, change, or delete. The tools
+  that change something are granted only to the **acting run**, which exists only after the
+  user approved one proposal. The brief and `access.json` sit *outside* the working directory,
+  where the agent's file tools cannot reach them. `access.json` accepts only connector rules
+  under a literal server (`\Amcp__<server>__<tool or tool*>\z`), and one malformed rule rejects
+  the file: it can never name a built-in tool, so it cannot grant a shell. **A proposal file is
+  model output shaped by that mail**: `Proposal.parse` validates the id against
+  `\A[a-z0-9][a-z0-9-]{0,63}\z`, caps the file at 32 KiB, strips control and format characters
+  (a bidirectional override would let an action display as something other than what it says),
+  and **rejects — never truncates — an action over 600 characters**, because the action is what
+  an approval runs and text the user could not read in full is text they did not approve.
+  Approval is possible only on the review screen, where that action is shown whole, and the
+  acting run is instructed from the parsed copy captured at the tap, never re-read from the file
+  the scout can rewrite. The banner carries a count only, and `AppLog` records names and counts —
+  never proposal text or a failure's message, which can quote the agent's output. Verify a change
+  to the flags by running the CLI in a scratch directory and asking it to write outside its two
+  folders, read outside the directory, run a command, and call a connector tool that is not
+  allowed: each must come back denied.
 
 ## Module Roster
 
@@ -579,6 +604,45 @@ names below are the code paths.
     stopped when the same 10-minute activity window expires. Quota freshness uses the same
     30-minute TTL.
 
+- **ProVisor** (`Modules/ProVisor`) — a background agent that reads the user's own data and
+  proposes things they would want done but have not thought to ask for (an unused subscription
+  still billing, a question nobody answered, senders never opened). **Off until enabled**
+  (`SettingsStore.optInModules`): it reads mail and spends Claude quota. **The app's part is
+  deliberately thin; the judgment lives with the agent.** `ProVisorCenter` (a singleton, because
+  Settings needs the live state and the registry builds a second, never-activated module set
+  just to list names) starts a headless Claude Code run through
+  `AgentTaskService.run(arguments:workingDirectory:timeout:)`, shows the proposal files that
+  run writes, and on the user's tap starts a second run to carry one out. There are no
+  collectors, no typed action catalog, and no domain logic in Swift.
+  - **The agent's home** is `~/Library/Application Support/SuperVisor/ProVisor/`: `CHARTER.md`
+    (its standing brief, seeded once from `Resources/provisor-charter.md` and then the user's to
+    edit; passed as `--append-system-prompt`), `access.json` (which connector tools each kind of
+    run may call), and `workspace/` — the run's working directory — holding `proposals/` (one
+    JSON file each) and `memory/` (the agent's own notes: what it has learned about the user,
+    what it has already examined). Each run starts with no recollection, so those notes and the
+    statuses on past proposals are all it knows.
+  - **Data comes from the claude.ai connectors** Claude Code exposes locally
+    (`mcp__claude_ai_<Server>__<tool>`); the default `access.json` reads Gmail and Google
+    Calendar. Connectors load only for a Claude-account sign-in, not an API key. The connector
+    names in the defaults follow the documented naming but vary by account — the agent's closing
+    summary, shown in Settings, says when a data tool it expected was missing.
+  - **A scouting pass** runs every `provisor.scoutHours` (0 = only when asked, 3, 6 default, 24)
+    or from **Look Now** in Settings. One sleeping task waits for the next pass; it is dropped
+    on system sleep and re-armed on wake, never fires sooner than 45 s after launch or wake, and
+    backs off 15 min after a failed pass (`ProVisorSchedule`). A pass is capped at 80 turns, $2,
+    and 20 minutes; one cut off by a limit keeps the proposals it had already written.
+  - **A proposal** is `title` / `why` / `action` / `kind` / `created` / optional `expires`,
+    written by the agent; the app writes `status` (`proposed` → `done` / `failed` /
+    `dismissed`; the agent may set `withdrawn`), `decided`, `result`, and `cleared` back into
+    the same file, which is how the agent learns what the user wants. Expanded: rows for
+    proposals awaiting a decision, then those carried out and not yet cleared, three unprompted
+    and the rest behind **N more**. A row opens the review screen (a sheet takeover) or
+    dismisses; it cannot approve. **Do It** on the review screen queues the acting run (one at
+    a time; it may overlap a scouting pass). By default an approved action can label, trash,
+    and mark mail and write drafts, and cannot send.
+  - **Attention:** a pass that adds proposals raises the attention glow and an 8-second banner
+    carrying a count only. No compact presence.
+
 **`Modules/SystemHUD/`** (volume / brightness / keyboard-backlight HUD — `VolumeController`,
 `BrightnessController`, `KeyboardBacklightController`, `MediaKeyMonitor`) is present but **NOT wired
 into `ModuleRegistry`** — dead/unreferenced code kept for possible future use; nothing activates it
@@ -695,7 +759,8 @@ at runtime.
   here by posting synthetic clicks at bare surface *and* at the canvas outside it — the first must
   reach `toggleSheet()`, the second must still pass through.
 - **`Settings/SettingsStore.swift`** — `UserDefaults`-backed, `SettingsStore.shared`. Per-module
-  enabled flags (default on) and hover sensitivity.
+  enabled flags and hover sensitivity. Modules default on, except those in `optInModules`
+  (ProVisor), which stay off until the user enables them.
 
 ## Debug
 
@@ -711,7 +776,7 @@ artifacts:
 
 - The app logs lifecycle/state/helper/failure events to unified-log subsystem
   `com.supervisor.SuperVisor` (categories: `engine`, `module`, `swarm`, `calls`, `media`, `usage`,
-  `agentDispatch`, `fileShelf`, `flow`) and mirrors notice/error lines to
+  `agentDispatch`, `fileShelf`, `flow`, `provisor`) and mirrors notice/error lines to
   `~/Library/Logs/SuperVisor/SuperVisor.log` (1 MiB rotation, two generations kept). Query it with
   `/usr/bin/log show --predicate 'subsystem == "com.supervisor.SuperVisor"'`.
 - A crash (`fatalError`, force-unwrap, EXC_BAD_ACCESS) writes

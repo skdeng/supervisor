@@ -11,6 +11,7 @@ enum AppLogCategory: String, CaseIterable, Sendable {
     case agentDispatch
     case fileShelf
     case flow
+    case provisor
 }
 
 enum AppLog {
@@ -50,6 +51,10 @@ private struct LoggerStore: Sendable {
         category: AppLogCategory.fileShelf.rawValue
     )
     private let flow = Logger(subsystem: AppLog.subsystem, category: AppLogCategory.flow.rawValue)
+    private let provisor = Logger(
+        subsystem: AppLog.subsystem,
+        category: AppLogCategory.provisor.rawValue
+    )
 
     subscript(category: AppLogCategory) -> Logger {
         switch category {
@@ -62,6 +67,7 @@ private struct LoggerStore: Sendable {
         case .agentDispatch: agentDispatch
         case .fileShelf: fileShelf
         case .flow: flow
+        case .provisor: provisor
         }
     }
 }

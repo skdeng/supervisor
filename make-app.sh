@@ -65,6 +65,10 @@ cp Resources/*.svg "$RES_DIR/"
 # stale install, so it has to be present in the bundle for that check to pass.
 cp Resources/supervisor-agent-hook.py "$RES_DIR/"
 
+# ProVisor's standing brief. First activation seeds it into the agent's folder under Application
+# Support, where it is the user's to edit; the bundled copy is only ever the starting point.
+cp Resources/provisor-charter.md "$RES_DIR/"
+
 # Build the entitled now-playing adapter dylib that reads the system now-playing info dict
 # (including artwork bytes) via the private MediaRemote C function. It ships in Resources and
 # is loaded at runtime by /usr/bin/perl (an Apple-signed host that the mediaremoted

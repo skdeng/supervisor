@@ -13,6 +13,7 @@ enum ModuleRegistry {
             FileShelfModule(),
             FlowModule(),
             SwarmModule(),
+            ProVisorModule(),
             BatteryModule(),
             AIUsageModule(),
         ]

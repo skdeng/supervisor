@@ -86,9 +86,16 @@ private struct AgentOutputParser {
               let object = try? JSONSerialization.jsonObject(with: line),
               let payload = object as? [String: Any],
               payload["type"] as? String == "result",
-              let text = payload["result"] as? String,
               let isError = payload["is_error"] as? Bool
         else { return }
+
+        guard let text = payload["result"] as? String else {
+            // A run stopped by one of its own limits names the limit and carries no result text.
+            if isError, let reason = Self.limitDescription(payload["subtype"]) {
+                outcome = .error(.agentError(reason))
+            }
+            return
+        }
 
         if isError {
             outcome = .error(.agentError(text))
@@ -98,6 +105,14 @@ private struct AgentOutputParser {
                 costUSD: Self.finiteDouble(payload["total_cost_usd"]),
                 durationMs: Self.integer(payload["duration_ms"])
             ))
+        }
+    }
+
+    private static func limitDescription(_ subtype: Any?) -> String? {
+        switch subtype as? String {
+        case "error_max_turns": "The agent reached its turn limit before finishing."
+        case "error_max_budget_usd": "The agent reached its spending limit before finishing."
+        default: nil
         }
     }
 
@@ -243,19 +258,60 @@ final class AgentTaskService {
             throw AgentTaskError.cancelled
         }
 
-        runStartedAt = Date()
-        AppLog.notice(.agentDispatch, "agent task started")
         let instruction = Self.instruction(
             request: request,
             copiedFileURL: workspace.copiedFileURL
         )
+        return try await execute(
+            executableURL: executableURL,
+            arguments: Self.fileTaskArguments(instruction: instruction, workspace: workspace),
+            workingDirectory: workspace.directoryURL,
+            timeout: timeout
+        )
+    }
+
+    /// Runs the CLI with arguments the caller composed, in a working directory the caller owns.
+    ///
+    /// Nothing is copied and no scratch directory is made or removed: what the run may read,
+    /// write, and call is decided entirely by the arguments passed here.
+    func run(
+        arguments: [String],
+        workingDirectory: URL,
+        timeout: Duration
+    ) async throws -> AgentTaskResult {
+        guard !hasRun else { throw AgentTaskError.launchFailed(nil) }
+        hasRun = true
+
+        guard !cancellationRequested, !Task.isCancelled else {
+            throw AgentTaskError.cancelled
+        }
+        guard let executableURL = Self.resolveExecutable() else {
+            AppLog.error(.agentDispatch, "agent task spawn failed: executable not found")
+            throw AgentTaskError.binaryNotFound
+        }
+        return try await execute(
+            executableURL: executableURL,
+            arguments: arguments,
+            workingDirectory: workingDirectory,
+            timeout: timeout
+        )
+    }
+
+    private func execute(
+        executableURL: URL,
+        arguments: [String],
+        workingDirectory: URL,
+        timeout: Duration
+    ) async throws -> AgentTaskResult {
+        runStartedAt = Date()
+        AppLog.notice(.agentDispatch, "agent task started")
 
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 launch(
                     executableURL: executableURL,
-                    instruction: instruction,
-                    workspace: workspace,
+                    arguments: arguments,
+                    workingDirectory: workingDirectory,
                     timeout: timeout,
                     continuation: continuation
                 )
@@ -294,23 +350,11 @@ final class AgentTaskService {
 
     private func launch(
         executableURL: URL,
-        instruction: String,
-        workspace: AgentRunWorkspace,
+        arguments: [String],
+        workingDirectory: URL,
         timeout: Duration,
         continuation: CheckedContinuation<AgentTaskResult, Error>
     ) {
-        let arguments = [
-            "-p", instruction,
-            "--output-format", "stream-json",
-            "--verbose",
-            "--max-turns", "8",
-            "--max-budget-usd", "0.50",
-            "--tools", "Read",
-            "--allowedTools", "Read(\(workspace.copiedFileURL.path))",
-            "--strict-mcp-config",
-            "--setting-sources", "project",
-        ]
-
         self.continuation = continuation
         outputOutcome = nil
         diagnosticTail = nil
@@ -325,7 +369,7 @@ final class AgentTaskService {
             spawned = try Self.spawn(
                 executableURL: executableURL,
                 arguments: arguments,
-                workingDirectory: workspace.directoryURL
+                workingDirectory: workingDirectory
             )
         } catch {
             AppLog.error(
@@ -754,6 +798,23 @@ final class AgentTaskService {
             return AgentProcessExit(reason: .exit, status: (status >> 8) & 0xff)
         }
         return AgentProcessExit(reason: .signal, status: signal)
+    }
+
+    private nonisolated static func fileTaskArguments(
+        instruction: String,
+        workspace: AgentRunWorkspace
+    ) -> [String] {
+        [
+            "-p", instruction,
+            "--output-format", "stream-json",
+            "--verbose",
+            "--max-turns", "8",
+            "--max-budget-usd", "0.50",
+            "--tools", "Read",
+            "--allowedTools", "Read(\(workspace.copiedFileURL.path))",
+            "--strict-mcp-config",
+            "--setting-sources", "project",
+        ]
     }
 
     private nonisolated static func instruction(

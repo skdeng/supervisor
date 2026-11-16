@@ -74,6 +74,7 @@ struct SettingsView: View {
         case "fileshelf": "tray.full.fill"
         case "flow": "brain.head.profile"
         case "swarm": "person.2.wave.2.fill"
+        case "provisor": "sparkles"
         case "battery": "battery.100"
         case "aiUsage": "gauge.with.needle"
         default: "puzzlepiece.extension"
@@ -132,6 +133,8 @@ struct SettingsView: View {
             Text("Adds the question a session asked, its closing summary, or an error's detail text to each row; hover a row for the full text. Off keeps rows to a state and a tool name, so no session content sits on screen during a screen share.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        case "provisor":
+            ProVisorSettingsView(settings: settings, center: ProVisorCenter.shared)
         default:
             EmptyView()
         }
