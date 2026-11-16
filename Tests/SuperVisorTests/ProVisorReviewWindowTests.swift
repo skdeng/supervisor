@@ -106,6 +106,18 @@ struct ProVisorReviewWindowTests {
         }
     }
 
+    /// The opacity the window server composites the window at, or nil while it is off screen.
+    private func compositedAlpha(of window: NSWindow) -> Double? {
+        let listed = CGWindowListCopyWindowInfo(
+            [.optionIncludingWindow],
+            CGWindowID(window.windowNumber)
+        ) as? [[CFString: Any]]
+        guard let entry = listed?.first, entry[kCGWindowIsOnscreen] as? Bool == true else {
+            return nil
+        }
+        return entry[kCGWindowAlpha] as? Double
+    }
+
     @Test("The window follows its content's height, growing and shrinking, in a running app")
     func followsContentHeight() throws {
         let model = Model()
@@ -114,7 +126,11 @@ struct ProVisorReviewWindowTests {
             content: AnyView(Probe(model: model))
         )
         let content = try #require(window.contentView)
-        window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
+        // The window has to be on screen for its layout to run as it does in the app, and AppKit
+        // pulls a titled window back onto a display wherever its origin is set. Transparency
+        // is what keeps it out of sight of whoever is at the machine while the suite runs.
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
         defer { window.close() }
 
         // Sized to its content before it is ever shown.
@@ -124,11 +140,13 @@ struct ProVisorReviewWindowTests {
 
         var heights: [CGFloat] = []
         var top: CGFloat = 0
+        var alphaOnScreen: Double?
         Stepper([
             { window.makeKeyAndOrderFront(nil) },
             {
                 // Read once shown: AppKit may move a window as it comes on screen.
                 top = window.frame.maxY
+                alphaOnScreen = compositedAlpha(of: window)
                 heights.append(content.frame.height)
                 model.isTyping = true
             },
@@ -146,6 +164,8 @@ struct ProVisorReviewWindowTests {
         let (shown, typing, typed, back) = try #require(
             heights.count == 4 ? (heights[0], heights[1], heights[2], heights[3]) : nil
         )
+        // A nil reading means the window never reached the screen.
+        #expect(alphaOnScreen == 0)
         #expect(shown == reading)
         #expect(typing < reading)
         #expect(typed > typing)
