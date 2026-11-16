@@ -83,8 +83,14 @@ enum StandingApprovals {
     static let automaticRowLifetime: TimeInterval = 24 * 3600
 
     /// The rule in force that a proposal may be carried out under, if there is one.
+    ///
+    /// Nobody chooses among options on a run that nobody reviews, so only a proposal with a
+    /// single action qualifies; one offering a choice waits for a tap.
     static func rule(for proposal: Proposal, in rules: [StandingRule], now: Date) -> StandingRule? {
-        guard proposal.status == .proposed, let under = proposal.under else { return nil }
+        guard proposal.status == .proposed,
+              proposal.options.count == 1,
+              let under = proposal.under
+        else { return nil }
         if let expires = proposal.expires, expires <= now { return nil }
         return rules.first { $0.id == under && $0.isActive }
     }

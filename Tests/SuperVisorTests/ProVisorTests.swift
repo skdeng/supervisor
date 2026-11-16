@@ -48,7 +48,7 @@ struct ProposalParsingTests {
     func overlongActionIsRefused() {
         let atLimit = String(repeating: "a", count: Proposal.actionLimit)
 
-        #expect(parse(["title": "t", "action": atLimit])?.action == atLimit)
+        #expect(parse(["title": "t", "action": atLimit])?.recommended.action == atLimit)
         #expect(parse(["title": "t", "action": atLimit + "a"]) == nil)
     }
 
@@ -68,7 +68,7 @@ struct ProposalParsingTests {
             "action": "Archive\u{202E} it\nnow\u{1B}[2J",
         ])
 
-        #expect(proposal?.action == "Archive it now[2J")
+        #expect(proposal?.recommended.action == "Archive it now[2J")
     }
 
     @Test("A file missing its title or action, or naming an unknown status, is refused")
@@ -154,6 +154,117 @@ struct ProposalParsingTests {
         let padding = String(repeating: "x", count: Proposal.maximumFileBytes)
         #expect(parse(["title": "t", "action": "a", "padding": padding]) == nil)
     }
+
+    @Test("A file that can still be decided must leave room for the decision once re-encoded")
+    func decidableFileLeavesRoomForTheDecision() {
+        // Compact, this is about 12 KiB. Written back with one element to a line it passes
+        // 40 KiB, so a decision could never be recorded in it.
+        let compactButSprawling: [String: Any] = [
+            "title": "t",
+            "action": "a",
+            "padding": Array(repeating: 0, count: 6000),
+        ]
+        func parsed(status: String?) -> Proposal? {
+            parse(compactButSprawling.merging(status.map { ["status": $0] } ?? [:]) { $1 })
+        }
+
+        #expect(parsed(status: nil) == nil)
+        #expect(parsed(status: "proposed") == nil)
+        #expect(parsed(status: "failed") == nil)
+        // A settled proposal takes no further decision, so only the load cap applies.
+        #expect(parsed(status: "done") != nil)
+    }
+
+    @Test("A single action is one option, and it is the recommended one")
+    func singleActionIsOneOption() {
+        let proposal = parse(["title": "t", "action": "Draft the email."])
+
+        #expect(proposal?.options == [
+            ProposalOption(label: Proposal.singleOptionLabel, action: "Draft the email."),
+        ])
+        #expect(proposal?.recommended.action == "Draft the email.")
+    }
+
+    @Test("Options are read in order, cleaned, and the first is recommended")
+    func readsOptions() {
+        let proposal = parse([
+            "title": "t",
+            "options": [
+                ["label": "Flag\u{202E} it", "action": "Label the\nthread."],
+                ["label": "Draft reply", "action": "Draft a reply."],
+            ],
+        ])
+
+        #expect(proposal?.options == [
+            ProposalOption(label: "Flag it", action: "Label the thread."),
+            ProposalOption(label: "Draft reply", action: "Draft a reply."),
+        ])
+        #expect(proposal?.recommended.label == "Flag it")
+    }
+
+    @Test("An option's name and its action each have to fit whole")
+    func optionLimits() {
+        func option(label: String, action: String) -> Proposal? {
+            parse(["title": "t", "options": [
+                ["label": "Fine", "action": "a"],
+                ["label": label, "action": action],
+            ]])
+        }
+        let label = String(repeating: "l", count: Proposal.optionLabelLimit)
+        let action = String(repeating: "a", count: Proposal.actionLimit)
+
+        #expect(option(label: label, action: action) != nil)
+        #expect(option(label: label + "l", action: action) == nil)
+        #expect(option(label: label, action: action + "a") == nil)
+    }
+
+    @Test("One unusable option, or an ambiguous file, rejects the whole proposal")
+    func malformedOptionsAreRefused() {
+        func options(_ value: Any) -> Proposal? { parse(["title": "t", "options": value]) }
+        let fine: [String: Any] = ["label": "Fine", "action": "a"]
+
+        #expect(options([fine]) != nil)
+        #expect(options([[String: Any]]()) == nil)
+        #expect(options("Draft the email.") == nil)
+        #expect(options([fine, "Draft the email."]) == nil)
+        #expect(options([fine, ["label": "No action"]]) == nil)
+        #expect(options([fine, ["action": "No label"]]) == nil)
+        #expect(options([fine, ["label": " \n ", "action": "a"]]) == nil)
+        #expect(options([fine, ["label": "Fine", "action": "b"]]) == nil)
+        #expect(options((1...Proposal.maximumOptions + 1).map {
+            ["label": "Option \($0)", "action": "a"]
+        }) == nil)
+        // With both present the file does not say which the user would be approving.
+        #expect(parse(["title": "t", "action": "a", "options": [fine]]) == nil)
+        #expect(parse(["title": "t", "action": "a", "options": NSNull()]) == nil)
+    }
+
+    @Test("A recorded choice is read back for display, and only when it makes sense")
+    func readsRecordedChoice() {
+        let options: [[String: Any]] = [
+            ["label": "One", "action": "first"],
+            ["label": "Two", "action": "second"],
+        ]
+        func choice(_ extra: [String: Any]) -> Proposal? {
+            parse(["title": "t", "options": options].merging(extra) { $1 })
+        }
+
+        #expect(choice([:])?.choice == nil)
+        #expect(choice([:])?.recordedAction == "first")
+        #expect(choice(["chose": 2])?.choice == .option(1))
+        #expect(choice(["chose": 2])?.recordedAction == "second")
+        #expect(choice(["chose": 0])?.choice == nil)
+        #expect(choice(["chose": 3])?.choice == nil)
+        #expect(choice(["chose": 1.5])?.choice == nil)
+        #expect(choice(["chose": true])?.choice == nil)
+        #expect(choice(["chose": "2"])?.choice == nil)
+        #expect(
+            choice(["instructed": "Archive\u{202E} it\ninstead"])?.choice
+                == .instruction("Archive it instead")
+        )
+        #expect(choice(["instructed": "Archive it"])?.recordedAction == "Archive it")
+        #expect(choice(["instructed": "Archive it", "chose": 2])?.choice == .instruction("Archive it"))
+    }
 }
 
 @Suite("ProVisor queue")
@@ -171,7 +282,7 @@ struct ProposalQueueTests {
             id: id,
             title: id,
             why: nil,
-            action: "a",
+            options: [ProposalOption(label: "Suggested", action: "a")],
             kind: nil,
             created: now.addingTimeInterval(-createdAgo),
             expires: expiresIn.map { now.addingTimeInterval($0) },
@@ -324,7 +435,10 @@ struct ProVisorCommandTests {
         id: "a",
         title: "Cancel Foo Pro",
         why: nil,
-        action: "Draft the cancellation email.",
+        options: [
+            ProposalOption(label: "Draft it", action: "Draft the cancellation email."),
+            ProposalOption(label: "Label it", action: "Label the receipts 'To cancel'."),
+        ],
         kind: nil,
         created: Date(timeIntervalSince1970: 0),
         expires: nil,
@@ -365,9 +479,13 @@ struct ProVisorCommandTests {
         #expect(arguments[1].contains("America/Los_Angeles"))
     }
 
-    @Test("An acting run gains the acting tools, writes no files, and is told the action")
-    func actArguments() {
-        let arguments = ProVisorCommand.actArguments(proposal: proposal, access: access)
+    @Test("An approved option's run gains the acting tools and is told that option alone")
+    func approvedArguments() {
+        let arguments = ProVisorCommand.approvedArguments(
+            proposal: proposal,
+            option: proposal.options[1],
+            access: access
+        )
 
         #expect(arguments.contains("--restricted"))
         #expect(values(after: "--permission-prompts", in: arguments) == ["none"])
@@ -376,15 +494,39 @@ struct ProVisorCommandTests {
             "mcp__mail__create_draft",
         ])
         #expect(!arguments.contains("--append-system-prompt"))
-        #expect(arguments[1].contains("Approved action: Draft the cancellation email."))
+        #expect(arguments[1].contains("Approved action: Label the receipts 'To cancel'."))
+        #expect(!arguments[1].contains("Draft the cancellation email."))
+    }
+
+    @Test("A typed instruction's run acts on the instruction, with one suggestion as background")
+    func instructedArguments() {
+        let arguments = ProVisorCommand.instructedArguments(
+            proposal: proposal,
+            instruction: "Archive the receipts.",
+            reference: proposal.options[0],
+            access: access
+        )
+
+        #expect(arguments.contains("--restricted"))
+        #expect(values(after: "--permission-prompts", in: arguments) == ["none"])
+        // The same list an approved option gets: typing an instruction widens nothing.
+        #expect(values(after: "--allowedTools", in: arguments) == [
+            "mcp__mail__get_*",
+            "mcp__mail__create_draft",
+        ])
+        #expect(!arguments.contains("--append-system-prompt"))
+        #expect(arguments[1].contains("Their instruction: Archive the receipts."))
+        #expect(arguments[1].contains("chose not to approve: Draft the cancellation email."))
+        // Only the suggestion that was on screen beside the text box reaches the run.
+        #expect(!arguments[1].contains("Label the receipts"))
     }
 
     @Test("A run nobody reviewed gets the shorter tool list, and is told the rule it is under")
-    func unreviewedActArguments() {
-        let arguments = ProVisorCommand.actArguments(
+    func automaticArguments() {
+        let arguments = ProVisorCommand.automaticArguments(
             proposal: proposal,
+            rule: rule,
             access: access,
-            under: rule,
             now: now,
             timeZone: losAngeles
         )
@@ -589,6 +731,68 @@ struct ProposalStoreTests {
         #expect(loaded.decided != nil)
     }
 
+    @Test("The option approved, or the instruction typed in its place, is written back")
+    func recordsTheChoice() throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try write(
+            [
+                "title": "Real",
+                "options": [
+                    ["label": "One", "action": "first"],
+                    ["label": "Two", "action": "second"],
+                ],
+            ],
+            named: "real.json",
+            in: directory
+        )
+        func fields() throws -> [String: Any] {
+            let data = try Data(contentsOf: directory.appendingPathComponent("real.json"))
+            return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        }
+
+        // Counted from one, the way the agent's brief refers to an option.
+        try ProposalStore.record(id: "real", in: directory, choice: .option(1))
+        #expect(try fields()["chose"] as? Int == 2)
+        #expect(ProposalStore.load(from: directory).first?.choice == .option(1))
+
+        // A retry with typed text replaces the earlier choice, and the reverse.
+        try ProposalStore.record(id: "real", in: directory, choice: .instruction("Archive it."))
+        #expect(try fields()["instructed"] as? String == "Archive it.")
+        #expect(try fields()["chose"] == nil)
+        #expect(ProposalStore.load(from: directory).first?.choice == .instruction("Archive it."))
+
+        try ProposalStore.record(id: "real", in: directory, choice: .option(0))
+        #expect(try fields()["chose"] as? Int == 1)
+        #expect(try fields()["instructed"] == nil)
+    }
+
+    @Test("A decision that would push the file past the size cap is refused, not half-written")
+    func recordRefusesToOutgrowTheCap() throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let padding = String(repeating: "x", count: Proposal.maximumFileBytes - 400)
+        try write(
+            ["title": "Real", "action": "a", "status": "done", "padding": padding],
+            named: "real.json",
+            in: directory
+        )
+        let url = directory.appendingPathComponent("real.json")
+        let before = try Data(contentsOf: url)
+        #expect(before.count <= Proposal.maximumFileBytes)
+
+        #expect {
+            try ProposalStore.record(
+                id: "real",
+                in: directory,
+                choice: .instruction(String(repeating: "i", count: Proposal.actionLimit))
+            )
+        } throws: { error in
+            (error as? CocoaError)?.code == .fileWriteOutOfSpace
+        }
+        #expect(try Data(contentsOf: url) == before)
+    }
+
     @Test("A decision cannot be aimed outside the proposals folder")
     func recordRefusesForeignIDs() throws {
         let directory = try makeDirectory()
@@ -630,7 +834,7 @@ struct StandingApprovalTests {
             id: "p",
             title: "t",
             why: nil,
-            action: "a",
+            options: [ProposalOption(label: "Suggested", action: "a")],
             kind: nil,
             created: now,
             expires: expiresIn.map { now.addingTimeInterval($0) },
@@ -640,6 +844,31 @@ struct StandingApprovalTests {
         )
         proposal.under = under
         return proposal
+    }
+
+    @Test("A proposal that offers a choice is never carried out unreviewed")
+    func claimNeedsASingleAction() {
+        let rules = [rule("s-0000aaaa")]
+        let single = proposal(under: "s-0000aaaa")
+        let choice = Proposal(
+            id: "p",
+            title: "t",
+            why: nil,
+            options: [
+                ProposalOption(label: "One", action: "a"),
+                ProposalOption(label: "Two", action: "b"),
+            ],
+            kind: nil,
+            created: now,
+            expires: nil,
+            status: .proposed,
+            result: nil,
+            isCleared: false,
+            under: "s-0000aaaa"
+        )
+
+        #expect(StandingApprovals.rule(for: single, in: rules, now: now)?.id == "s-0000aaaa")
+        #expect(StandingApprovals.rule(for: choice, in: rules, now: now) == nil)
     }
 
     @Test("A claim counts only when it names a rule in force, on a proposal still waiting")
@@ -783,5 +1012,174 @@ struct ProVisorSettingsTests {
 
         defaults.set(5, forKey: "provisor.scoutHours")
         #expect(SettingsStore(defaults: defaults).provisorScoutHours == 6)
+    }
+}
+
+@Suite("ProVisor review decisions")
+struct ProposalReviewTests {
+    private func proposal(
+        status: Proposal.Status = .proposed,
+        offer: StandingOffer? = nil,
+        expires: Date? = nil
+    ) -> Proposal {
+        Proposal(
+            id: "p",
+            title: "t",
+            why: nil,
+            options: [
+                ProposalOption(label: "One", action: "a"),
+                ProposalOption(label: "Two", action: "b"),
+            ],
+            kind: nil,
+            created: Date(timeIntervalSince1970: 0),
+            expires: expires,
+            status: status,
+            result: nil,
+            isCleared: false,
+            standingOffer: offer
+        )
+    }
+
+    private let offer = StandingOffer(condition: "It is Tuesday", action: "Trash promos", basis: nil)
+
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    @Test("A typed instruction keeps what was typed, minus what could disguise or redraw it")
+    func typedInstruction() {
+        #expect(
+            ProposalReview.instruction(from: "  Archive\u{202E} it\n\ninstead\u{1B}[2J ")
+                == "Archive it instead[2J"
+        )
+        // A joiner inside an emoji is part of what they wrote.
+        #expect(
+            ProposalReview.instruction(from: "Label it Family \u{1F468}\u{200D}\u{1F469}")
+                == "Label it Family \u{1F468}\u{200D}\u{1F469}"
+        )
+        #expect(ProposalReview.instruction(from: " \n\t ") == nil)
+
+        let atLimit = String(repeating: "a", count: Proposal.actionLimit)
+        #expect(ProposalReview.instruction(from: atLimit) == atLimit)
+        #expect(ProposalReview.instruction(from: atLimit + "aa") == nil)
+        #expect(ProposalReview.overflow(of: atLimit) == 0)
+        #expect(ProposalReview.overflow(of: atLimit + "aa") == 2)
+    }
+
+    @Test("A decision counts only for the copy that was displayed, while it can still be made")
+    func refusal() {
+        let displayed = proposal()
+        func refusal(
+            onFile: Proposal?,
+            isBusy: Bool = false,
+            isActive: Bool = true
+        ) -> DecisionRefusal? {
+            ProposalReview.refusal(
+                displayed: displayed,
+                onFile: onFile,
+                isBusy: isBusy,
+                isActive: isActive,
+                now: now
+            )
+        }
+
+        #expect(refusal(onFile: displayed) == nil)
+
+        // The scout rewrote an option after the window drew it.
+        let rewritten = Proposal(
+            id: "p",
+            title: "t",
+            why: nil,
+            options: [
+                ProposalOption(label: "One", action: "Trash everything."),
+                ProposalOption(label: "Two", action: "b"),
+            ],
+            kind: nil,
+            created: Date(timeIntervalSince1970: 0),
+            expires: nil,
+            status: .proposed,
+            result: nil,
+            isCleared: false
+        )
+        #expect(refusal(onFile: rewritten) == .changed)
+
+        #expect(refusal(onFile: nil) == .unavailable)
+        #expect(refusal(onFile: displayed, isBusy: true) == .unavailable)
+        #expect(refusal(onFile: displayed, isActive: false) == .unavailable)
+
+        for status in [Proposal.Status.done, .dismissed, .withdrawn] {
+            let settled = proposal(status: status)
+            #expect(
+                ProposalReview.refusal(
+                    displayed: settled,
+                    onFile: settled,
+                    isBusy: false,
+                    isActive: true,
+                    now: now
+                ) == .unavailable
+            )
+        }
+
+        let failed = proposal(status: .failed)
+        #expect(
+            ProposalReview.refusal(
+                displayed: failed,
+                onFile: failed,
+                isBusy: false,
+                isActive: true,
+                now: now
+            ) == nil
+        )
+    }
+
+    @Test("A proposal past its expiry can no longer be approved, and says so")
+    func expiry() {
+        let expired = proposal(expires: now.addingTimeInterval(-1))
+        let current = proposal(expires: now.addingTimeInterval(60))
+        func refusal(_ proposal: Proposal) -> DecisionRefusal? {
+            ProposalReview.refusal(
+                displayed: proposal,
+                onFile: proposal,
+                isBusy: false,
+                isActive: true,
+                now: now
+            )
+        }
+
+        #expect(refusal(expired) == .unavailable)
+        #expect(refusal(current) == nil)
+        #expect(ProposalReview.closedReason(expired, now: now) != nil)
+        #expect(ProposalReview.closedReason(current, now: now) == nil)
+        #expect(ProposalReview.closedReason(proposal(status: .dismissed), now: now) != nil)
+        #expect(ProposalReview.closedReason(proposal(status: .withdrawn), now: now) != nil)
+        #expect(ProposalReview.closedReason(proposal(status: .done), now: now) == nil)
+    }
+
+    @Test("An offered rule is answered only by a decision on the option it goes with")
+    func standingDecision() {
+        let offered = proposal(offer: offer)
+        func decision(_ proposal: Proposal, _ index: Int, always: Bool) -> String? {
+            ProposalReview.standingDecision(for: proposal, optionIndex: index, always: always)
+        }
+
+        #expect(decision(offered, 0, always: true) == "accepted")
+        #expect(decision(offered, 0, always: false) == "declined")
+        // Another option leaves the offer unanswered, whatever was tapped.
+        #expect(decision(offered, 1, always: false) == nil)
+        #expect(decision(offered, 1, always: true) == nil)
+        #expect(decision(proposal(), 0, always: true) == nil)
+    }
+
+    @Test("An offered rule can be accepted only from the option it goes with")
+    func offerGoesWithTheRecommendedOption() {
+        #expect(ProposalReview.showsOffer(offer, optionIndex: 0, isCustom: false))
+        #expect(!ProposalReview.showsOffer(offer, optionIndex: 1, isCustom: false))
+        #expect(!ProposalReview.showsOffer(offer, optionIndex: 0, isCustom: true))
+        #expect(!ProposalReview.showsOffer(nil, optionIndex: 0, isCustom: false))
+    }
+
+    @Test("The approving button names what the tap does")
+    func approveTitle() {
+        #expect(ProposalReview.approveTitle(isRetry: false, showsOffer: false) == "Do It")
+        #expect(ProposalReview.approveTitle(isRetry: false, showsOffer: true) == "Just Once")
+        #expect(ProposalReview.approveTitle(isRetry: true, showsOffer: true) == "Try Again")
     }
 }

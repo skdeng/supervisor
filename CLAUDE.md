@@ -357,10 +357,32 @@ sink. Preserve these guards when touching the relevant code:
   `\A[a-z0-9][a-z0-9-]{0,63}\z`, caps the file at 32 KiB, strips control and format characters
   (a bidirectional override would let an action display as something other than what it says),
   and **rejects — never truncates — an action over 600 characters**, because the action is what
-  an approval runs and text the user could not read in full is text they did not approve.
-  Approval is possible only on the review screen, where that action is shown whole, and the
-  acting run is instructed from the parsed copy captured at the tap, never re-read from the file
-  the scout can rewrite. The banner carries a count only, and `AppLog` records names and counts —
+  an approval runs and text the user could not read in full is text they did not approve. A
+  proposal offers one action or up to three named `options`; one unusable option, two options
+  with one name, an option name over 24 characters, or a file carrying both `action` and
+  `options` rejects the whole proposal. Approval is possible only in the review window, where
+  the selected option's action is shown whole, and the acting run is instructed from the parsed
+  copy captured at the tap, never re-read from the file the scout can rewrite. **That window
+  stays open while scouting passes run, so the text under review is pinned when it opens**
+  (`ProVisorReviewView`): a rewrite shows as a notice, the approving buttons go dead, and the
+  new text appears only when the user asks for it. A view that followed the file would swap
+  the words under a cursor already moving to **Do It**. A tap carries the proposal on file,
+  and `ProposalReview.refusal` rejects it unless that copy still equals the one displayed, is
+  still open, and has not expired. **The choice is written into the file before the run is
+  queued, and an approval whose write fails runs nothing**: a run whose proposal could not be
+  marked would leave it open in the queue to be approved and carried out again. For the same
+  reason `Proposal.parse` re-encodes a file that can still be decided the way a decision
+  rewrites it and refuses one that would leave no room for the decision
+  (`decisionHeadroomBytes`); pretty-printing can more than double a compact file, so the
+  size on disk says nothing about that. **A typed instruction runs the user's words in place
+  of the options**, with the tool list an approved option gets; the run is given the title,
+  the reasons, and the one suggestion that was on screen beside the text box as background
+  marked as data, and never the options the user did not have in front of them. Typed text is
+  cleaned by `Proposal.typedText`, which removes control characters and bidirectional
+  overrides and keeps everything else as typed. The choice is written back (`chose`,
+  `instructed`) for the scout to learn from and is read back **for display only**: a retry
+  starts from the recommended option and an empty box, because a box pre-filled from a file
+  the scout can rewrite would run the scout's words as the user's. The banner carries a count only, and `AppLog` records names and counts —
   never proposal text or a failure's message, which can quote the agent's output. Verify a change
   to the flags by running the CLI in a scratch directory and asking it to write outside its two
   folders, read outside the directory, run a command, and call a connector tool that is not
@@ -658,14 +680,21 @@ names below are the code paths.
     backs off 15 min after a failed pass (`ProVisorSchedule`). A pass is capped at 80 turns, $2,
     and 20 minutes; one cut off by a limit keeps the proposals it had already written.
   - **A proposal** is `title` / `why` / `action` / `kind` / `created` / optional `expires`,
-    written by the agent; the app writes `status` (`proposed` → `done` / `failed` /
-    `dismissed`; the agent may set `withdrawn`), `decided`, `result`, and `cleared` back into
-    the same file, which is how the agent learns what the user wants. Expanded: rows for
-    proposals awaiting a decision, then those carried out and not yet cleared, three unprompted
-    and the rest behind **N more**. A row opens the review screen (a sheet takeover) or
-    dismisses; it cannot approve. **Do It** on the review screen queues the acting run (one at
-    a time; it may overlap a scouting pass). By default an approved action can label, trash,
-    and mark mail and write drafts, and cannot send.
+    written by the agent; in place of `action` it may carry `options`, one to three
+    `{label, action}` pairs with the recommended one first. The app writes `status`
+    (`proposed` → `done` / `failed` / `dismissed`; the agent may set `withdrawn`), `decided`,
+    `result`, `cleared`, and the choice (`chose`, an option counted from one, or `instructed`,
+    the text the user typed) back into the same file, which is how the agent learns what the
+    user wants. Expanded: rows for proposals awaiting a decision, then those carried out and
+    not yet cleared, three unprompted and the rest behind **N more**. A row opens the **review
+    window** (`ProVisorReviewWindow`) or dismisses; it cannot approve. The review is an
+    ordinary window because deciding can involve typing and the notch panel never takes
+    keyboard focus; opening it closes the sheet. It shows the options as
+    chips with the recommended one selected and that option's action in full, plus **Something
+    else…**, which swaps the action for a text box. **Do It** queues the acting run for the
+    selected option or the typed instruction (one at a time; it may overlap a scouting pass).
+    No button is the default, so Return never approves anything. By default an acting run can
+    label, trash, and mark mail and write drafts, and cannot send.
   - **Standing approvals** are how "ask me" becomes "just do it", and **both the rule and its
     condition are the agent's to work out from the decision history** — there is no per-kind
     switch and no condition grammar in Swift. A rule is two sentences, a condition and an
@@ -673,11 +702,14 @@ names below are the code paths.
     / "trash unopened promotional mail"). The protocol tells the agent to compare what was
     approved with what was dismissed and offer the narrowest condition that separates them —
     who, when, or what — and never to reach past that evidence. It offers by adding
-    `"standing": {"when", "do", "because"}` to a proposal; the review screen shows all three
+    `"standing": {"when", "do", "because"}` to a proposal; the review window shows all three
     (`because` is the pattern it found, with counts, so the user can judge where the line was
-    drawn) and **Always** beside **Just Once**. **Always** appends the rule to `standing.json`
+    drawn) and **Always** beside **Just Once**. An offer goes with the recommended option and
+    shows only while that option is selected. **Always** appends the rule to `standing.json`
     (`s-<8 hex>` id); either answer is written back as `standingDecision`, so "just once"
-    teaches the agent to keep asking. **Time is spelled out for the agent, never left to
+    teaches the agent to keep asking, while approving another option or typing an instruction
+    leaves the offer unanswered. A proposal claiming `under` a rule is admitted only when it
+    has a single action — nobody is there to choose among options. **Time is spelled out for the agent, never left to
     derive**: each decision is stamped `decidedLocal` ("Tuesday 2026-11-17 09:12") and each run
     is told today's weekday and local time (`ProVisorClock`), because a rule can turn on the
     weekday and working one out from a UTC timestamp is where a model slips. A rule with a
@@ -685,7 +717,7 @@ names below are the code paths.
     then — the schedule is not driven by the rules. From then on the scout is told the rules in
     force and may mark a proposal `"under": "<id>"`; `ProVisorCenter` admits it without a tap,
     carries it out with the `auto` tool list, records `automatic: true`, and shows it as a
-    **Done automatically** row that leaves by itself after a day. Its review screen names the
+    **Done automatically** row that leaves by itself after a day. Its review window names the
     rule and offers **Stop Doing This**; Settings lists every rule in force with **Remove**. A
     revoked rule stays on file, and the scout is told never to offer it again. Something
     admitted under a rule is not announced: only what needs a decision raises the banner.

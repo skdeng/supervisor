@@ -53,14 +53,37 @@ final class ProVisorCenter: ObservableObject {
     private var workspaceObservers: [NSObjectProtocol] = []
     private var scoutService: AgentTaskService?
     private var actService: AgentTaskService?
-    /// A proposal waiting to be carried out: approved by a tap, or — with `rule` — admitted
-    /// under a standing approval. Each is captured as it stood at that moment.
+    /// A proposal waiting to be carried out, captured as it stood when it was approved or
+    /// admitted, with what the run is to do.
     private struct PendingAct {
         let proposal: Proposal
-        let rule: StandingRule?
+        let task: ActTask
+    }
+
+    /// The text a queued or running proposal is being carried out as, and whose words it is.
+    struct CapturedAction: Equatable {
+        let text: String
+        let isTyped: Bool
+    }
+
+    private enum ActTask {
+        /// One of the proposal's options, approved on the review screen.
+        case approved(ProposalOption)
+        /// An instruction the user typed on the review screen, with the option that was shown
+        /// beside the text box.
+        case instructed(String, reference: ProposalOption)
+        /// Admitted under a standing approval, with nobody reviewing it first.
+        case standing(StandingRule)
+
+        var rule: StandingRule? {
+            if case let .standing(rule) = self { return rule }
+            return nil
+        }
     }
 
     private var pendingActs: [PendingAct] = []
+    /// The act in progress, for as long as `actingID` names it.
+    private var actingTask: PendingAct?
     /// Proposals already admitted under a standing approval, so a reload never admits one twice.
     private var automaticIDs: Set<String> = []
     private var automaticRunsThisPass = 0
@@ -169,6 +192,7 @@ final class ProVisorCenter: ObservableObject {
         pendingActs = []
         queuedIDs = []
         actingID = nil
+        actingTask = nil
         isScouting = false
         proposals = []
         standingRules = []
@@ -307,34 +331,121 @@ final class ProVisorCenter: ObservableObject {
 
     // MARK: - Decisions
 
-    /// Approves a proposal and queues the run that carries it out. With `always`, the rule the
-    /// proposal offered also becomes a standing approval.
-    func approve(_ id: String, always: Bool = false) {
-        guard isActive,
-              actingID != id,
-              !queuedIDs.contains(id),
-              let proposal = proposals.first(where: { $0.id == id }),
-              proposal.isOpen
-        else { return }
-        // Captured as displayed: the run is instructed from this copy, so nothing written to
-        // the file after the tap can change what was approved. This run was reviewed, so it
-        // gets the reviewed tool list whether or not a rule comes of it.
-        pendingActs.append(PendingAct(proposal: proposal, rule: nil))
-        queuedIDs.append(id)
+    /// Approves one of a proposal's options and queues the run that carries it out. With
+    /// `always`, the rule the proposal offered also becomes a standing approval; an offer goes
+    /// with the recommended option, so `always` counts only for that one.
+    ///
+    /// `displayed` is the proposal as the review window showed it. Returns why the approval
+    /// was not taken, or nil when the run is queued.
+    @discardableResult
+    func approve(
+        _ displayed: Proposal,
+        option index: Int = 0,
+        always: Bool = false
+    ) -> DecisionRefusal? {
+        if let refusal = refusal(for: displayed) { return refusal }
+        guard displayed.options.indices.contains(index) else { return .unavailable }
 
-        // An offer is answered either way, and the answer is written where the agent reads it:
-        // "just this once" is how it learns that this kind of thing is to keep being asked.
-        if let offer = proposal.standingOffer {
-            if always {
-                updateStanding { rules in
-                    guard let rule = StandingApprovals.rule(adding: offer, to: rules, now: Date())
-                    else { return rules }
-                    return rules + [rule]
-                }
+        let decision = ProposalReview.standingDecision(
+            for: displayed,
+            optionIndex: index,
+            always: always
+        )
+        // This run was reviewed, so it gets the reviewed tool list whether or not a rule comes
+        // of it.
+        guard enqueue(
+            displayed,
+            task: .approved(displayed.options[index]),
+            choice: .option(index),
+            standingDecision: decision
+        ) else { return .notSaved }
+
+        if decision == ProposalReview.acceptedOffer, let offer = displayed.standingOffer {
+            updateStanding { rules in
+                guard let rule = StandingApprovals.rule(adding: offer, to: rules, now: Date())
+                else { return rules }
+                return rules + [rule]
             }
-            record(id, standingDecision: always ? "accepted" : "declined")
         }
+        return nil
+    }
+
+    /// Queues a run that carries out an instruction the user typed in place of the proposal's
+    /// own options. `reference` is the option that was on screen beside the text box, which
+    /// the run is given as background. Returns why it was not taken, or nil when queued.
+    @discardableResult
+    func instruct(_ displayed: Proposal, reference index: Int, text: String) -> DecisionRefusal? {
+        if let refusal = refusal(for: displayed) { return refusal }
+        guard displayed.options.indices.contains(index),
+              let instruction = ProposalReview.instruction(from: text)
+        else { return .unavailable }
+
+        return enqueue(
+            displayed,
+            task: .instructed(instruction, reference: displayed.options[index]),
+            choice: .instruction(instruction),
+            standingDecision: nil
+        ) ? nil : .notSaved
+    }
+
+    private func refusal(for displayed: Proposal) -> DecisionRefusal? {
+        ProposalReview.refusal(
+            displayed: displayed,
+            onFile: proposals.first { $0.id == displayed.id },
+            isBusy: actingID == displayed.id || queuedIDs.contains(displayed.id),
+            isActive: isActive,
+            now: Date()
+        )
+    }
+
+    /// Records the choice in the proposal's file and queues the run, or does neither.
+    ///
+    /// The write comes first because a run whose proposal could not be marked would leave the
+    /// proposal open in the queue, to be approved and carried out a second time.
+    private func enqueue(
+        _ proposal: Proposal,
+        task: ActTask,
+        choice: ProposalChoice,
+        standingDecision: String?
+    ) -> Bool {
+        // The choice is written where the agent reads it: a different option, "just this
+        // once", and the user's own words are each how it learns what to propose next time.
+        do {
+            try ProposalStore.record(
+                id: proposal.id,
+                in: ProVisorHome.proposalsURL,
+                standingDecision: standingDecision,
+                choice: choice
+            )
+        } catch {
+            AppLog.error(.provisor, "decision not recorded")
+            return false
+        }
+        reloadSoon()
+
+        // Captured as displayed: the run is instructed from this copy, so nothing written to
+        // the file after the tap can change what was approved.
+        pendingActs.append(PendingAct(proposal: proposal, task: task))
+        queuedIDs.append(proposal.id)
         startNextAct()
+        return true
+    }
+
+    /// What a queued or running proposal is being carried out as, from the copy captured at
+    /// the tap. Nil for one that is neither.
+    func capturedAction(for id: String) -> CapturedAction? {
+        let pending = actingTask?.proposal.id == id
+            ? actingTask
+            : pendingActs.first { $0.proposal.id == id }
+        guard let pending else { return nil }
+        switch pending.task {
+        case let .approved(option):
+            return CapturedAction(text: option.action, isTyped: false)
+        case let .instructed(instruction, _):
+            return CapturedAction(text: instruction, isTyped: true)
+        case .standing:
+            return CapturedAction(text: pending.proposal.recommended.action, isTyped: false)
+        }
     }
 
     /// Takes a standing approval back. Anything still waiting to run under it is dropped and
@@ -342,7 +453,7 @@ final class ProVisorCenter: ObservableObject {
     func revokeStanding(_ ruleID: String) {
         updateStanding { StandingApprovals.revoking(ruleID, in: $0, now: Date()) }
 
-        let dropped = Set(pendingActs.filter { $0.rule?.id == ruleID }.map(\.proposal.id))
+        let dropped = Set(pendingActs.filter { $0.task.rule?.id == ruleID }.map(\.proposal.id))
         pendingActs.removeAll { dropped.contains($0.proposal.id) }
         queuedIDs.removeAll { dropped.contains($0) }
         AppLog.notice(.provisor, "standing approval revoked")
@@ -394,7 +505,7 @@ final class ProVisorCenter: ObservableObject {
             else { break }
             automaticRunsThisPass += 1
             automaticIDs.insert(proposal.id)
-            pendingActs.append(PendingAct(proposal: proposal, rule: rule))
+            pendingActs.append(PendingAct(proposal: proposal, task: .standing(rule)))
             queuedIDs.append(proposal.id)
         }
         AppLog.notice(.provisor, "standing actions admitted \(automaticRunsThisPass)")
@@ -423,16 +534,33 @@ final class ProVisorCenter: ObservableObject {
         guard isActive, actingID == nil, !pendingActs.isEmpty else { return }
         let pending = pendingActs.removeFirst()
         let proposal = pending.proposal
-        let isAutomatic = pending.rule != nil
+        let isAutomatic = pending.task.rule != nil
         queuedIDs.removeAll { $0 == proposal.id }
 
         let arguments: [String]
         do {
-            arguments = try ProVisorCommand.actArguments(
-                proposal: proposal,
-                access: ProVisorHome.loadAccess(),
-                under: pending.rule
-            )
+            let access = try ProVisorHome.loadAccess()
+            switch pending.task {
+            case let .approved(option):
+                arguments = ProVisorCommand.approvedArguments(
+                    proposal: proposal,
+                    option: option,
+                    access: access
+                )
+            case let .instructed(instruction, reference):
+                arguments = ProVisorCommand.instructedArguments(
+                    proposal: proposal,
+                    instruction: instruction,
+                    reference: reference,
+                    access: access
+                )
+            case let .standing(rule):
+                arguments = ProVisorCommand.automaticArguments(
+                    proposal: proposal,
+                    rule: rule,
+                    access: access
+                )
+            }
         } catch {
             record(
                 proposal.id,
@@ -444,6 +572,7 @@ final class ProVisorCenter: ObservableObject {
             return
         }
 
+        actingTask = pending
         actingID = proposal.id
         AppLog.notice(.provisor, "action started")
 
@@ -478,6 +607,7 @@ final class ProVisorCenter: ObservableObject {
     ) {
         guard activation == self.activation else { return }
         actService = nil
+        actingTask = nil
         actingID = nil
 
         switch outcome {
@@ -508,7 +638,6 @@ final class ProVisorCenter: ObservableObject {
         status: Proposal.Status? = nil,
         result: String? = nil,
         cleared: Bool? = nil,
-        standingDecision: String? = nil,
         automatic: Bool? = nil
     ) {
         do {
@@ -518,7 +647,6 @@ final class ProVisorCenter: ObservableObject {
                 status: status,
                 result: Proposal.displayText(result, limit: Proposal.resultLimit),
                 cleared: cleared,
-                standingDecision: standingDecision,
                 automatic: automatic
             )
         } catch {

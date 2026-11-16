@@ -31,6 +31,8 @@ enum ProposalRowState: Equatable {
 @MainActor
 struct ProVisorSectionView: View {
     @ObservedObject var center: ProVisorCenter
+    /// Opens the review window on a proposal.
+    let onReview: (String) -> Void
 
     /// Whether the proposals past the first few are showing. Resets with the sheet, which is
     /// built only while it is expanded or hovered, so the queue opens folded every time.
@@ -71,11 +73,7 @@ struct ProVisorSectionView: View {
                 queuedIDs: center.queuedIDs
             ),
             onOpen: {
-                SheetTakeoverCenter.shared.present(
-                    id: ProVisorModule.detailTakeoverID,
-                    title: "ProVisor",
-                    content: AnyView(ProVisorDetailView(center: center, id: proposal.id))
-                )
+                onReview(proposal.id)
             },
             onDismiss: {
                 center.dismiss(proposal.id)
@@ -103,7 +101,7 @@ struct ProVisorSectionView: View {
 }
 
 /// One proposal: what it would achieve and the evidence for it. The row opens the review
-/// screen and can dismiss; it deliberately cannot approve. Approval lives where the action is
+/// window and can dismiss; it deliberately cannot approve. Approval lives where the action is
 /// spelled out in full, so what runs is always something the user had in front of them.
 @MainActor
 private struct ProVisorRow: View {
@@ -150,7 +148,7 @@ private struct ProVisorRow: View {
     private var detail: String {
         switch state {
         case .open:
-            return proposal.why ?? proposal.action
+            return proposal.why ?? proposal.recommended.action
         case .queued:
             return "Queued"
         case .working:
@@ -201,192 +199,6 @@ private struct ProVisorMarker: View {
         case .failed:
             return AnyShapeStyle(Color.red)
         }
-    }
-}
-
-/// The review screen, presented as a sheet takeover: why this was proposed, exactly what
-/// approving does, and the decision.
-///
-/// The action shown here is the text the acting run is instructed with, in full — a proposal
-/// whose action is too long to show whole is rejected when its file is read. The same holds for
-/// a rule the agent offers to make standing: **Always** appears only beside the rule's
-/// condition and action in full, with the pattern in the user's own decisions it was drawn
-/// from, so a standing approval is always something the user read before granting.
-///
-/// For something already done under a standing approval, this is where the user sees which
-/// rule it was done under — and can take that rule back.
-@MainActor
-struct ProVisorDetailView: View {
-    @ObservedObject var center: ProVisorCenter
-    let id: String
-
-    var body: some View {
-        if let proposal = center.proposals.first(where: { $0.id == id }) {
-            detail(proposal)
-        } else {
-            Text("This proposal is no longer on file.")
-                .font(.subheadline)
-                .foregroundStyle(NotchTheme.secondaryForeground)
-        }
-    }
-
-    private func detail(_ proposal: Proposal) -> some View {
-        let state = ProposalRowState.of(
-            proposal,
-            actingID: center.actingID,
-            queuedIDs: center.queuedIDs
-        )
-
-        return VStack(alignment: .leading, spacing: 12) {
-            Text(proposal.title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(NotchTheme.primaryForeground)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if let why = proposal.why {
-                block("Why", why)
-            }
-
-            block(
-                proposal.isAutomatic && state == .done ? "What was done" : "What approving does",
-                proposal.action
-            )
-
-            if state == .open || state == .failed, let offer = proposal.standingOffer {
-                ruleBlock(
-                    "From now on, without asking",
-                    condition: offer.condition,
-                    action: offer.action,
-                    basis: offer.basis
-                )
-            }
-
-            if let rule = standingRule(for: proposal) {
-                ruleBlock(
-                    rule.isActive
-                        ? "Done under your standing approval"
-                        : "Done under a standing approval you have since taken back",
-                    condition: rule.condition,
-                    action: rule.action
-                )
-            }
-
-            if let result = proposal.result, state == .done || state == .failed {
-                block(state == .failed ? "Last attempt" : "Result", result)
-            }
-
-            footer(proposal, state: state)
-        }
-    }
-
-    private func block(_ label: String, _ text: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(NotchTheme.secondaryForeground)
-
-            Text(text)
-                .font(.subheadline)
-                .foregroundStyle(NotchTheme.primaryForeground)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    /// A rule set out as its parts: when it applies, what is done, and — on an offer — the
-    /// pattern in the user's decisions that the agent drew the condition from.
-    private func ruleBlock(
-        _ label: String,
-        condition: String,
-        action: String,
-        basis: String? = nil
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(NotchTheme.secondaryForeground)
-
-            rulePart("When", condition)
-            rulePart("Do", action)
-            if let basis {
-                rulePart("Why", basis, isQuiet: true)
-            }
-        }
-    }
-
-    private func rulePart(_ label: String, _ text: String, isQuiet: Bool = false) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(label)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(NotchTheme.secondaryForeground)
-                .frame(width: 34, alignment: .leading)
-
-            Text(text)
-                .font(.subheadline)
-                .foregroundStyle(
-                    isQuiet ? NotchTheme.secondaryForeground : NotchTheme.primaryForeground
-                )
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    @ViewBuilder
-    private func footer(_ proposal: Proposal, state: ProposalRowState) -> some View {
-        switch state {
-        case .open, .failed:
-            HStack(spacing: 8) {
-                Spacer(minLength: 0)
-                ProVisorCapsuleButton(title: "Dismiss") {
-                    center.dismiss(proposal.id)
-                    close()
-                }
-                if proposal.standingOffer != nil {
-                    ProVisorCapsuleButton(title: "Always") {
-                        center.approve(proposal.id, always: true)
-                        close()
-                    }
-                }
-                ProVisorCapsuleButton(
-                    title: approveTitle(proposal, state: state),
-                    isProminent: true
-                ) {
-                    center.approve(proposal.id)
-                    close()
-                }
-            }
-        case .queued, .working:
-            Text(state == .working ? "Working on it…" : "Queued behind another action")
-                .font(.caption)
-                .foregroundStyle(NotchTheme.secondaryForeground)
-        case .done:
-            HStack(spacing: 8) {
-                Spacer(minLength: 0)
-                if let rule = standingRule(for: proposal), rule.isActive {
-                    ProVisorCapsuleButton(title: "Stop Doing This") {
-                        center.revokeStanding(rule.id)
-                    }
-                }
-                ProVisorCapsuleButton(title: "Clear") {
-                    center.dismiss(proposal.id)
-                    close()
-                }
-            }
-        }
-    }
-
-    /// The rule something was carried out under, in force or since revoked.
-    private func standingRule(for proposal: Proposal) -> StandingRule? {
-        guard proposal.isAutomatic, let under = proposal.under else { return nil }
-        return center.standingRules.first { $0.id == under }
-    }
-
-    /// Beside an offered rule the plain approval says what it is: this once, not from now on.
-    private func approveTitle(_ proposal: Proposal, state: ProposalRowState) -> String {
-        if state == .failed { return "Try Again" }
-        return proposal.standingOffer == nil ? "Do It" : "Just Once"
-    }
-
-    private func close() {
-        SheetTakeoverCenter.shared.dismiss(id: ProVisorModule.detailTakeoverID)
     }
 }
 
@@ -453,9 +265,10 @@ private struct ProVisorIconButton: View {
 }
 
 @MainActor
-private struct ProVisorCapsuleButton: View {
+struct ProVisorCapsuleButton: View {
     let title: String
     var isProminent = false
+    var isEnabled = true
     let action: () -> Void
 
     var body: some View {
@@ -469,6 +282,8 @@ private struct ProVisorCapsuleButton: View {
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.4)
         .help(title)
     }
 

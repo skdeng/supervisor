@@ -7,8 +7,9 @@ import SwiftUI
 /// The agent is a headless Claude Code run with a standing brief, its own notes, and read-only
 /// access to the user's connectors (`ProVisorCenter`, `ProVisorHome`). This module is the
 /// surface around it:
-/// - **Expanded:** the proposals awaiting a decision. Each opens a review screen showing why it
-///   was proposed and exactly what approving does; nothing is carried out without that tap.
+/// - **Expanded:** the proposals awaiting a decision. Each opens the review window
+///   (`ProVisorReviewWindow`), which shows why it was proposed and the ways to act on it, and
+///   takes an instruction typed in their place; nothing is carried out without a tap there.
 /// - **Banner:** a short, content-free notice when a scouting pass adds proposals. The glow it
 ///   raises stays until the sheet is opened, the way it does for any other new attention.
 /// - **Compact:** nothing. An idea waiting is not a live activity.
@@ -20,7 +21,6 @@ final class ProVisorModule: NotchModule, ObservableObject {
     let displayName = "ProVisor"
     let order = 35
 
-    static let detailTakeoverID = "provisor-detail"
     /// How long the banner stays up when nothing retires it sooner.
     private static let announcementSeconds: TimeInterval = 8
 
@@ -64,7 +64,7 @@ final class ProVisorModule: NotchModule, ObservableObject {
         center.onProposalsChanged = nil
         center.onScoutAdded = nil
         center.stop()
-        SheetTakeoverCenter.shared.dismiss(id: Self.detailTakeoverID)
+        ProVisorReviewWindow.shared.close()
 
         announcedCount = nil
         expandedPresence = false
@@ -81,7 +81,9 @@ final class ProVisorModule: NotchModule, ObservableObject {
 
     func expandedSection() -> AnyView? {
         guard hasVisibleProposals else { return nil }
-        return AnyView(ProVisorSectionView(center: center))
+        return AnyView(ProVisorSectionView(center: center) { [weak self] id in
+            self?.openReview(id)
+        })
     }
 
     func peekBanner() -> AnyView? {
@@ -92,6 +94,13 @@ final class ProVisorModule: NotchModule, ObservableObject {
     /// Opens the sheet on the proposals. Opening clears the glow, which retires the banner.
     func review() {
         context?.requestExpand()
+    }
+
+    /// Opens the review window on one proposal and closes the sheet, which would otherwise sit
+    /// over the window until the cursor left it.
+    private func openReview(_ id: String) {
+        ProVisorReviewWindow.shared.show(id, center: center)
+        context?.requestCollapse()
     }
 
     private var hasVisibleProposals: Bool {

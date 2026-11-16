@@ -1,5 +1,21 @@
 import Foundation
 
+/// One way to act on a proposal: a short name for its chip on the review screen, and the action
+/// an approval of it runs.
+struct ProposalOption: Equatable, Sendable {
+    let label: String
+    /// Shown to the user in full, then handed to the acting run.
+    let action: String
+}
+
+/// What the user chose to have carried out on a proposal.
+enum ProposalChoice: Equatable, Sendable {
+    /// One of the proposal's own options, by its position in `Proposal.options`.
+    case option(Int)
+    /// An instruction the user typed themselves.
+    case instruction(String)
+}
+
 /// One thing the scouting agent thinks the user would want done, read from a JSON file the
 /// agent wrote into its workspace.
 ///
@@ -24,8 +40,8 @@ struct Proposal: Identifiable, Equatable, Sendable {
     let id: String
     let title: String
     let why: String?
-    /// What an approval runs. Shown to the user in full, then handed to the acting run.
-    let action: String
+    /// The ways to act on it, never empty. The first is the one the agent recommends.
+    let options: [ProposalOption]
     let kind: String?
     let created: Date
     let expires: Date?
@@ -45,17 +61,42 @@ struct Proposal: Identifiable, Equatable, Sendable {
     var isAutomatic = false
     /// When the user, or a standing approval, settled it.
     var decided: Date?
+    /// What the user last had carried out, as recorded in the file. It is read for display
+    /// only: a run is instructed from the choice captured at the tap.
+    var choice: ProposalChoice?
 
     /// Whether the proposal still awaits a decision — a failed one can be approved again.
     var isOpen: Bool { status == .proposed || status == .failed }
+
+    var recommended: ProposalOption { options[0] }
+
+    /// The action to show for a proposal that has been decided: the recorded choice, or the
+    /// recommended option where none is recorded.
+    ///
+    /// For display only. The choice is read from a file the scout can rewrite, so no run is
+    /// ever built from this and the review screen never offers it for approval.
+    var recordedAction: String {
+        switch choice {
+        case let .instruction(text): text
+        case let .option(index) where options.indices.contains(index): options[index].action
+        case .option, nil: recommended.action
+        }
+    }
 }
 
 extension Proposal {
     static let maximumFileBytes = 32 << 10
+    /// Room kept in a file that can still be decided, for what a decision writes into it: the
+    /// status and its dates, a result, and a typed instruction at four bytes a character.
+    static let decisionHeadroomBytes = 6 << 10
     static let titleLimit = 100
     static let whyLimit = 400
     static let actionLimit = 600
     static let resultLimit = 400
+    static let maximumOptions = 3
+    static let optionLabelLimit = 24
+    /// The chip name of a proposal written with a single `action`.
+    static let singleOptionLabel = "Suggested"
 
     /// Anchored with `\A` and `\z`: ICU's `$` also matches before a trailing line terminator.
     static func isValidID(_ id: String) -> Bool {
@@ -69,9 +110,7 @@ extension Proposal {
               let object = try? JSONSerialization.jsonObject(with: data),
               let fields = object as? [String: Any],
               let title = displayText(fields["title"], limit: titleLimit),
-              // The action is what an approval runs, so it is never shortened to fit: text the
-              // user could not read in full is text they did not approve.
-              let action = displayText(fields["action"], limit: actionLimit, truncates: false)
+              let options = parsedOptions(fields)
         else { return nil }
 
         let status: Status
@@ -83,12 +122,22 @@ extension Proposal {
         } else {
             status = .proposed
         }
+        // A decision is written back by re-encoding the whole file, which can come out larger
+        // than the agent wrote it. A file that would then leave no room for the decision is
+        // refused now: once approved, its outcome could not be recorded, and it would stay in
+        // the queue to be approved and carried out again.
+        if status == .proposed || status == .failed {
+            guard let rewritten = try? JSONSerialization.data(
+                withJSONObject: fields,
+                options: ProposalStore.writingOptions
+            ), rewritten.count + decisionHeadroomBytes <= maximumFileBytes else { return nil }
+        }
 
         return Proposal(
             id: id,
             title: title,
             why: displayText(fields["why"], limit: whyLimit),
-            action: action,
+            options: options,
             kind: slug(fields["kind"]),
             created: date(fields["created"]) ?? modified,
             expires: date(fields["expires"]),
@@ -100,8 +149,54 @@ extension Proposal {
             standingOffer: StandingOffer.parse(fields["standing"]),
             under: (fields["under"] as? String).flatMap { StandingRule.isValidID($0) ? $0 : nil },
             isAutomatic: fields["automatic"] as? Bool ?? false,
-            decided: date(fields["decided"])
+            decided: date(fields["decided"]),
+            choice: parsedChoice(fields, optionCount: options.count)
         )
+    }
+
+    /// The proposal's options: the `options` list when the file has one, else its single
+    /// `action`. A file carrying both is rejected, since it does not say which the user would
+    /// be approving.
+    ///
+    /// An action is what an approval runs, so it is never shortened to fit: text the user could
+    /// not read in full is text they did not approve. One unusable entry rejects the whole
+    /// list, since a proposal missing an option the agent meant to offer reads as a different
+    /// proposal.
+    private static func parsedOptions(_ fields: [String: Any]) -> [ProposalOption]? {
+        guard let stored = fields["options"] else {
+            return displayText(fields["action"], limit: actionLimit, truncates: false)
+                .map { [ProposalOption(label: singleOptionLabel, action: $0)] }
+        }
+        guard fields["action"] == nil,
+              let entries = stored as? [[String: Any]],
+              (1...maximumOptions).contains(entries.count)
+        else { return nil }
+
+        var options: [ProposalOption] = []
+        for entry in entries {
+            guard let label = displayText(entry["label"], limit: optionLabelLimit, truncates: false),
+                  let action = displayText(entry["action"], limit: actionLimit, truncates: false),
+                  // Two chips with one name cannot be told apart.
+                  !options.contains(where: { $0.label == label })
+            else { return nil }
+            options.append(ProposalOption(label: label, action: action))
+        }
+        return options
+    }
+
+    private static func parsedChoice(
+        _ fields: [String: Any],
+        optionCount: Int
+    ) -> ProposalChoice? {
+        if let text = typedText(fields["instructed"], limit: actionLimit) {
+            return .instruction(text)
+        }
+        guard let number = fields["chose"] as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              let position = Int(exactly: number.doubleValue),
+              (1...optionCount).contains(position)
+        else { return nil }
+        return .option(position - 1)
     }
 
     /// Collapses whitespace and strips control and format characters. A newline or an ANSI
@@ -121,6 +216,34 @@ extension Proposal {
         guard !cleaned.isEmpty else { return nil }
         guard cleaned.count > limit else { return cleaned }
         return truncates ? String(cleaned.prefix(limit - 1)) + "…" : nil
+    }
+
+    /// Cleans text the user typed themselves: whitespace is collapsed, and control characters
+    /// and the bidirectional embedding, override, and isolate marks are removed. Everything
+    /// else is kept as typed — a joiner inside an emoji or a script is part of what they wrote.
+    /// Nil when nothing is left or the text runs past `limit`; it is never shortened.
+    static func typedText(_ value: Any?, limit: Int) -> String? {
+        guard let text = value as? String else { return nil }
+        var scalars = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars {
+            let isDirectional = (0x202A...0x202E).contains(scalar.value)
+                || (0x2066...0x2069).contains(scalar.value)
+            if isDirectional { continue }
+            if scalar.properties.generalCategory == .control {
+                // A line break or a tab separates words; any other control character goes.
+                if CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                    scalars.append(" ")
+                }
+                continue
+            }
+            scalars.append(scalar)
+        }
+        let cleaned = String(scalars)
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard !cleaned.isEmpty, cleaned.count <= limit else { return nil }
+        return cleaned
     }
 
     private static func slug(_ value: Any?) -> String? {
@@ -173,6 +296,14 @@ enum ProposalQueue {
 
 /// Reads the agent's proposal files and writes the user's decisions back into them.
 enum ProposalStore {
+    /// How a file is encoded when a decision is written into it. Slashes stay unescaped: a
+    /// proposal is full of links and addresses, and escaping each would grow the file.
+    static let writingOptions: JSONSerialization.WritingOptions = [
+        .prettyPrinted,
+        .sortedKeys,
+        .withoutEscapingSlashes,
+    ]
+
     /// The most files read in one pass, newest first.
     static let maximumFiles = 400
 
@@ -225,6 +356,7 @@ enum ProposalStore {
         cleared: Bool? = nil,
         standingDecision: String? = nil,
         automatic: Bool? = nil,
+        choice: ProposalChoice? = nil,
         now: Date = Date(),
         timeZone: TimeZone = .current
     ) throws {
@@ -255,11 +387,24 @@ enum ProposalStore {
         if let automatic {
             fields["automatic"] = automatic
         }
+        // An option is recorded by its position counted from one, the way the agent's brief
+        // refers to it, and each kind of choice clears the other.
+        switch choice {
+        case let .option(index):
+            fields["chose"] = index + 1
+            fields["instructed"] = nil
+        case let .instruction(text):
+            fields["instructed"] = text
+            fields["chose"] = nil
+        case nil:
+            break
+        }
 
-        let updated = try JSONSerialization.data(
-            withJSONObject: fields,
-            options: [.prettyPrinted, .sortedKeys]
-        )
+        let updated = try JSONSerialization.data(withJSONObject: fields, options: writingOptions)
+        // A file over the limit would be skipped on the next load.
+        guard updated.count <= Proposal.maximumFileBytes else {
+            throw CocoaError(.fileWriteOutOfSpace)
+        }
         try updated.write(to: url, options: .atomic)
     }
 }
