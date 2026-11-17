@@ -54,6 +54,51 @@ struct SiteBrowserTests {
         #expect(browser.webView.hasOnlySecureContent)
     }
 
+    // MARK: Rendering in the hidden window
+
+    @Test("A page in the hidden window is told it is visible and is given animation frames", .timeLimit(.minutes(1)))
+    func hiddenPageRenders() async throws {
+        let site = TestSite()
+        site.route("/", page: TestPages.page("Frames", "<p>page</p>"))
+        let browser = browser(site)
+        defer { browser.close() }
+
+        _ = try await browser.open(url("https://example.com/"))
+        let facts = try await browser.run("""
+            const frame = await Promise.race([
+              new Promise((resolve) => requestAnimationFrame(() => resolve('fired'))),
+              new Promise((resolve) => setTimeout(() => resolve('silent'), 3000))
+            ]);
+            return { visibility: document.visibilityState, frame: frame };
+            """)
+
+        #expect(browser.rendersWhileHidden)
+        #expect(facts["visibility"]?.string == "visible")
+        #expect(facts["frame"]?.string == "fired")
+    }
+
+    @Test("A page that swaps its loading placeholder for its content on an animation frame is read with the content", .timeLimit(.minutes(1)))
+    func contentRevealedOnAFrameIsRead() async throws {
+        let site = TestSite()
+        site.route("/activity", page: TestPages.page("Activity", """
+            <div id="placeholder" role="status" aria-label="Loading"></div>
+            <template id="arrived"><p>Points returned: 74,280</p><a href="/next">Next</a></template>
+            <script>
+              requestAnimationFrame(() => {
+                const arrived = document.getElementById('arrived');
+                document.getElementById('placeholder').replaceWith(arrived.content.cloneNode(true));
+              });
+            </script>
+            """))
+        let browser = browser(site)
+        defer { browser.close() }
+
+        let page = try await browser.open(url("https://example.com/activity"))
+
+        #expect(page.text.contains("Points returned: 74,280"))
+        #expect(page.links.map(\.text) == ["Next"])
+    }
+
     @Test("A form submitted in a simulated page is posted to the site with its body", .timeLimit(.minutes(1)))
     func formPostIsIntercepted() async throws {
         let site = TestSite()

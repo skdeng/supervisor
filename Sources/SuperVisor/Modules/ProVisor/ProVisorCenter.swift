@@ -1371,6 +1371,7 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         case .timedOut: return "timed out"
         case .cancelled: return "cancelled"
         case .agentError: return "agent error"
+        case let .limitReached(limit): return limit.logName
         case .malformedOutput: return "malformed output"
         }
     }

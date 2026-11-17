@@ -307,6 +307,10 @@ one of them, use it: that is what "Do the checking yourself" means.
   the page you just read, and use `read_more` to read the rest of a long page. There is no way
   to type, press a button, or go to an address, and that is deliberate: these tools read, and
   never change anything.
+- A page that comes back with no text and no links may not have finished building itself. Its
+  link numbers are gone with it, so read it again by opening the site with `open_site` and
+  following the same links. If it is empty again, write that down as what happened on that
+  day, so that a later run tries the page again.
 - `read_texts` returns their recent texts, newest first, and can narrow them by sender or by
   words. Sign-in codes in them are hidden.
 - Signing in is SuperVisor's job. Never ask them for a password or a code, and never write one

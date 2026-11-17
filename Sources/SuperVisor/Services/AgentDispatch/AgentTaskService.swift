@@ -7,6 +7,37 @@ struct AgentTaskResult: Sendable {
     let durationMs: Int?
 }
 
+/// An allowance a run is started with and can be stopped by. A run stopped by one has still
+/// done the work it reached.
+enum AgentRunLimit: Sendable, Equatable {
+    case turns
+    case spending
+
+    /// The limit a result line's `subtype` names, nil for any other subtype.
+    init?(resultSubtype: Any?) {
+        switch resultSubtype as? String {
+        case "error_max_turns": self = .turns
+        case "error_max_budget_usd": self = .spending
+        default: return nil
+        }
+    }
+
+    var sentence: String {
+        switch self {
+        case .turns: "The agent reached its turn limit before finishing."
+        case .spending: "The agent reached its spending limit before finishing."
+        }
+    }
+
+    /// A fixed name for a log line.
+    var logName: String {
+        switch self {
+        case .turns: "turn limit"
+        case .spending: "spending limit"
+        }
+    }
+}
+
 enum AgentTaskError: Error, LocalizedError, Sendable {
     case binaryNotFound
     case launchFailed(String?)
@@ -14,6 +45,7 @@ enum AgentTaskError: Error, LocalizedError, Sendable {
     case timedOut
     case cancelled
     case agentError(String)
+    case limitReached(AgentRunLimit)
     case malformedOutput(String?)
 
     var errorDescription: String? {
@@ -30,6 +62,8 @@ enum AgentTaskError: Error, LocalizedError, Sendable {
             return "The agent task was cancelled."
         case let .agentError(message):
             return message.isEmpty ? "The agent reported an error." : message
+        case let .limitReached(limit):
+            return limit.sentence
         case let .malformedOutput(message):
             return Self.withDiagnostic("The agent did not return a valid result.", message)
         }
@@ -44,6 +78,7 @@ enum AgentTaskError: Error, LocalizedError, Sendable {
         case .timedOut: "timedOut"
         case .cancelled: "cancelled"
         case .agentError: "agentError"
+        case .limitReached: "limitReached"
         case .malformedOutput: "malformedOutput"
         }
     }
@@ -104,8 +139,8 @@ private struct AgentOutputParser {
 
         guard let text = payload["result"] as? String else {
             // A run stopped by one of its own limits names the limit and carries no result text.
-            if isError, let reason = Self.limitDescription(payload["subtype"]) {
-                outcome = .error(.agentError(reason))
+            if isError, let limit = AgentRunLimit(resultSubtype: payload["subtype"]) {
+                outcome = .error(.limitReached(limit))
             }
             return
         }
@@ -118,14 +153,6 @@ private struct AgentOutputParser {
                 costUSD: Self.finiteDouble(payload["total_cost_usd"]),
                 durationMs: Self.integer(payload["duration_ms"])
             ))
-        }
-    }
-
-    private static func limitDescription(_ subtype: Any?) -> String? {
-        switch subtype as? String {
-        case "error_max_turns": "The agent reached its turn limit before finishing."
-        case "error_max_budget_usd": "The agent reached its spending limit before finishing."
-        default: nil
         }
     }
 
@@ -578,6 +605,13 @@ final class AgentTaskService {
         if let pendingStopError {
             signalProcessGroup(SIGKILL)
             resolve(.failure(pendingStopError))
+            return
+        }
+
+        // The CLI exits with a failure status after any result marked as an error, a limit
+        // included, so the limit is read from the result before the status is judged.
+        if processExit.reason == .exit, case let .error(.limitReached(limit)) = outputOutcome {
+            resolve(.failure(.limitReached(limit)))
             return
         }
 

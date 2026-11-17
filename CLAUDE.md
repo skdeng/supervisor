@@ -83,7 +83,9 @@ them.
     `BrowsingHistory` reads (counts and flags; Chrome's and Safari's need Full Disk Access).
   - `webkit` — a web view that is never shown loads a page, and its data store keeps a cookie
     across launches (run it twice; `cookieFromEarlierLaunch`). `site-read` — `SiteBrowser` reads
-    `https://example.com/` and reports counts (needs a network).
+    `https://example.com/` and reports counts, and whether a page in its hidden window is
+    told it is visible and given animation frames (`pageVisible`, `animationFrame`; needs a
+    network).
   - `agent`, `bridge`, `tools`, `connectors` — start real agent runs, each capped at a $0.05 to
     $0.10 spending limit on the user's plan. `agent`: the CLI answers a one-turn prompt when
     started through `AgentTaskService`, disclaimed. `bridge`: a run reaches a served tool through
@@ -1367,8 +1369,21 @@ at runtime.
   timer does. **A settle poll sent while a navigation replaces the page can go unanswered**,
   so the two poll scripts wait at most 2 s (a lost poll counts as an empty sample); at the
   full script limit one lost poll stalls a read for 10 s, which is all a hidden read has.
-  `SiteBrowser` is a `WKWebView` in a window that is never ordered on screen (an enrollment
-  moves the view into the site window for the user to watch), on a persistent data store of its
+  `SiteBrowser` is a `WKWebView` in a window the person never sees (an enrollment moves the
+  view into the site window for the user to watch). **The window is on screen, fully
+  transparent, beneath the desktop, and passing clicks through, with WebKit's occlusion test
+  switched off for the view** (`keepRendering`, the private
+  `_setWindowOcclusionDetectionEnabled:`; where the call is missing the window stays off
+  screen and one `sites` error line says so): a web
+  view whose window is off screen tells its page it is hidden and gives it no animation
+  frames, and a page that reveals streamed content on a frame then stays on its loading
+  placeholder for good. The read comes back with no text and no links and nothing fails (a
+  site's server-rendered start page reads fine while the pages behind it read empty). The
+  `site-read` self-check reports `pageVisible` and `animationFrame` for the real bundle; it
+  has been run with the display awake only. A page that believes it is visible also does
+  what it does on being seen (marking items read, counting an impression), which a read
+  could not cause while pages were told they were hidden. The
+  view is on a persistent data store of its
   own (`WKWebsiteDataStore(forIdentifier:)`, under `~/Library/WebKit/<bundle id>/WebsiteDataStore`)
   with a Safari user-agent string, because sites refuse WebKit's bare one. A script's result
   crosses one boundary (`ScriptValue`: types checked, depth and sizes bounded) before anything
@@ -1478,7 +1493,11 @@ carries `site and text tools off: <reason>` (`nothingGranted`, `accessNotSealed`
 `tool <name>: <outcome>` for each call; Settings states the reason, `nothingGranted` apart. A
 bridge refusal logs `agent bridge refused: <reason>` in `agentDispatch`, written to the file
 once per reason per 30 s with the rest at debug level in the unified log, and a sign-in logs
-`sign-in for <host>: <result>` in `sites`.
+`sign-in for <host>: <result>` in `sites`. A pass or an acting run that failed logs
+`<kind> failed: <name>`, where a run stopped by its own allowance reads `turn limit` or
+`spending limit` (it has still written what it reached) and any other failed result reads
+`agent error`. **`tool open_site: ok` with a page of no text and no links can be a page that
+did not render**: run the `site-read` self-check and see `keepRendering` under Shared Services.
 
 **A fresh screenshot with no `com.apple.metadata:` attributes is a Spotlight symptom, not a
 capture bug.** `screencapture` applies `kMDItemIsScreenCapture` through the metadata framework,

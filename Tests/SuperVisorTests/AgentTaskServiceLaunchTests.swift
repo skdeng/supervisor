@@ -64,6 +64,48 @@ struct AgentTaskServiceLaunchTests {
         #expect(Int32(result.text) != nil)
     }
 
+    @Test(
+        "A run stopped by a limit fails as that limit, whatever its exit status and stderr",
+        arguments: [
+            ("error_max_turns", AgentRunLimit.turns, 1),
+            ("error_max_budget_usd", AgentRunLimit.spending, 1),
+            ("error_max_turns", AgentRunLimit.turns, 0),
+        ]
+    )
+    func limitStop(subtype: String, limit: AgentRunLimit, status: Int) async throws {
+        let folder = ScratchFolder()
+        defer { folder.remove() }
+        let script = folder.url.appendingPathComponent("agent")
+        try """
+        #!/bin/sh
+        printf '{"type":"result","is_error":true,"subtype":"\(subtype)"}\\n'
+        echo "a line on stderr" >&2
+        exit \(status)
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        let service = AgentTaskService(executableOverride: script)
+
+        do {
+            _ = try await service.run(arguments: [], workingDirectory: folder.url, timeout: .seconds(30))
+            Issue.record("the run reported success")
+        } catch let error as AgentTaskError {
+            guard case let .limitReached(reached) = error else {
+                Issue.record("failed as \(error.caseName)")
+                return
+            }
+            #expect(reached == limit)
+            #expect(error.localizedDescription == limit.sentence)
+        }
+    }
+
+    @Test("A limit's log name and sentence are fixed text")
+    func limitNames() {
+        #expect(AgentRunLimit.turns.logName == "turn limit")
+        #expect(AgentRunLimit.spending.logName == "spending limit")
+        #expect(AgentRunLimit(resultSubtype: "error_during_execution") == nil)
+        #expect(AgentRunLimit(resultSubtype: 7) == nil)
+    }
+
     @Test("A stand-in that cannot be launched reports a launch failure and never calls onLaunch")
     func launchFailureSkipsCallback() async throws {
         let folder = ScratchFolder()
@@ -243,6 +285,7 @@ struct AgentTaskServiceLaunchTests {
         #expect(AgentTaskError.timedOut.caseName == "timedOut")
         #expect(AgentTaskError.cancelled.caseName == "cancelled")
         #expect(AgentTaskError.agentError("secret text").caseName == "agentError")
+        #expect(AgentTaskError.limitReached(.turns).caseName == "limitReached")
         #expect(AgentTaskError.malformedOutput("secret text").caseName == "malformedOutput")
     }
 }

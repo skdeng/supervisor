@@ -381,8 +381,10 @@ private final class WebKitCheck: NSObject, WKNavigationDelegate {
 
 /// Whether a site browser reads a real page: it opens `https://example.com/` with a policy that
 /// admits only that site's hosts, and reports what it read as counts. The page's text and links
-/// are never reported. Run it with a network connection; it uses the `webkit` check's data store,
-/// so it leaves the feature's own sessions alone.
+/// are never reported. `pageVisible` and `animationFrame` say whether a page in the hidden
+/// window renders as one on screen does (`SiteBrowser.keepRendering`); both should be true.
+/// Run it with a network connection; it uses the `webkit` check's data store, so it leaves the
+/// feature's own sessions alone.
 @MainActor
 private final class SiteReadCheck {
     func start(completion: @escaping ([String: Any]) -> Void) {
@@ -400,6 +402,15 @@ private final class SiteReadCheck {
                 result["titleLength"] = page.title.count
                 result["textLength"] = page.text.count
                 result["offeredLinks"] = page.links.count
+                let frames = try? await browser.run("""
+                    const frame = await Promise.race([
+                      new Promise((resolve) => requestAnimationFrame(() => resolve('fired'))),
+                      new Promise((resolve) => setTimeout(() => resolve('silent'), 3000))
+                    ]);
+                    return { visibility: document.visibilityState, frame: frame };
+                    """)
+                result["pageVisible"] = frames?["visibility"]?.string == "visible"
+                result["animationFrame"] = frames?["frame"]?.string == "fired"
             } catch {
                 result["loaded"] = false
                 result["titleLength"] = 0

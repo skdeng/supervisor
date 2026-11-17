@@ -102,7 +102,8 @@ final class SerialGate {
     }
 }
 
-/// One web view that reads pages for a visit, kept in a window that is never shown.
+/// One web view that reads pages for a visit, kept in a window the person never sees
+/// (`keepRendering` says where that window is and why).
 ///
 /// Where it may go is decided by its `SiteNavigationPolicy`, which every main-frame navigation
 /// is held to, redirects and script navigations included. It loads addresses and never clicks:
@@ -389,8 +390,10 @@ final class SiteBrowser: NSObject {
         )
         window.isReleasedWhenClosed = false
         window.contentView = container
+        let renders = Self.keepRendering(webView, in: window)
 
         super.init()
+        rendersWhileHidden = renders
         webView.navigationDelegate = self
         webView.uiDelegate = self
         typingRelay?.browser = self
@@ -404,12 +407,61 @@ final class SiteBrowser: NSObject {
 
     var currentURL: URL? { webView.url }
 
+    /// Whether pages in the hidden window render: true where `keepRendering` found WebKit's
+    /// call and put the window on screen.
+    private(set) var rendersWhileHidden = false
+
+    /// Makes pages in the hidden window render as they do on screen. **A web view whose window
+    /// is not on screen tells its page it is hidden and gives it no animation frames**, and a
+    /// page that reveals its content on an animation frame (a streamed page swapping a loading
+    /// placeholder for what arrived) then stays on the placeholder for good: the load finishes,
+    /// the text length holds at zero, and the read comes back empty with nothing failing.
+    /// So the window is ordered in fully transparent, beneath the desktop, passing every click
+    /// through, and the web view is told to skip its test of what covers the window, which
+    /// would find such a window covered. Beneath the desktop it is out of reach of Mission
+    /// Control, Stage Manager, and the window pickers. That call is private to WebKit; where
+    /// it is missing the window stays off screen and pages render as far as a hidden page
+    /// does, which is logged once.
+    private static func keepRendering(_ webView: WKWebView, in window: NSWindow) -> Bool {
+        let selector = NSSelectorFromString("_setWindowOcclusionDetectionEnabled:")
+        guard webView.responds(to: selector) else {
+            if !reportedMissingOcclusionCall {
+                reportedMissingOcclusionCall = true
+                AppLog.error(.sites, "hidden pages will not render: occlusion call missing")
+            }
+            return false
+        }
+        typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
+        unsafeBitCast(webView.method(for: selector), to: Setter.self)(webView, selector, false)
+
+        window.alphaValue = 0
+        window.hasShadow = false
+        window.ignoresMouseEvents = true
+        window.isExcludedFromWindowsMenu = true
+        window.sharingType = .none
+        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) - 1)
+        window.collectionBehavior = [.stationary, .ignoresCycle, .canJoinAllSpaces]
+        window.orderFrontRegardless()
+        return true
+    }
+
+    private static var reportedMissingOcclusionCall = false
+
+    /// A browser freed without `close()` takes its window off screen with it.
+    isolated deinit {
+        guard !isClosed else { return }
+        webView.stopLoading()
+        window.orderOut(nil)
+        window.close()
+    }
+
     /// Moves the web view out of its hidden window into `host`, filling it, for a person to
     /// watch and type into. Loading and reading go on as before; `close()` removes the view
     /// from the host.
     func present(in host: NSView) {
         guard !isClosed else { return }
         webView.removeFromSuperview()
+        window.orderOut(nil)
         webView.frame = host.bounds
         webView.autoresizingMask = [.width, .height]
         host.addSubview(webView)

@@ -408,9 +408,9 @@ struct QuotaMonitorTests {
         let times = h.endpoint.requestTimes
         let gaps = zip(times.dropFirst(), times).prefix(3).map { $0 - $1 }
         try #require(gaps.count == 3)
-        #expect(gaps[0] >= .milliseconds(150))
-        #expect(gaps[1] >= .milliseconds(350))
-        #expect(gaps[2] >= .milliseconds(350))
+        #expect(gaps[0] >= .milliseconds(150), "gaps \(gaps)")
+        #expect(gaps[1] >= .milliseconds(350), "gaps \(gaps)")
+        #expect(gaps[2] >= .milliseconds(350), "gaps \(gaps)")
         #expect(!h.monitor.showsRow)
     }
 
