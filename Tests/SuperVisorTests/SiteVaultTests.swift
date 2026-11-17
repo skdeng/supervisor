@@ -41,7 +41,8 @@ private func makeGrant(
     kind: SiteGrant.CodeKind = .none,
     sender: String? = nil,
     steps: [SignInStep] = [],
-    signOutControlSeen: Bool = false
+    signOutControlSeen: Bool = false,
+    signInControlAbsent: Bool = false
 ) -> SiteGrant {
     SiteGrant(
         username: username,
@@ -54,7 +55,8 @@ private func makeGrant(
         codeKind: kind,
         codeSender: sender,
         signInSteps: steps,
-        signOutControlSeen: signOutControlSeen
+        signOutControlSeen: signOutControlSeen,
+        signInControlAbsent: signInControlAbsent
     )
 }
 
@@ -149,6 +151,47 @@ struct SiteVaultTests {
 
         #expect(try vault.grant(for: "example.com")?.signOutControlSeen == false)
         #expect(!makeGrant().signOutControlSeen)
+    }
+
+    @Test("Whether a sign-in control was absent reads back, and a grant stored without it reads as not absent")
+    func signInControlAbsent() throws {
+        let store = InMemorySecretStore()
+        let vault = SiteVault(store: store)
+        #expect(!makeGrant().signInControlAbsent)
+        try vault.save(makeGrant(signInControlAbsent: true), for: "example.com")
+        #expect(try vault.grant(for: "example.com")?.signInControlAbsent == true)
+        #expect(try vault.grant(for: "example.com") == makeGrant(signInControlAbsent: true))
+
+        let stored = try #require(try store.read(account: "example.com"))
+        var object = try #require(JSONSerialization.jsonObject(with: stored) as? [String: Any])
+        #expect(object["signInControlAbsent"] as? Bool == true)
+        object["signInControlAbsent"] = nil
+        try store.write(try JSONSerialization.data(withJSONObject: object), account: "example.com")
+
+        let read = try #require(try vault.grant(for: "example.com"))
+        #expect(!read.signInControlAbsent)
+        #expect(read == makeGrant())
+    }
+
+    @Test("Either value of the sign-in control marker is valid, for a grant that remembers a password and one that does not")
+    func signInControlAbsentIsValidBothWays() {
+        for absent in [false, true] {
+            #expect(makeGrant(signInControlAbsent: absent).isValid(for: "example.com"), "\(absent)")
+            let kept = SiteGrant(
+                username: "",
+                password: "",
+                authenticatorKey: nil,
+                signInURL: URL(string: "https://example.com/login")!,
+                startURL: URL(string: "https://www.example.com/home")!,
+                fillHosts: ["example.com"],
+                browseHosts: ["example.com", "www.example.com"],
+                codeKind: .none,
+                codeSender: nil,
+                signInControlAbsent: absent,
+                remembersPassword: false
+            )
+            #expect(kept.isValid(for: "example.com"), "\(absent)")
+        }
     }
 
     @Test("Each site has its own grant")

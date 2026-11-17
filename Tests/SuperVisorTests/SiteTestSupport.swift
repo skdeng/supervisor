@@ -110,6 +110,10 @@ enum TestPages {
 ///
 /// The start page is `/account`; signed out it sends the browser to `/login`.
 ///
+/// `visitorSite` serves the same pages to a visitor who holds no session: it answers from the
+/// bank's current settings as if nobody were signed in, never changes the bank's state, and
+/// keeps a request log of its own.
+///
 /// Its routes hold it `unowned`, so a test keeps the instance alive for as long as a browser
 /// may load from its site: one dropped early, as by binding it to `_` when destructuring a
 /// fixture tuple, crashes the run at the next page load with "Attempted to read an unowned
@@ -124,6 +128,7 @@ final class TestBank {
     }
 
     let site = TestSite()
+    let visitorSite = TestSite()
     let username = "alice@example.com"
     /// Unique to the instance, so a test can look for it in every string the code produces.
     let password = "Pw-" + UUID().uuidString.lowercased()
@@ -181,6 +186,14 @@ final class TestBank {
     var startPageIsPublic = false {
         didSet { install() }
     }
+    /// The public page carries a link that reads exactly `Sign in`.
+    var publicPageShowsSignInControl = false {
+        didSet { install() }
+    }
+    /// The signed-in account page carries a link that reads `Sign out`.
+    var accountPageShowsSignOutControl = true {
+        didSet { install() }
+    }
     /// In the two-step flow, the page after the username is a challenge, and the password page
     /// is reached only by leaving it.
     var challengeBetweenSteps = false {
@@ -199,6 +212,15 @@ final class TestBank {
 
     init() {
         install()
+    }
+
+    /// What a simulated browser is given to load as a visitor with no session.
+    var visitorPages: SiteBrowser.SimulatedPages { visitorSite.answer }
+
+    /// Serves `page` at `path` to the signed-in person and to a visitor alike.
+    func routeForEveryone(_ path: String, page: String) {
+        site.route(path, page: page)
+        visitorSite.route(path, page: page)
     }
 
     func markSignedIn() {
@@ -276,7 +298,10 @@ final class TestBank {
     }
 
     private var publicPage: String {
-        TestPages.page("Welcome", "<h1>Welcome</h1><p>Open an account today.</p><a href=\"/login\">Sign in here</a>")
+        TestPages.page("Welcome", """
+            <h1>Welcome</h1><p>Open an account today.</p><a href="/login">Sign in here</a>
+            \(publicPageShowsSignInControl ? "<a href=\"/login\">Sign in</a>" : "")
+            """)
     }
 
     private var challengePage: String {
@@ -289,7 +314,7 @@ final class TestBank {
         TestPages.page("Account", """
             <h1>Account</h1><p>Card on file: Amex ending 1001</p>
             <a href="/cards">Cards</a> <a href="/statements">Statements</a>
-            <a href="/logout">Sign out</a> <a href="https://evil.test/phish">Offers</a>
+            \(accountPageShowsSignOutControl ? "<a href=\"/logout\">Sign out</a>" : "") <a href="https://evil.test/phish">Offers</a>
             """)
     }
 
@@ -305,20 +330,8 @@ final class TestBank {
     }
 
     private func install() {
-        site.route("/account") { [unowned self] _ in
-            if signedIn && !startPageIgnoresSession { return accountPage }
-            return startPageIsPublic ? publicPage : TestPages.redirect(to: "/login")
-        }
-        site.route("/home") { [unowned self] _ in
-            signedIn ? accountPage : TestPages.redirect(to: "/login")
-        }
-        site.route("/login") { [unowned self] _ in loginPage() }
-        site.route("/password") { [unowned self] _ in passwordPage }
-        site.route("/challenge") { [unowned self] _ in challengePage }
-        site.route("/verify") { [unowned self] _ in verifyPage }
-        site.route("/confirm") { [unowned self] _ in confirmPage }
-        site.route("/cards", page: TestPages.page("Cards", "<p>Visa and Amex</p><a href=\"/account\">Back</a>"))
-        site.route("/statements", page: TestPages.page("Statements", "<p>No statements</p>"))
+        installPages(on: site, forVisitor: false)
+        installPages(on: visitorSite, forVisitor: true)
 
         site.route("/identify", method: "POST") { [unowned self] request in
             guard request.fields[usernameFieldName] == username else { return failedLogin() }
@@ -341,6 +354,25 @@ final class TestBank {
             return finishLogin()
         }
         site.route("/confirm", method: "POST") { _ in TestPages.page("Confirmed", "Confirmed") }
+    }
+
+    /// The pages fetched by address. A visitor is a browser that holds no session, whatever the
+    /// bank's `signedIn` says.
+    private func installPages(on site: TestSite, forVisitor: Bool) {
+        site.route("/account") { [unowned self] _ in
+            if signedIn && !forVisitor && !startPageIgnoresSession { return accountPage }
+            return startPageIsPublic ? publicPage : TestPages.redirect(to: "/login")
+        }
+        site.route("/home") { [unowned self] _ in
+            signedIn && !forVisitor ? accountPage : TestPages.redirect(to: "/login")
+        }
+        site.route("/login") { [unowned self] _ in loginPage() }
+        site.route("/password") { [unowned self] _ in passwordPage }
+        site.route("/challenge") { [unowned self] _ in challengePage }
+        site.route("/verify") { [unowned self] _ in verifyPage }
+        site.route("/confirm") { [unowned self] _ in confirmPage }
+        site.route("/cards", page: TestPages.page("Cards", "<p>Visa and Amex</p><a href=\"/account\">Back</a>"))
+        site.route("/statements", page: TestPages.page("Statements", "<p>No statements</p>"))
     }
 }
 

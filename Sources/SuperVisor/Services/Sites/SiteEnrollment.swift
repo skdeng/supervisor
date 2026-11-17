@@ -28,11 +28,28 @@ import WebKit
 /// while a session is being kept, the page is probed each time a load finishes and each time
 /// the person types into it, and `finishKeepingSession` refuses (`signInNotSeen`) unless some
 /// page of this enrollment asked for a sign-in (`SignInRules.asksForSignIn`), the person typed
-/// into a password field, or the page it saves shows a sign-out control. A sign-in can leave
-/// none of those: a session an earlier window left in the data store, a passkey, a link opened
-/// from an email. The person can see the page, so after that refusal their confirmation
-/// (`confirmedByPerson`) saves it; such a grant holds no secret, and a mistaken one reads
-/// only what the site shows a visitor.
+/// into a password field, the page it saves shows a sign-out control, or the page differs for
+/// a visitor (below). A sign-in can leave none of those: a session an earlier window left in
+/// the data store, a passkey, a link opened from an email. The person can see the page, so
+/// after that refusal their confirmation (`confirming`, the refusal they answered) saves it;
+/// such a grant holds no secret, and a mistaken one reads only what the site shows a visitor.
+/// A confirmation answers only the refusal it names: a save that would refuse for the other
+/// reason refuses with that one.
+///
+/// **The page is read twice more before it is saved, each in a browser that is never shown**
+/// (`HiddenRead`), because the person's window has its own width and moment while every later
+/// read is a fresh load at the default size. The first read is on the enrollment's own data
+/// store, as a later read would be, and confirms the controls the person's page showed: a
+/// sign-out control or a missing sign-in control is recorded in the grant only when this read
+/// shows it too (`SessionMarkers`). The second is a visitor's (`VisitorCheck`), made when the
+/// grant will record no sign-out control, and compared with the first read when there is one.
+/// A visitor who is sent to a sign-in page or shown a sign-in control the page lacks shows
+/// that the session is what makes the page the person's: that is evidence of a sign-in, and
+/// the last case is recorded as `SiteGrant.signInControlAbsent`, which lets a lapse be
+/// noticed later. A page the visitor sees the same way cannot show a lapse, so it is refused
+/// (`pageLooksPublic`) even when a sign-in was seen. A read that cannot finish leaves the
+/// other rules to decide. An enrollment built with `simulatedPages` and no `visitorPages`
+/// makes no visitor check, so that no test reaches the network through it.
 ///
 /// A sign-in that moves from step to step inside one page finishes no load, and one that ends
 /// on a button press involves no typing either, so while a session is being kept the page is
@@ -56,6 +73,22 @@ final class SiteEnrollment: ObservableObject {
         case cancelled
         /// Nothing the app observed shows the person signed in, and they have not confirmed it.
         case signInNotSeen
+        /// The page reads the same to a visitor who is not signed in, so it cannot show that the
+        /// session has lapsed, and the person has not confirmed it.
+        case pageLooksPublic
+
+        var caseName: String {
+            switch self {
+            case .invalidAddress: "invalidAddress"
+            case .notSignedIn: "notSignedIn"
+            case .invalidGrant: "invalidGrant"
+            case .passwordNotConfirmed: "passwordNotConfirmed"
+            case .passwordNotFilled: "passwordNotFilled"
+            case .cancelled: "cancelled"
+            case .signInNotSeen: "signInNotSeen"
+            case .pageLooksPublic: "pageLooksPublic"
+            }
+        }
     }
 
     /// What the app says about where it stands.
@@ -91,6 +124,9 @@ final class SiteEnrollment: ObservableObject {
     static let standardRecheckInterval: Duration = .seconds(2)
 
     let browser: SiteBrowser
+    /// Whether a page that shows no sign-out control is loaded as a visitor would load it. False
+    /// for an enrollment on simulated pages that has no simulated visitor site.
+    let checksVisitor: Bool
 
     /// What the user typed. It carries secrets, so no rendering of it shows them.
     private struct Pending: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
@@ -121,6 +157,17 @@ final class SiteEnrollment: ObservableObject {
     /// The hosts navigations went through up to the first page past the sign-in, once there.
     private var hostsAtSignIn: Set<String>?
     private let recheckInterval: Duration
+    private let settling: SiteBrowser.Settling
+    private let dataStore: WKWebsiteDataStore
+    private let simulatedPages: SiteBrowser.SimulatedPages?
+    private let visitorPages: SiteBrowser.SimulatedPages?
+    private let visitorRecheckDelay: Duration
+    /// The hidden reads of a page about to be saved, while they run.
+    private var sessionReadTask: Task<SessionReads, Never>?
+    private var isReadingSession = false
+    /// Counts each time the enrollment begins afresh or is wiped, so that a save can tell that
+    /// what it set out to save has gone.
+    private var generation = 0
     /// The timed re-probe of a kept session's page; it holds the enrollment only while it acts.
     private var recheckTask: Task<Void, Never>?
     private var observeTask: Task<Void, Never>?
@@ -134,11 +181,19 @@ final class SiteEnrollment: ObservableObject {
         simulatedPages: SiteBrowser.SimulatedPages? = nil,
         settling: SiteBrowser.Settling = .standard,
         codeWaitLimit: Duration = SignInBroker.standardCodeWaitLimit,
-        recheckInterval: Duration = SiteEnrollment.standardRecheckInterval
+        recheckInterval: Duration = SiteEnrollment.standardRecheckInterval,
+        visitorPages: SiteBrowser.SimulatedPages? = nil,
+        visitorRecheckDelay: Duration = VisitorCheck.standardRecheckDelay
     ) {
         self.codes = codes
         self.codeWaitLimit = codeWaitLimit
         self.recheckInterval = recheckInterval
+        self.settling = settling
+        self.dataStore = dataStore
+        self.simulatedPages = simulatedPages
+        self.visitorPages = visitorPages
+        self.visitorRecheckDelay = visitorRecheckDelay
+        checksVisitor = simulatedPages == nil || visitorPages != nil
         browser = SiteBrowser(
             policy: .anyHTTPSHost,
             dataStore: dataStore,
@@ -208,6 +263,7 @@ final class SiteEnrollment: ObservableObject {
     ) async throws {
         guard !isCancelled else { throw Failure.cancelled }
         guard let url = Self.normalisedAddress(signInAddress) else { throw Failure.invalidAddress }
+        generation += 1
         stopAssisting()
         stopObserving()
         keptSessionURL = nil
@@ -266,6 +322,7 @@ final class SiteEnrollment: ObservableObject {
     func beginKeepingSession(signInAddress: String) async throws {
         guard !isCancelled else { throw Failure.cancelled }
         guard let url = Self.normalisedAddress(signInAddress) else { throw Failure.invalidAddress }
+        generation += 1
         stopAssisting()
         stopObserving()
         pending = nil
@@ -379,49 +436,105 @@ final class SiteEnrollment: ObservableObject {
         case sighting
         /// The page being saved shows a sign-out control.
         case signOutControl
+        /// A visitor with no cookies is sent to a sign-in page, asked to sign in, or shown a
+        /// sign-in control the page being saved lacks.
+        case visitorDiffers
         /// Nothing the app observed; the person confirmed it.
         case personsWord
 
-        /// Nil when nothing shows it and the person has not confirmed.
-        init?(sawSignIn: Bool, showsSignOutControl: Bool, confirmedByPerson: Bool) {
-            if sawSignIn {
-                self = .sighting
-            } else if showsSignOutControl {
-                self = .signOutControl
-            } else if confirmedByPerson {
-                self = .personsWord
-            } else {
-                return nil
-            }
+        /// The refusal a page earns before anyone confirms it, or nil when it has a basis. A
+        /// page a visitor sees the same way (`looksTheSame`) shows nothing, whatever else was
+        /// seen, since the person may have signed in and then moved to a public page.
+        static func refusal(
+            sawSignIn: Bool,
+            showsSignOutControl: Bool,
+            visitor: VisitorVerdict?
+        ) -> Failure? {
+            if visitor == .looksTheSame { return .pageLooksPublic }
+            if sawSignIn || showsSignOutControl || visitor?.differsFromSignedIn == true { return nil }
+            return .signInNotSeen
         }
+
+        /// The basis a page is saved on, or the refusal that stands. `confirming` is the refusal
+        /// the person answered: it saves the page only when it is the refusal the page earns.
+        static func decide(
+            sawSignIn: Bool,
+            showsSignOutControl: Bool,
+            visitor: VisitorVerdict? = nil,
+            confirming: Failure? = nil
+        ) -> Result<KeptSessionBasis, Failure> {
+            if let refusal = refusal(
+                sawSignIn: sawSignIn,
+                showsSignOutControl: showsSignOutControl,
+                visitor: visitor
+            ) {
+                return confirming == refusal ? .success(.personsWord) : .failure(refusal)
+            }
+            if sawSignIn { return .success(.sighting) }
+            return .success(showsSignOutControl ? .signOutControl : .visitorDiffers)
+        }
+    }
+
+    /// What a grant records about the page it was saved on, which later reads compare with.
+    struct SessionMarkers: Equatable {
+        /// Whether a later read must show a sign-out control.
+        let signOutControlSeen: Bool
+        /// Whether a later read must show no sign-in control.
+        let signInControlAbsent: Bool
+    }
+
+    /// The markers for a page the person saw as `person` and a later read sees as `hidden`: a
+    /// control is recorded only when both reads agree on it, since the person's window has its
+    /// own width and moment. A sign-in control counts as absent only when a visitor was shown
+    /// one the page lacks. Without a usable `hidden` read the person's page decides the
+    /// sign-out control, and no sign-in control is recorded as absent.
+    static func markers(person: PageProbe, hidden: PageProbe?, visitor: VisitorVerdict?) -> SessionMarkers {
+        guard let hidden else {
+            return SessionMarkers(signOutControlSeen: person.hasSignOutControl, signInControlAbsent: false)
+        }
+        return SessionMarkers(
+            signOutControlSeen: person.hasSignOutControl && hidden.hasSignOutControl,
+            signInControlAbsent: visitor == .showsSignInControl && !hidden.hasSignInControl
+        )
     }
 
     /// The person says they are signed in: builds a grant that keeps the session and holds no
     /// secret. The page must pass the check `finish` makes (`signedInPage`); the start page and
     /// browse hosts are derived as `finish` derives them, and the only fill host is the
-    /// sign-in host. `confirmedByPerson` stands in for evidence of a sign-in when the app saw
-    /// none. A refusal leaves the enrollment as it was.
+    /// sign-in host. A page with no evidence of a sign-in, or one a visitor sees the same way,
+    /// is refused (`signInNotSeen`, `pageLooksPublic`) unless `confirming` is that refusal. A
+    /// refusal leaves the enrollment as it was.
+    ///
+    /// The page is also read in hidden browsers, which can supply evidence of a sign-in or
+    /// refuse the page (see the type's discussion). A save that finds the enrollment begun
+    /// afresh or wiped while it ran is `cancelled`.
     func finishKeepingSession(
         name: String,
-        confirmedByPerson: Bool = false
+        confirming: Failure? = nil
     ) async throws -> (grant: SiteGrant, record: SiteRecord) {
         guard !isCancelled else { throw Failure.cancelled }
         guard keptSessionURL != nil, let broker else { throw Failure.notSignedIn }
+        let generation = generation
         await idle()
-        // Read again: the enrollment may have been cancelled or begun afresh meanwhile.
-        guard !isCancelled else { throw Failure.cancelled }
+        try ensureCurrent(generation)
         guard let signInURL = keptSessionURL else { throw Failure.notSignedIn }
         let page = try await signedInPage(broker: broker)
-        guard let basis = KeptSessionBasis(
-            sawSignIn: keptSessionSawSignIn,
-            showsSignOutControl: page.probe.hasSignOutControl,
-            confirmedByPerson: confirmedByPerson
-        ) else { throw Failure.signInNotSeen }
+        try ensureCurrent(generation)
         guard let signInHost = signInURL.host(percentEncoded: false)?.lowercased() else {
             throw Failure.invalidGrant
         }
-
         let browseHosts = browseHosts(required: [signInHost, page.startHost])
+
+        let reads = await readSession(of: page, browseHosts: browseHosts)
+        try ensureCurrent(generation)
+        let markers = Self.markers(person: page.probe, hidden: reads.hidden, visitor: reads.visitor)
+        let basis = try KeptSessionBasis.decide(
+            sawSignIn: keptSessionSawSignIn,
+            showsSignOutControl: page.probe.hasSignOutControl,
+            visitor: reads.visitor,
+            confirming: confirming
+        ).get()
+
         let grant = SiteGrant(
             username: "",
             password: "",
@@ -433,12 +546,13 @@ final class SiteEnrollment: ObservableObject {
             codeKind: .none,
             codeSender: nil,
             signInSteps: [],
-            signOutControlSeen: page.probe.hasSignOutControl,
+            signOutControlSeen: markers.signOutControlSeen,
+            signInControlAbsent: markers.signInControlAbsent,
             remembersPassword: false
         )
         guard grant.isValid(for: signInHost) else { throw Failure.invalidGrant }
-        if basis == .personsWord {
-            AppLog.notice(.sites, "kept session taken on the person's word, with no sign-in seen")
+        if basis == .personsWord, let confirming {
+            AppLog.notice(.sites, "kept session taken on the person's word over \(confirming.caseName)")
         }
 
         let label = Proposal.displayText(name, limit: SiteRecord.nameLimit) ?? signInHost
@@ -446,6 +560,66 @@ final class SiteEnrollment: ObservableObject {
         record.keepsSessionOnly = true
         wipe()
         return (grant, record)
+    }
+
+    /// Throws `cancelled` when the enrollment has been cancelled, begun afresh, or wiped since
+    /// `generation` was read.
+    private func ensureCurrent(_ generation: Int) throws {
+        guard !isCancelled, self.generation == generation else { throw Failure.cancelled }
+    }
+
+    /// What the hidden reads of a page found.
+    private struct SessionReads: Sendable {
+        /// What a later read shows, when it shows the start page past the sign-in.
+        var hidden: PageProbe?
+        /// What a visitor with no cookies gets, when the grant records no sign-out control and
+        /// the check can be made.
+        var visitor: VisitorVerdict?
+    }
+
+    /// Reads the start page as a later read would, then, when the grant will record no sign-out
+    /// control, as a visitor would, comparing like with like. The enrollment counts as working
+    /// while the reads run, and cancelling it ends them.
+    private func readSession(
+        of page: (startURL: URL, startHost: String, probe: PageProbe),
+        browseHosts: Set<String>
+    ) async -> SessionReads {
+        let (dataStore, pages, visitorPages, settling) = (dataStore, simulatedPages, visitorPages, settling)
+        let (checksVisitor, recheckDelay) = (checksVisitor, visitorRecheckDelay)
+        let reading = Task { @MainActor in
+            var reads = SessionReads()
+            reads.hidden = await HiddenRead.startPage(
+                page.startURL,
+                browseHosts: browseHosts,
+                dataStore: dataStore,
+                pages: pages,
+                settling: settling
+            )
+            let provisional = Self.markers(person: page.probe, hidden: reads.hidden, visitor: nil)
+            guard checksVisitor, !provisional.signOutControlSeen, !Task.isCancelled else { return reads }
+            reads.visitor = await VisitorCheck.run(
+                startURL: page.startURL,
+                browseHosts: browseHosts,
+                signedIn: reads.hidden ?? page.probe,
+                pages: visitorPages,
+                settling: settling,
+                recheckDelay: recheckDelay
+            )
+            return reads
+        }
+        sessionReadTask = reading
+        isReadingSession = true
+        refreshWorking()
+        defer {
+            sessionReadTask = nil
+            isReadingSession = false
+            refreshWorking()
+        }
+        return await withTaskCancellationHandler {
+            await reading.value
+        } onCancel: {
+            reading.cancel()
+        }
     }
 
     /// The page on display, read afresh, when it shows the user signed in: an `https` page on
@@ -488,6 +662,7 @@ final class SiteEnrollment: ObservableObject {
     /// finished with.
     func cancel() {
         isCancelled = true
+        sessionReadTask?.cancel()
         stopAssisting()
         wipe()
         browser.close()
@@ -503,6 +678,7 @@ final class SiteEnrollment: ObservableObject {
     // MARK: Examining pages
 
     private func wipe() {
+        generation += 1
         stopObserving()
         keptSessionSawSignIn = false
         if appearsSignedIn { appearsSignedIn = false }
@@ -665,7 +841,7 @@ final class SiteEnrollment: ObservableObject {
     }
 
     private func refreshWorking() {
-        isWorking = isBeginning || assistTask != nil
+        isWorking = isBeginning || assistTask != nil || isReadingSession
     }
 
     private func refreshLocation() {

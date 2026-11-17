@@ -112,6 +112,9 @@ struct PageProbe: Equatable, Sendable {
     let fields: [ProbedField]
     /// A visible link or button reads `sign out`, `log out`, or the like.
     let hasSignOutControl: Bool
+    /// A visible link or button reads `sign in`, `log in`, or the like. A page can show both
+    /// kinds of control.
+    let hasSignInControl: Bool
     /// A visible frame of at least 200 by 100 points whose address reads as a sign-in.
     let hasLoginFrame: Bool
 
@@ -128,6 +131,7 @@ struct PageProbe: Equatable, Sendable {
         hasChallenge: Bool,
         fields: [ProbedField],
         hasSignOutControl: Bool = false,
+        hasSignInControl: Bool = false,
         hasLoginFrame: Bool = false
     ) {
         self.origin = origin
@@ -136,6 +140,7 @@ struct PageProbe: Equatable, Sendable {
         self.hasChallenge = hasChallenge
         self.fields = fields
         self.hasSignOutControl = hasSignOutControl
+        self.hasSignInControl = hasSignInControl
         self.hasLoginFrame = hasLoginFrame
     }
 
@@ -147,6 +152,7 @@ struct PageProbe: Equatable, Sendable {
               let top = value["top"]?.bool,
               let challenge = value["challenge"]?.bool,
               let signOut = value["signOut"]?.bool,
+              let signIn = value["signIn"]?.bool,
               let loginFrame = value["loginFrame"]?.bool,
               let inputs = value["inputs"]?.array
         else { return nil }
@@ -179,6 +185,7 @@ struct PageProbe: Equatable, Sendable {
             hasChallenge: challenge,
             fields: fields,
             hasSignOutControl: signOut,
+            hasSignInControl: signIn,
             hasLoginFrame: loginFrame
         )
     }
@@ -251,7 +258,7 @@ enum SignInRules {
     /// password's form; without one, a text field in a form that has a submit control, when
     /// that choice is clear. Otherwise the first field whose hints say it takes a username.
     private static func usernameField(in fields: [ProbedField], beside password: ProbedField?) -> ProbedField? {
-        let textual = fields.filter { $0.isTextLike && !isCodeField($0) }
+        let textual = textFields(fields)
         var scoped: [ProbedField] = []
         if let password {
             if let form = password.form { scoped = textual.filter { $0.form == form } }
@@ -261,6 +268,17 @@ enum SignInRules {
         if let hinted = scoped.first(where: looksLikeUsername) { return hinted }
         if let first = scoped.first, password != nil || scoped.count == 1 { return first }
         return textual.first(where: looksLikeUsername)
+    }
+
+    /// The fields that take free text and do not ask for a code.
+    private static func textFields(_ fields: [ProbedField]) -> [ProbedField] {
+        fields.filter { $0.isTextLike && !isCodeField($0) }
+    }
+
+    /// Whether the page shows a field whose hints say it takes a user name or an email address:
+    /// the field a sign-in page asks for first.
+    static func showsUserNameField(_ page: PageProbe) -> Bool {
+        textFields(page.fields).contains(where: looksLikeUsername)
     }
 
     private static func looksLikeUsername(_ field: ProbedField) -> Bool {
@@ -361,13 +379,15 @@ enum SignInRules {
     /// Whether the settled page, which is what loading the grant's start page led to, is one a
     /// signed-in session shows. All of these hold: it has the start page's origin and path; it
     /// shows nothing that asks for a sign-in (`isPastSignIn`) and no field a recorded step was
-    /// recorded for; and, when the
-    /// page the user ended enrollment on had a sign-out control, it has one too.
+    /// recorded for; when the page the user ended enrollment on had a sign-out control, it has
+    /// one too; and when that page lacked a sign-in control that a visitor's copy of it shows
+    /// (`SiteGrant.signInControlAbsent`), it shows none.
     static func isSignedIn(page: PageProbe, grant: SiteGrant) -> Bool {
         guard page.isSecureTopFrame,
               isStartPage(page, grant.startURL),
               isPastSignIn(page),
-              !grant.signInSteps.contains(where: { visibleField(for: $0, on: page) != nil })
+              !grant.signInSteps.contains(where: { visibleField(for: $0, on: page) != nil }),
+              !(grant.signInControlAbsent && page.hasSignInControl)
         else { return false }
         return !grant.signOutControlSeen || page.hasSignOutControl
     }
@@ -835,13 +855,16 @@ final class SignInBroker {
             }
 
             const signOutLabels = ['sign out', 'log out', 'logout', 'signout', 'sign off', 'log off'];
+            const signInLabels = ['sign in', 'log in', 'login', 'signin', 'sign on', 'log on'];
             let signOut = false;
+            let signIn = false;
             const controls = document.querySelectorAll('a, button, [role="button"], [role="link"], input[type="button"], input[type="submit"]');
-            for (let index = 0; index < controls.length && index < 3000 && !signOut; index++) {
+            for (let index = 0; index < controls.length && index < 3000 && !(signOut && signIn); index++) {
               const control = controls[index];
               const raw = control.tagName === 'INPUT' ? attr(control, 'value') : (control.innerText || control.textContent || '');
               const text = raw.replace(/\\s+/g, ' ').trim().toLowerCase();
-              if (signOutLabels.includes(text) && isVisible(control)) signOut = true;
+              if (!signOut && signOutLabels.includes(text) && isVisible(control)) signOut = true;
+              if (!signIn && signInLabels.includes(text) && isVisible(control)) signIn = true;
             }
 
             const cut = (value) => value.slice(0, 200);
@@ -873,6 +896,7 @@ final class SignInBroker {
               top: window.top === window.self,
               challenge: challenge,
               signOut: signOut,
+              signIn: signIn,
               loginFrame: loginFrame,
               inputs: inputs
             };

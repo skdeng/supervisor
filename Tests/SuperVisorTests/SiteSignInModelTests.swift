@@ -184,7 +184,10 @@ struct SiteSignInModelTests {
 
     // MARK: Signing in
 
+    /// `seesVisitors` gives the enrollment the bank's visitor site, so a page that shows no
+    /// sign-out control is also loaded as a visitor would load it.
     private func flow(
+        seesVisitors: Bool = false,
         _ configure: (TestBank) -> Void = { _ in }
     ) throws -> (fixture: SiteCenterFixture, center: SiteAccessCenter, bank: TestBank, enrollment: SiteEnrollment) {
         let fixture = try SiteCenterFixture()
@@ -195,7 +198,9 @@ struct SiteSignInModelTests {
             dataStore: .nonPersistent(),
             codes: CodeStub().codes,
             simulatedPages: bank.site.answer,
-            settling: .fast
+            settling: .fast,
+            visitorPages: seesVisitors ? bank.visitorPages : nil,
+            visitorRecheckDelay: .milliseconds(50)
         )
         return (fixture, center, bank, enrollment)
     }
@@ -358,6 +363,118 @@ struct SiteSignInModelTests {
         #expect(!model.offersSaveAnyway)
         #expect(try #require(center.sites.first).keepsSessionOnly)
         #expect(center.storedGrant(for: "example.com")?.remembersPassword == false)
+    }
+
+    @Test("Done on a page a visitor sees the same way refuses and offers Save Anyway, which saves", .timeLimit(.minutes(1)))
+    func donePageLooksPublic() async throws {
+        let (fixture, center, bank, enrollment) = try flow(seesVisitors: true) { $0.startPageIsPublic = true }
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime((fixture, bank)) {}
+        }
+        let model = trusted(URL(string: "https://example.com/account")!)
+        await model.beginIfTrusted(using: enrollment)
+
+        // An answer given before the question was put counts for nothing.
+        #expect(await model.done(using: enrollment, into: center, confirmingSignIn: true) == .notSaved)
+        #expect(model.problem == .pageLooksPublic)
+        #expect(model.problem?.signInWindowMessage == "SuperVisor can't tell this page from what a visitor sees, so it wouldn't notice if the site signed you out. Open a page only you can see, such as your account page, then press Done. Or press Save Anyway.")
+        #expect(model.offersSaveAnyway)
+        #expect(center.sites.isEmpty)
+
+        // Done asks again; it never stands for the confirmation.
+        #expect(await model.done(using: enrollment, into: center) == .notSaved)
+        #expect(model.offersSaveAnyway)
+        #expect(center.sites.isEmpty)
+
+        #expect(await model.done(using: enrollment, into: center, confirmingSignIn: true) == .saved)
+        #expect(model.problem == nil)
+        #expect(!model.offersSaveAnyway)
+        #expect(try #require(center.sites.first).keepsSessionOnly)
+        let grant = try #require(center.storedGrant(for: "example.com"))
+        #expect(!grant.remembersPassword)
+        #expect(!grant.signInControlAbsent)
+    }
+
+    @Test("Save Anyway answers the refusal on screen, so a page that has since come to look the same is refused for that", .timeLimit(.minutes(1)))
+    func saveAnywayAnswersTheRefusalShown() async throws {
+        @MainActor
+        final class VisitorSwitch {
+            var answers = false
+        }
+        let visitor = VisitorSwitch()
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        let bank = TestBank()
+        bank.startPageIsPublic = true
+        let enrollment = SiteEnrollment(
+            dataStore: .nonPersistent(),
+            codes: CodeStub().codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast,
+            visitorPages: { request in visitor.answers ? bank.visitorSite.answer(request) : nil },
+            visitorRecheckDelay: .milliseconds(50)
+        )
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime((fixture, bank)) {}
+        }
+        let model = trusted(URL(string: "https://example.com/account")!)
+        await model.beginIfTrusted(using: enrollment)
+        #expect(await model.done(using: enrollment, into: center) == .notSaved)
+        #expect(model.problem == .signInNotSeen)
+
+        visitor.answers = true
+        #expect(await model.done(using: enrollment, into: center, confirmingSignIn: true) == .notSaved)
+        #expect(model.problem == .pageLooksPublic)
+        #expect(model.offersSaveAnyway)
+        #expect(center.sites.isEmpty)
+
+        #expect(await model.done(using: enrollment, into: center, confirmingSignIn: true) == .saved)
+        #expect(center.sites.count == 1)
+    }
+
+    @Test("A page begun afresh while Done reads the page stores nothing, and says nothing", .timeLimit(.minutes(1)))
+    func beginDuringDoneStoresNothing() async throws {
+        @MainActor
+        final class Watch {
+            var enrollment: SiteEnrollment?
+            var begun: Task<Void, any Error>?
+        }
+        let watch = Watch()
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        let bank = TestBank()
+        bank.markSignedIn()
+        bank.accountPageShowsSignOutControl = false
+        let enrollment = SiteEnrollment(
+            dataStore: .nonPersistent(),
+            codes: CodeStub().codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast,
+            visitorPages: { request in
+                if watch.begun == nil {
+                    watch.begun = Task { @MainActor in
+                        try await watch.enrollment?.beginKeepingSession(signInAddress: "example.com/home")
+                    }
+                }
+                return bank.visitorSite.answer(request)
+            },
+            visitorRecheckDelay: .milliseconds(50)
+        )
+        watch.enrollment = enrollment
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime((fixture, bank)) {}
+        }
+        let model = trusted(URL(string: "https://example.com/home")!)
+        await model.beginIfTrusted(using: enrollment)
+
+        #expect(await model.done(using: enrollment, into: center) == .notSaved)
+        #expect(model.problem == nil)
+        #expect(center.sites.isEmpty)
+        #expect(fixture.store.accounts.isEmpty)
+        try await watch.begun?.value
     }
 
     @Test("A granted site keeps its name and the date it was added, and stops needing the person", .timeLimit(.minutes(1)))

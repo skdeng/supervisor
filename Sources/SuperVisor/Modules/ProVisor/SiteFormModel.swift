@@ -356,10 +356,10 @@ final class SiteFormModel: ObservableObject {
         started != nil && !detailsChanged && !isSaving
     }
 
-    /// Whether the last Save was refused for want of a sign-in the app saw, which the person
-    /// may answer by saving on their own word.
+    /// Whether the last Save was refused for want of a sign-in the app saw, or because the page
+    /// reads the same to a visitor, which the person may answer by saving on their own word.
     var offersSaveAnyway: Bool {
-        problem == .signInNotSeen && canSave
+        problem?.allowsSavingAnyway == true && canSave
     }
 
     /// What Sign In passes to `begin`, or nil while something required is missing or invalid.
@@ -513,8 +513,9 @@ final class SiteFormModel: ObservableObject {
     /// record to `onSaved`. Nothing is stored once the enrollment has been cancelled, however
     /// far the save had got.
     ///
-    /// `confirmingSignIn` is the person's answer to a Save refused for want of a sign-in the
-    /// app saw, and counts only while that refusal is what the form shows.
+    /// `confirmingSignIn` is the person's answer to the refusal the form shows, a Save refused
+    /// for want of a sign-in the app saw or because the page cannot be told from a visitor's.
+    /// It answers that refusal alone and counts only while the form shows it.
     func save(
         using enrollment: SiteEnrollment,
         into center: SiteAccessCenter,
@@ -522,7 +523,7 @@ final class SiteFormModel: ObservableObject {
         onSaved: (SiteRecord) -> Void = { _ in }
     ) async -> SaveOutcome {
         guard canSave, let started else { return .notSaved }
-        let confirmed = confirmingSignIn && offersSaveAnyway
+        let confirming = confirmingSignIn && offersSaveAnyway ? problem?.confirmation : nil
         isSaving = true
         defer { isSaving = false }
         problem = nil
@@ -537,7 +538,7 @@ final class SiteFormModel: ObservableObject {
                 case .keepingSession:
                     made = try await enrollment.finishKeepingSession(
                         name: resolvedName,
-                        confirmedByPerson: confirmed
+                        confirming: confirming
                     )
                 case .signingIn:
                     made = try await enrollment.finish(name: resolvedName)

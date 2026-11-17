@@ -190,6 +190,11 @@ struct SiteGrant: Codable, Equatable, Sendable {
     /// Whether the page the user ended the enrollment on showed a link or button that signs out.
     /// A start page that shows none is then not a signed-in page.
     let signOutControlSeen: Bool
+    /// Whether the page the user ended the enrollment on showed no sign-in control while a
+    /// visitor's copy of it showed one. A start page that shows a sign-in control is then not a
+    /// signed-in page, which is how a session that has lapsed is told from one that holds on a
+    /// start page a visitor can read.
+    let signInControlAbsent: Bool
     /// False for a grant that keeps the browser session the person signed in to and holds no
     /// password, key, or recorded fill: when that session ends, the person signs in again.
     let remembersPassword: Bool
@@ -206,6 +211,7 @@ struct SiteGrant: Codable, Equatable, Sendable {
         codeSender: String?,
         signInSteps: [SignInStep] = [],
         signOutControlSeen: Bool = false,
+        signInControlAbsent: Bool = false,
         remembersPassword: Bool = true
     ) {
         self.username = username
@@ -219,11 +225,13 @@ struct SiteGrant: Codable, Equatable, Sendable {
         self.codeSender = codeSender
         self.signInSteps = signInSteps
         self.signOutControlSeen = signOutControlSeen
+        self.signInControlAbsent = signInControlAbsent
         self.remembersPassword = remembersPassword
     }
 
-    /// A stored grant without the `signInSteps`, `signOutControlSeen`, or `remembersPassword`
-    /// key reads as one with no steps, no sign-out control seen, and a remembered password.
+    /// A stored grant without the `signInSteps`, `signOutControlSeen`, `signInControlAbsent`, or
+    /// `remembersPassword` key reads as one with no steps, no sign-out control seen, no
+    /// sign-in control absent, and a remembered password.
     init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         username = try values.decode(String.self, forKey: .username)
@@ -237,6 +245,7 @@ struct SiteGrant: Codable, Equatable, Sendable {
         codeSender = try values.decodeIfPresent(String.self, forKey: .codeSender)
         signInSteps = try values.decodeIfPresent([SignInStep].self, forKey: .signInSteps) ?? []
         signOutControlSeen = try values.decodeIfPresent(Bool.self, forKey: .signOutControlSeen) ?? false
+        signInControlAbsent = try values.decodeIfPresent(Bool.self, forKey: .signInControlAbsent) ?? false
         remembersPassword = try values.decodeIfPresent(Bool.self, forKey: .remembersPassword) ?? true
     }
 

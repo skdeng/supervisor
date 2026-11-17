@@ -587,14 +587,14 @@ struct SiteEnrollmentTests {
     // MARK: Keeping the session
 
     /// Signs in on the open page the way a person would, by submitting the form with the
-    /// bank's own details, and waits for the signed-in page.
-    private func signInByHand(_ session: SiteEnrollment, _ bank: TestBank) async throws {
+    /// bank's own details, and waits for the page the sign-in lands on.
+    private func signInByHand(_ session: SiteEnrollment, _ bank: TestBank, landing: String = "/home") async throws {
         _ = try await session.browser.run("""
             document.getElementById('user').value = username;
             document.getElementById('pass').value = password;
             HTMLFormElement.prototype.requestSubmit.call(document.forms[0]);
             """, arguments: ["username": bank.username, "password": bank.password])
-        try await waitFor { bank.signedIn && session.browser.currentURL?.path == "/home" }
+        try await waitFor { bank.signedIn && session.browser.currentURL?.path == landing }
     }
 
     @Test("Keeping the session fills nothing, and the sign-in the person makes becomes a grant with no secret", .timeLimit(.minutes(1)))
@@ -764,7 +764,7 @@ struct SiteEnrollmentTests {
         await session.idle()
 
         await #expect(throws: SiteEnrollment.Failure.notSignedIn) {
-            _ = try await session.finishKeepingSession(name: "Bank", confirmedByPerson: true)
+            _ = try await session.finishKeepingSession(name: "Bank", confirming: .signInNotSeen)
         }
 
         _ = try await session.browser.run("document.getElementById('row').remove();")
@@ -813,12 +813,15 @@ struct SiteEnrollmentTests {
     @Test("A kept session rests on a sighting first, then a sign-out control, then the person's word")
     func keptSessionBasis() {
         typealias Basis = SiteEnrollment.KeptSessionBasis
-        #expect(Basis(sawSignIn: true, showsSignOutControl: true, confirmedByPerson: true) == .sighting)
-        #expect(Basis(sawSignIn: true, showsSignOutControl: false, confirmedByPerson: false) == .sighting)
-        #expect(Basis(sawSignIn: false, showsSignOutControl: true, confirmedByPerson: true) == .signOutControl)
-        #expect(Basis(sawSignIn: false, showsSignOutControl: true, confirmedByPerson: false) == .signOutControl)
-        #expect(Basis(sawSignIn: false, showsSignOutControl: false, confirmedByPerson: true) == .personsWord)
-        #expect(Basis(sawSignIn: false, showsSignOutControl: false, confirmedByPerson: false) == nil)
+        func decide(sawSignIn: Bool, signOut: Bool, confirming: SiteEnrollment.Failure?) -> Basis? {
+            try? Basis.decide(sawSignIn: sawSignIn, showsSignOutControl: signOut, confirming: confirming).get()
+        }
+        #expect(decide(sawSignIn: true, signOut: true, confirming: .signInNotSeen) == .sighting)
+        #expect(decide(sawSignIn: true, signOut: false, confirming: nil) == .sighting)
+        #expect(decide(sawSignIn: false, signOut: true, confirming: .signInNotSeen) == .signOutControl)
+        #expect(decide(sawSignIn: false, signOut: true, confirming: nil) == .signOutControl)
+        #expect(decide(sawSignIn: false, signOut: false, confirming: .signInNotSeen) == .personsWord)
+        #expect(decide(sawSignIn: false, signOut: false, confirming: nil) == nil)
     }
 
     @Test("The person's confirmation does not save a page that still asks for a sign-in", .timeLimit(.minutes(1)))
@@ -830,7 +833,7 @@ struct SiteEnrollmentTests {
         try await session.beginKeepingSession(signInAddress: "example.com/login")
 
         await #expect(throws: SiteEnrollment.Failure.notSignedIn) {
-            _ = try await session.finishKeepingSession(name: "Bank", confirmedByPerson: true)
+            _ = try await session.finishKeepingSession(name: "Bank", confirming: .signInNotSeen)
         }
     }
 
@@ -846,7 +849,7 @@ struct SiteEnrollmentTests {
             _ = try await session.finishKeepingSession(name: "Bank")
         }
 
-        let (grant, record) = try await session.finishKeepingSession(name: "Bank", confirmedByPerson: true)
+        let (grant, record) = try await session.finishKeepingSession(name: "Bank", confirming: .signInNotSeen)
 
         #expect(!grant.remembersPassword)
         #expect(grant.password.isEmpty)
@@ -868,6 +871,680 @@ struct SiteEnrollmentTests {
         await #expect(throws: SiteEnrollment.Failure.signInNotSeen) {
             _ = try await session.finishKeepingSession(name: "Bank")
         }
+    }
+
+    // MARK: Telling a lapsed session from a live one
+
+    /// An enrollment that loads a page as a visitor from the bank's own visitor site.
+    private func visiting(_ bank: TestBank) -> SiteEnrollment {
+        SiteEnrollment(
+            dataStore: .nonPersistent(),
+            codes: CodeStub().codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast,
+            visitorPages: bank.visitorPages,
+            visitorRecheckDelay: .milliseconds(50)
+        )
+    }
+
+    /// A site access over the bank, with an in-memory vault and a registry file of its own.
+    private func siteAccess(_ bank: TestBank) throws -> (access: SiteAccess, directory: URL) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("site-enrollment-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let access = SiteAccess(
+            vault: SiteVault(store: InMemorySecretStore()),
+            registryURL: directory.appendingPathComponent("sites.json"),
+            codes: CodeStub().codes,
+            dataStore: .nonPersistent(),
+            simulatedPages: bank.site.answer,
+            settling: .fast
+        )
+        return (access, directory)
+    }
+
+    @Test("A kept session on a start page a visitor can read is noticed lapsing, because the page's sign-in control was recorded", .timeLimit(.minutes(2)))
+    func lapseOfAPublicStartPageIsNoticed() async throws {
+        let bank = TestBank()
+        bank.startPageIsPublic = true
+        bank.publicPageShowsSignInControl = true
+        bank.accountPageShowsSignOutControl = false
+        bank.postLoginLocation = "/account"
+        let session = visiting(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/login")
+        try await signInByHand(session, bank, landing: "/account")
+        let (grant, record) = try await session.finishKeepingSession(name: "Bank")
+
+        #expect(grant.startURL == url("https://example.com/account"))
+        #expect(!grant.signOutControlSeen)
+        #expect(grant.signInControlAbsent)
+        #expect(!grant.remembersPassword)
+        #expect(grant.isValid(for: "example.com"))
+        #expect(bank.visitorSite.requests.map(\.path) == ["/account"])
+        #expect(bank.visitorSite.posts.isEmpty)
+        #expect(bank.signedIn)
+
+        let (access, directory) = try siteAccess(bank)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try access.add(grant: grant, record: record)
+        defer { access.end(visit: "run") }
+
+        let live = await access.open(siteID: "example.com", visit: "run")
+        guard case let .success(opened) = live else {
+            Issue.record("the signed-in page was not read: \(live)")
+            return
+        }
+        #expect(opened.title == "Account")
+
+        bank.signOut()
+        let lapsed = await access.open(siteID: "example.com", visit: "run")
+        guard case let .failure(failure) = lapsed else {
+            Issue.record("a lapsed session read as signed in: \(lapsed)")
+            return
+        }
+        #expect(failure == .needsPerson)
+        #expect(access.sites().first?.needsPerson == true)
+
+        // Control: the same grant without the recorded absence reads the public page as the person's.
+        let unmarked = SiteGrant(
+            username: "",
+            password: "",
+            authenticatorKey: nil,
+            signInURL: grant.signInURL,
+            startURL: grant.startURL,
+            fillHosts: grant.fillHosts,
+            browseHosts: grant.browseHosts,
+            codeKind: .none,
+            codeSender: nil,
+            signOutControlSeen: false,
+            signInControlAbsent: false,
+            remembersPassword: false
+        )
+        try access.add(grant: unmarked, record: record)
+        let misread = await access.open(siteID: "example.com", visit: "run")
+        guard case let .success(welcome) = misread else {
+            Issue.record("the control grant was refused: \(misread)")
+            return
+        }
+        #expect(welcome.title == "Welcome")
+    }
+
+    @Test("A visitor who is redirected to the sign-in page shows the session at work, with no sign-in seen and no sign-out control", .timeLimit(.minutes(1)))
+    func visitorRedirectIsEvidence() async throws {
+        let bank = TestBank()
+        bank.markSignedIn()
+        bank.accountPageShowsSignOutControl = false
+        let session = visiting(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/home")
+        #expect(!session.keptSessionSawSignIn)
+        let (grant, record) = try await session.finishKeepingSession(name: "Bank")
+
+        #expect(grant.startURL == url("https://example.com/home"))
+        #expect(!grant.signOutControlSeen)
+        #expect(!grant.signInControlAbsent)
+        #expect(grant.isValid(for: "example.com"))
+        #expect(record.keepsSessionOnly)
+        #expect(bank.visitorSite.requests.map(\.path) == ["/home", "/login"])
+        #expect(!session.isWorking)
+    }
+
+    @Test("A visitor who is asked to sign in on the same page shows the session at work", .timeLimit(.minutes(1)))
+    func visitorAskedToSignInIsEvidence() async throws {
+        let bank = TestBank()
+        bank.markSignedIn()
+        bank.accountPageShowsSignOutControl = false
+        bank.site.route("/members", page: TestPages.page("Members", "<p>Welcome back</p>"))
+        bank.visitorSite.route("/members", page: TestPages.page("Sign in", "<input type=\"password\" name=\"p\">"))
+        let session = visiting(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/members")
+        let (grant, _) = try await session.finishKeepingSession(name: "Bank")
+
+        #expect(!grant.signInControlAbsent)
+        #expect(grant.isValid(for: "example.com"))
+    }
+
+    @Test("A page a visitor sees the same way is refused, also after a sign-in was seen, and saved on the person's word", .timeLimit(.minutes(1)))
+    func pageLooksPublic() async throws {
+        let bank = TestBank()
+        bank.routeForEveryone("/members", page: TestPages.page("Members", "<p>Welcome</p>"))
+
+        // No sign-in seen.
+        let unsighted = visiting(bank)
+        defer { unsighted.cancel() }
+        try await unsighted.beginKeepingSession(signInAddress: "example.com/members")
+        await #expect(throws: SiteEnrollment.Failure.pageLooksPublic) {
+            _ = try await unsighted.finishKeepingSession(name: "Bank")
+        }
+        #expect(!unsighted.isWorking)
+        let (kept, record) = try await unsighted.finishKeepingSession(name: "Bank", confirming: .pageLooksPublic)
+        #expect(kept.startURL == url("https://example.com/members"))
+        #expect(!kept.signInControlAbsent)
+        #expect(!kept.remembersPassword)
+        #expect(record.keepsSessionOnly)
+
+        // A sign-in seen, then a move to a page anyone can read.
+        let moved = visiting(bank)
+        defer { moved.cancel() }
+        try await moved.beginKeepingSession(signInAddress: "example.com/login")
+        #expect(moved.keptSessionSawSignIn)
+        _ = try await moved.browser.open(url("https://example.com/members"))
+        await moved.idle()
+        await #expect(throws: SiteEnrollment.Failure.pageLooksPublic) {
+            _ = try await moved.finishKeepingSession(name: "Bank")
+        }
+        let (confirmed, _) = try await moved.finishKeepingSession(name: "Bank", confirming: .pageLooksPublic)
+        #expect(confirmed.startURL == url("https://example.com/members"))
+    }
+
+    @Test("A page with a sign-out control is saved with no load as a visitor", .timeLimit(.minutes(1)))
+    func signOutControlSkipsTheVisitorCheck() async throws {
+        let bank = TestBank()
+        bank.markSignedIn()
+        let session = visiting(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/home")
+        let (grant, _) = try await session.finishKeepingSession(name: "Bank")
+
+        #expect(grant.signOutControlSeen)
+        #expect(!grant.signInControlAbsent)
+        #expect(bank.visitorSite.requests.isEmpty)
+    }
+
+    @Test("A visitor check that cannot finish leaves the sighting and the person's word to decide", .timeLimit(.minutes(1)))
+    func inconclusiveVisitorCheck() async throws {
+        let bank = TestBank()
+        bank.startPageIsPublic = true
+        bank.accountPageShowsSignOutControl = false
+        bank.postLoginLocation = "/account"
+        func unreachable() -> SiteEnrollment {
+            SiteEnrollment(
+                dataStore: .nonPersistent(),
+                codes: CodeStub().codes,
+                simulatedPages: bank.site.answer,
+                settling: .fast,
+                visitorPages: { _ in nil },
+                visitorRecheckDelay: .milliseconds(50)
+            )
+        }
+
+        let unsighted = unreachable()
+        defer { unsighted.cancel() }
+        try await unsighted.beginKeepingSession(signInAddress: "example.com/account")
+        await #expect(throws: SiteEnrollment.Failure.signInNotSeen) {
+            _ = try await unsighted.finishKeepingSession(name: "Bank")
+        }
+        let (word, _) = try await unsighted.finishKeepingSession(name: "Bank", confirming: .signInNotSeen)
+        #expect(!word.signInControlAbsent)
+
+        let sighted = unreachable()
+        defer { sighted.cancel() }
+        try await sighted.beginKeepingSession(signInAddress: "example.com/login")
+        try await signInByHand(sighted, bank, landing: "/account")
+        let (grant, _) = try await sighted.finishKeepingSession(name: "Bank")
+        #expect(!grant.signInControlAbsent)
+        #expect(!sighted.isWorking)
+    }
+
+    @Test("An enrollment on simulated pages with no simulated visitor site makes no visitor check and reads the page as a later read would", .timeLimit(.minutes(1)))
+    func noVisitorSiteNoCheck() async throws {
+        let bank = TestBank()
+        bank.startPageIsPublic = true
+        bank.publicPageShowsSignInControl = true
+        bank.accountPageShowsSignOutControl = false
+        bank.postLoginLocation = "/account"
+        let session = enrollment(bank)
+        defer { session.cancel() }
+        #expect(!session.checksVisitor)
+        #expect(visiting(bank).checksVisitor)
+        let real = SiteEnrollment(dataStore: .nonPersistent(), codes: CodeStub().codes)
+        defer { real.cancel() }
+        #expect(real.checksVisitor)
+
+        try await session.beginKeepingSession(signInAddress: "example.com/login")
+        try await signInByHand(session, bank, landing: "/account")
+        bank.site.forgetRequests()
+        let (grant, _) = try await session.finishKeepingSession(name: "Bank")
+
+        // A visitor check would have recorded the public page's sign-in control.
+        #expect(!grant.signInControlAbsent)
+        #expect(bank.site.requests.map(\.path) == ["/account"])
+        #expect(bank.visitorSite.requests.isEmpty)
+
+        let unsighted = enrollment(bank)
+        defer { unsighted.cancel() }
+        bank.signOut()
+        try await unsighted.beginKeepingSession(signInAddress: "example.com/account")
+        await #expect(throws: SiteEnrollment.Failure.signInNotSeen) {
+            _ = try await unsighted.finishKeepingSession(name: "Bank")
+        }
+    }
+
+    @Test("Cancelling while the visitor check runs ends the save as cancelled, and the enrollment is not working afterwards", .timeLimit(.minutes(1)))
+    func cancelDuringVisitorCheck() async throws {
+        @MainActor
+        final class Watch {
+            var enrollment: SiteEnrollment?
+            var wasWorking = false
+            var loads = 0
+        }
+        let bank = TestBank()
+        bank.markSignedIn()
+        bank.accountPageShowsSignOutControl = false
+        let watch = Watch()
+        let session = SiteEnrollment(
+            dataStore: .nonPersistent(),
+            codes: CodeStub().codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast,
+            visitorPages: { request in
+                watch.loads += 1
+                watch.wasWorking = watch.enrollment?.isWorking == true
+                watch.enrollment?.cancel()
+                return bank.visitorSite.answer(request)
+            }
+        )
+        watch.enrollment = session
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/home")
+        await #expect(throws: SiteEnrollment.Failure.cancelled) {
+            _ = try await session.finishKeepingSession(name: "Bank", confirming: .signInNotSeen)
+        }
+
+        #expect(watch.loads >= 1)
+        #expect(watch.wasWorking)
+        #expect(session.isCancelled)
+        #expect(!session.isWorking)
+    }
+
+    @Test("A kept session rests on a sighting, a sign-out control, a visitor's page, then the person's word, and a page that looks public only on the word")
+    func keptSessionBasisWithAVisitor() {
+        typealias Basis = SiteEnrollment.KeptSessionBasis
+        typealias Failure = SiteEnrollment.Failure
+        func decide(
+            sawSignIn: Bool = false,
+            signOut: Bool = false,
+            _ visitor: VisitorVerdict?,
+            confirming: Failure? = nil
+        ) -> Result<Basis, Failure> {
+            Basis.decide(sawSignIn: sawSignIn, showsSignOutControl: signOut, visitor: visitor, confirming: confirming)
+        }
+
+        for evidence in [VisitorVerdict.redirects, .asksForSignIn, .showsSignInControl] {
+            #expect(decide(evidence) == .success(.visitorDiffers), "\(evidence)")
+            #expect(decide(evidence, confirming: .signInNotSeen) == .success(.visitorDiffers), "\(evidence)")
+            #expect(decide(sawSignIn: true, evidence) == .success(.sighting), "\(evidence)")
+            #expect(decide(signOut: true, evidence) == .success(.signOutControl), "\(evidence)")
+        }
+
+        // Nothing about the visitor is known, so the earlier rules decide.
+        for unknown in [nil, VisitorVerdict.inconclusive] {
+            #expect(decide(sawSignIn: true, unknown) == .success(.sighting))
+            #expect(decide(signOut: true, unknown) == .success(.signOutControl))
+            #expect(decide(unknown, confirming: .signInNotSeen) == .success(.personsWord))
+            #expect(decide(unknown) == .failure(.signInNotSeen))
+        }
+
+        // A page that looks the same to a visitor shows nothing, whatever else was seen.
+        #expect(decide(.looksTheSame) == .failure(.pageLooksPublic))
+        #expect(decide(sawSignIn: true, .looksTheSame) == .failure(.pageLooksPublic))
+        #expect(decide(signOut: true, .looksTheSame) == .failure(.pageLooksPublic))
+        #expect(decide(.looksTheSame, confirming: .pageLooksPublic) == .success(.personsWord))
+        #expect(decide(sawSignIn: true, .looksTheSame, confirming: .pageLooksPublic) == .success(.personsWord))
+    }
+
+    @Test("A confirmation answers the refusal it names and no other")
+    func confirmationNamesTheRefusal() {
+        typealias Basis = SiteEnrollment.KeptSessionBasis
+        typealias Failure = SiteEnrollment.Failure
+        func decide(_ visitor: VisitorVerdict?, confirming: Failure?) -> Result<Basis, Failure> {
+            Basis.decide(sawSignIn: false, showsSignOutControl: false, visitor: visitor, confirming: confirming)
+        }
+
+        // A page that looks public is not saved on an answer to the want of a sign-in.
+        #expect(decide(.looksTheSame, confirming: .signInNotSeen) == .failure(.pageLooksPublic))
+        #expect(decide(.looksTheSame, confirming: nil) == .failure(.pageLooksPublic))
+        // A page with no sign-in seen is not saved on an answer to a look-alike page.
+        #expect(decide(nil, confirming: .pageLooksPublic) == .failure(.signInNotSeen))
+        #expect(decide(.inconclusive, confirming: .pageLooksPublic) == .failure(.signInNotSeen))
+        // No other failure is a confirmation.
+        for other in [Failure.invalidAddress, .notSignedIn, .invalidGrant, .passwordNotConfirmed, .passwordNotFilled, .cancelled] {
+            #expect(decide(nil, confirming: other) == .failure(.signInNotSeen), "\(other)")
+            #expect(decide(.looksTheSame, confirming: other) == .failure(.pageLooksPublic), "\(other)")
+        }
+    }
+
+    @Test("Each failure names its case, and nothing else")
+    func failureCaseNames() {
+        #expect(SiteEnrollment.Failure.signInNotSeen.caseName == "signInNotSeen")
+        #expect(SiteEnrollment.Failure.pageLooksPublic.caseName == "pageLooksPublic")
+        #expect(SiteEnrollment.Failure.cancelled.caseName == "cancelled")
+    }
+
+    @Test("A control is recorded only where the person's page and a later read agree")
+    func sessionMarkers() {
+        func probe(signOut: Bool = false, signIn: Bool = false) -> PageProbe {
+            PageProbe(
+                origin: "https://example.com",
+                path: "/account",
+                isSecureTopFrame: true,
+                hasChallenge: false,
+                fields: [],
+                hasSignOutControl: signOut,
+                hasSignInControl: signIn
+            )
+        }
+        func markers(
+            _ person: PageProbe,
+            _ hidden: PageProbe?,
+            _ visitor: VisitorVerdict? = nil
+        ) -> SiteEnrollment.SessionMarkers {
+            SiteEnrollment.markers(person: person, hidden: hidden, visitor: visitor)
+        }
+        func expected(signOut: Bool, signInAbsent: Bool) -> SiteEnrollment.SessionMarkers {
+            SiteEnrollment.SessionMarkers(signOutControlSeen: signOut, signInControlAbsent: signInAbsent)
+        }
+
+        // No usable later read: the person's page decides the sign-out control, and no sign-in
+        // control is recorded as absent.
+        #expect(markers(probe(signOut: true), nil) == expected(signOut: true, signInAbsent: false))
+        #expect(markers(probe(), nil) == expected(signOut: false, signInAbsent: false))
+        #expect(markers(probe(), nil, .showsSignInControl) == expected(signOut: false, signInAbsent: false))
+        #expect(markers(probe(signOut: true), nil, .showsSignInControl) == expected(signOut: true, signInAbsent: false))
+
+        // A sign-out control counts when both reads show it.
+        #expect(markers(probe(signOut: true), probe(signOut: true)) == expected(signOut: true, signInAbsent: false))
+        #expect(markers(probe(signOut: true), probe()) == expected(signOut: false, signInAbsent: false))
+        #expect(markers(probe(), probe(signOut: true)) == expected(signOut: false, signInAbsent: false))
+        #expect(markers(probe(), probe()) == expected(signOut: false, signInAbsent: false))
+
+        // A missing sign-in control counts when a visitor was shown one and the later read has none.
+        #expect(markers(probe(), probe(), .showsSignInControl) == expected(signOut: false, signInAbsent: true))
+        #expect(markers(probe(signOut: true), probe(signOut: true), .showsSignInControl) == expected(signOut: true, signInAbsent: true))
+        #expect(markers(probe(), probe(signIn: true), .showsSignInControl) == expected(signOut: false, signInAbsent: false))
+        for other in [VisitorVerdict.redirects, .asksForSignIn, .looksTheSame, .inconclusive] {
+            #expect(markers(probe(), probe(), other) == expected(signOut: false, signInAbsent: false), "\(other)")
+        }
+        #expect(markers(probe(), probe(), nil) == expected(signOut: false, signInAbsent: false))
+    }
+
+    // MARK: Reading the page as a later read does
+
+    /// Narrows the page the person sees, as a small window does. Every hidden read keeps the
+    /// default size.
+    private func narrow(_ session: SiteEnrollment) async throws {
+        session.browser.webView.frame = NSRect(x: 0, y: 0, width: 400, height: 700)
+        let deadline = ContinuousClock.now + .seconds(5)
+        while try await session.browser.run("return window.innerWidth;").int != 400 {
+            guard ContinuousClock.now < deadline else {
+                Issue.record("the person's window did not take the narrower size")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    /// Shows its first child to a narrow window and its second to a wide one.
+    private let layoutStyle = """
+        <style>
+        .narrow, .wide { display: none }
+        @media (max-width: 600px) { .narrow { display: inline } }
+        @media (min-width: 601px) { .wide { display: inline } }
+        </style>
+        """
+
+    @Test("A sign-in control that only the default layout shows is not recorded as missing from the signed-in page", .timeLimit(.minutes(2)))
+    func signInControlOnlyInTheLaterLayout() async throws {
+        let bank = TestBank()
+        bank.markSignedIn()
+        bank.routeForEveryone("/members", page: TestPages.page("Members", """
+            \(layoutStyle)<p>Welcome back</p><a class="wide" href="/login">Sign in</a>
+            """))
+        let session = visiting(bank)
+        defer { session.cancel() }
+        try await session.beginKeepingSession(signInAddress: "example.com/members")
+        try await narrow(session)
+        // Control: the person's window shows no sign-in control, a window of the default size does.
+        let seen = try await SignInBroker(browser: session.browser).probe()
+        try #require(!seen.hasSignInControl, "the narrow window shows the sign-in control")
+
+        // The visitor and the later read both show the control, so the pages cannot be told apart.
+        await #expect(throws: SiteEnrollment.Failure.pageLooksPublic) {
+            _ = try await session.finishKeepingSession(name: "Bank")
+        }
+        let (grant, record) = try await session.finishKeepingSession(name: "Bank", confirming: .pageLooksPublic)
+        #expect(!grant.signInControlAbsent)
+        #expect(!grant.signOutControlSeen)
+
+        // A read at the default size, as every later one is, finds the site as signed in.
+        let (access, directory) = try siteAccess(bank)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        defer { access.end(visit: "run") }
+        try access.add(grant: grant, record: record)
+        let opened = await access.open(siteID: "example.com", visit: "run")
+        guard case let .success(members) = opened else {
+            Issue.record("the saved site was refused: \(opened)")
+            return
+        }
+        #expect(members.title == "Members")
+    }
+
+    @Test("A sign-out control that only the person's window shows is not recorded, and the saved site opens as signed in", .timeLimit(.minutes(2)))
+    func signOutControlOnlyInThePersonsWindow() async throws {
+        let bank = TestBank()
+        bank.markSignedIn()
+        bank.site.route("/members", page: TestPages.page("Members", """
+            \(layoutStyle)<p>Welcome back</p><a class="narrow" href="/logout">Sign out</a>
+            """))
+        bank.visitorSite.route("/members", page: TestPages.redirect(to: "/login"))
+        let session = visiting(bank)
+        defer { session.cancel() }
+        try await session.beginKeepingSession(signInAddress: "example.com/members")
+        try await narrow(session)
+        // Control: the person's window shows a sign-out control, a window of the default size does not.
+        let seen = try await SignInBroker(browser: session.browser).probe()
+        try #require(seen.hasSignOutControl, "the narrow window does not show the sign-out control")
+
+        let (grant, record) = try await session.finishKeepingSession(name: "Bank")
+        #expect(!grant.signOutControlSeen)
+        #expect(!grant.signInControlAbsent)
+        #expect(grant.isValid(for: "example.com"))
+
+        let (access, directory) = try siteAccess(bank)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        defer { access.end(visit: "run") }
+        try access.add(grant: grant, record: record)
+        let opened = await access.open(siteID: "example.com", visit: "run")
+        guard case let .success(members) = opened else {
+            Issue.record("the saved site was refused: \(opened)")
+            return
+        }
+        #expect(members.title == "Members")
+
+        // Control: a grant that recorded the control is refused by the same read.
+        let recorded = SiteGrant(
+            username: "",
+            password: "",
+            authenticatorKey: nil,
+            signInURL: grant.signInURL,
+            startURL: grant.startURL,
+            fillHosts: grant.fillHosts,
+            browseHosts: grant.browseHosts,
+            codeKind: .none,
+            codeSender: nil,
+            signOutControlSeen: true,
+            remembersPassword: false
+        )
+        try access.add(grant: recorded, record: record)
+        let refused = await access.open(siteID: "example.com", visit: "run")
+        guard case let .failure(failure) = refused else {
+            Issue.record("a grant that recorded a sign-out control opened with none shown")
+            return
+        }
+        #expect(failure == .needsPerson)
+    }
+
+    @Test("A sign-out control both the person's window and a later read show is recorded, with no visitor check", .timeLimit(.minutes(1)))
+    func signOutControlInBothReads() async throws {
+        let bank = TestBank()
+        bank.markSignedIn()
+        let session = visiting(bank)
+        defer { session.cancel() }
+        try await session.beginKeepingSession(signInAddress: "example.com/home")
+
+        let (grant, _) = try await session.finishKeepingSession(name: "Bank")
+
+        #expect(grant.signOutControlSeen)
+        #expect(bank.visitorSite.requests.isEmpty)
+    }
+
+    @Test("When a later read cannot be made past the sign-in, the person's page decides the sign-out control and the save goes through", .timeLimit(.minutes(1)))
+    func unusableLaterRead() async throws {
+        @MainActor
+        final class Loads {
+            var count = 0
+        }
+        let loads = Loads()
+        let bank = TestBank()
+        bank.markSignedIn()
+        // The first load is the person's; every later one is sent to the sign-in page.
+        bank.site.route("/members") { _ in
+            loads.count += 1
+            return loads.count == 1
+                ? TestPages.page("Members", "<p>Welcome back</p><a href=\"/logout\">Sign out</a>")
+                : TestPages.redirect(to: "/login")
+        }
+        let session = visiting(bank)
+        defer { session.cancel() }
+        try await session.beginKeepingSession(signInAddress: "example.com/members")
+
+        let (grant, _) = try await session.finishKeepingSession(name: "Bank")
+
+        #expect(loads.count >= 2)
+        #expect(grant.signOutControlSeen)
+        #expect(!grant.signInControlAbsent)
+        #expect(bank.visitorSite.requests.isEmpty)
+    }
+
+    @Test("A cookie in the person's data store is not there when the visitor's page loads", .timeLimit(.minutes(1)))
+    func visitorHoldsNoCookie() async throws {
+        let bank = TestBank()
+        let store = WKWebsiteDataStore.nonPersistent()
+        let cookie = try #require(HTTPCookie(properties: [
+            .domain: "example.com", .path: "/", .name: "session", .value: "abc123", .secure: "TRUE",
+        ]))
+        await store.httpCookieStore.setCookie(cookie)
+        // The page shows a sign-in control to a browser that holds no session cookie.
+        bank.routeForEveryone("/members", page: TestPages.page("Members", "<p>Members</p>", script: """
+            document.body.insertAdjacentHTML(
+              'beforeend',
+              document.cookie.includes('session=abc123') ? '<p>Welcome back</p>' : '<a href="/login">Sign in</a>'
+            );
+            """))
+        let session = SiteEnrollment(
+            dataStore: store,
+            codes: CodeStub().codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast,
+            visitorPages: bank.visitorPages,
+            visitorRecheckDelay: .milliseconds(50)
+        )
+        defer { session.cancel() }
+        try await session.beginKeepingSession(signInAddress: "example.com/members")
+        // Control: the person's page holds the cookie.
+        let held = try await session.browser.run("return document.cookie;")
+        try #require(held.string?.contains("session=abc123") == true, "the person's page does not hold the cookie")
+
+        // A visitor that held the person's cookie would see the same page and the save would be refused.
+        let (grant, _) = try await session.finishKeepingSession(name: "Bank")
+
+        #expect(grant.signInControlAbsent)
+        #expect(bank.visitorSite.requests.map(\.path) == ["/members"])
+    }
+
+    // MARK: Confirming a refusal
+
+    @Test("A confirmation of the want of a sign-in does not save a page a visitor sees the same way, and the reverse", .timeLimit(.minutes(1)))
+    func confirmationAnswersItsOwnRefusal() async throws {
+        let bank = TestBank()
+        bank.routeForEveryone("/members", page: TestPages.page("Members", "<p>Welcome</p>"))
+        let looksPublic = visiting(bank)
+        defer { looksPublic.cancel() }
+        try await looksPublic.beginKeepingSession(signInAddress: "example.com/members")
+
+        await #expect(throws: SiteEnrollment.Failure.pageLooksPublic) {
+            _ = try await looksPublic.finishKeepingSession(name: "Bank", confirming: .signInNotSeen)
+        }
+        await #expect(throws: SiteEnrollment.Failure.pageLooksPublic) {
+            _ = try await looksPublic.finishKeepingSession(name: "Bank", confirming: .notSignedIn)
+        }
+        _ = try await looksPublic.finishKeepingSession(name: "Bank", confirming: .pageLooksPublic)
+
+        // A visitor check that cannot finish leaves the want of a sign-in as the refusal.
+        let unseen = SiteEnrollment(
+            dataStore: .nonPersistent(),
+            codes: CodeStub().codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast,
+            visitorPages: { _ in nil },
+            visitorRecheckDelay: .milliseconds(50)
+        )
+        defer { unseen.cancel() }
+        try await unseen.beginKeepingSession(signInAddress: "example.com/members")
+
+        await #expect(throws: SiteEnrollment.Failure.signInNotSeen) {
+            _ = try await unseen.finishKeepingSession(name: "Bank", confirming: .pageLooksPublic)
+        }
+        _ = try await unseen.finishKeepingSession(name: "Bank", confirming: .signInNotSeen)
+    }
+
+    // MARK: A save the enrollment outlives
+
+    @Test("A page begun afresh on the same address while the reads run makes the save cancelled, and the new page can be saved", .timeLimit(.minutes(1)))
+    func beginDuringTheReadsCancelsTheSave() async throws {
+        @MainActor
+        final class Watch {
+            var enrollment: SiteEnrollment?
+            var begun: Task<Void, any Error>?
+        }
+        let bank = TestBank()
+        bank.markSignedIn()
+        bank.accountPageShowsSignOutControl = false
+        let watch = Watch()
+        let session = SiteEnrollment(
+            dataStore: .nonPersistent(),
+            codes: CodeStub().codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast,
+            visitorPages: { request in
+                if watch.begun == nil {
+                    watch.begun = Task { @MainActor in
+                        try await watch.enrollment?.beginKeepingSession(signInAddress: "example.com/home")
+                    }
+                }
+                return bank.visitorSite.answer(request)
+            },
+            visitorRecheckDelay: .milliseconds(50)
+        )
+        watch.enrollment = session
+        defer { session.cancel() }
+        try await session.beginKeepingSession(signInAddress: "example.com/home")
+
+        await #expect(throws: SiteEnrollment.Failure.cancelled) {
+            _ = try await session.finishKeepingSession(name: "Bank")
+        }
+        #expect(!session.isCancelled)
+        try await watch.begun?.value
+
+        let (grant, _) = try await session.finishKeepingSession(name: "Bank")
+        #expect(grant.startURL == url("https://example.com/home"))
     }
 
     // MARK: Whether the page looks signed in

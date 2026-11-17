@@ -285,6 +285,49 @@ struct SiteBrowserTests {
         await #expect(throws: SiteBrowser.Failure.closed) { _ = try await opening.value }
     }
 
+    @Test("Closing a browser while a script is waiting answers the script with closed, once", .timeLimit(.minutes(1)))
+    func closeDuringScript() async throws {
+        let site = TestSite()
+        site.route("/a", page: TestPages.page("A", "<p>x</p>"))
+        // A script that never answers, and a limit it would take ten minutes to reach.
+        var settling = SiteBrowser.Settling.fast
+        settling.scriptTimeout = .seconds(600)
+        let browser = browser(site, settling: settling)
+        _ = try await browser.open(url("https://example.com/a"))
+
+        let running = Task { @MainActor in try await browser.run("await new Promise(() => {}); return 1;") }
+        while browser.pendingScriptCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(browser.pendingScriptCount == 1)
+        browser.close()
+
+        await #expect(throws: SiteBrowser.Failure.closed) { _ = try await running.value }
+        #expect(browser.pendingScriptCount == 0)
+        // Closing again is harmless.
+        browser.close()
+    }
+
+    @Test("A script that answers is no longer waiting, and one that does not is answered by the script limit", .timeLimit(.minutes(1)))
+    func scriptAnswers() async throws {
+        let site = TestSite()
+        site.route("/a", page: TestPages.page("A", "<p>x</p>"))
+        var settling = SiteBrowser.Settling.fast
+        settling.scriptTimeout = .milliseconds(300)
+        let browser = browser(site, settling: settling)
+        defer { browser.close() }
+        _ = try await browser.open(url("https://example.com/a"))
+
+        let answered = try await browser.run("return 7;")
+        #expect(answered.int == 7)
+        #expect(browser.pendingScriptCount == 0)
+
+        await #expect(throws: SiteBrowser.Failure.timedOut) {
+            _ = try await browser.run("await new Promise(() => {}); return 1;")
+        }
+        #expect(browser.pendingScriptCount == 0)
+    }
+
     @Test("Cancelling the task that is opening a page ends the open", .timeLimit(.minutes(1)))
     func cancelDuringOpen() async throws {
         let site = TestSite()

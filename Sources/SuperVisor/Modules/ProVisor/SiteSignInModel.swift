@@ -183,10 +183,10 @@ final class SiteSignInModel: ObservableObject {
         problem == .pageDidNotLoad && !asksForAddress && !isWorking
     }
 
-    /// Whether the last Done was refused for want of a sign-in the app saw, which the person may
-    /// answer by saving on their own word.
+    /// Whether the last Done was refused for want of a sign-in the app saw, or because the page
+    /// reads the same to a visitor, which the person may answer by saving on their own word.
     var offersSaveAnyway: Bool {
-        problem == .signInNotSeen && canPressDone
+        problem?.allowsSavingAnyway == true && canPressDone
     }
 
     /// The name the site is saved under: a granted site keeps its own, and a new one is named
@@ -251,15 +251,16 @@ final class SiteSignInModel: ObservableObject {
     /// address of any granted site (`Destination`): a site with a saved password is refused,
     /// and a site kept by its session keeps its name and the date it was added.
     ///
-    /// `confirmingSignIn` is the person's answer to a Done refused for want of a sign-in the app
-    /// saw, and counts only while that refusal is what the window shows.
+    /// `confirmingSignIn` is the person's answer to the refusal the window shows, a Done refused
+    /// for want of a sign-in the app saw or because the page cannot be told from a visitor's. It
+    /// answers that refusal alone and counts only while the window shows it.
     func done(
         using enrollment: SiteEnrollment,
         into center: SiteAccessCenter,
         confirmingSignIn: Bool = false
     ) async -> DoneOutcome {
         guard canPressDone else { return .notSaved }
-        let confirmed = confirmingSignIn && offersSaveAnyway
+        let confirming = confirmingSignIn && offersSaveAnyway ? problem?.confirmation : nil
         isWorking = true
         defer { isWorking = false }
         problem = nil
@@ -271,7 +272,7 @@ final class SiteSignInModel: ObservableObject {
             do {
                 result = try await enrollment.finishKeepingSession(
                     name: siteName,
-                    confirmedByPerson: confirmed
+                    confirming: confirming
                 )
             } catch {
                 problem = SiteSaveProblem.ofFinish(error)

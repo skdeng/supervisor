@@ -268,6 +268,7 @@ final class SiteBrowser: NSObject {
     private(set) var isClosed = false
     private var secureContentObservation: NSKeyValueObservation?
     private var closeHandlers: [UUID: @MainActor () -> Void] = [:]
+    private var pendingScripts: [ObjectIdentifier: PendingScript] = [:]
     private let typingRelay: TypingRelay?
 
     /// The message the typing script posts. Its body is one of `TypedField`'s raw values: which
@@ -367,6 +368,7 @@ final class SiteBrowser: NSObject {
     func close() {
         guard !isClosed else { return }
         isClosed = true
+        for call in Array(pendingScripts.values) { finish(call, .failure(Failure.closed)) }
         webView.stopLoading()
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
@@ -507,39 +509,51 @@ final class SiteBrowser: NSObject {
 
     /// Runs `body` as an async function in the isolated content world and returns its result.
     /// Values reach the script only through `arguments`, never in `body`.
+    ///
+    /// A script that has not answered when the browser closes ends with `Failure.closed`, and
+    /// one that has not answered within `settling.scriptTimeout` with `Failure.timedOut`.
     func run(_ body: String, arguments: [String: Any] = [:]) async throws -> ScriptValue {
         try ensureOpen()
         return try await withCheckedThrowingContinuation { continuation in
-            let once = Once()
+            let call = PendingScript(continuation)
+            pendingScripts[ObjectIdentifier(call)] = call
             webView.callAsyncJavaScript(
                 body,
                 arguments: arguments,
                 in: nil,
                 in: .defaultClient
             ) { result in
-                guard !once.isDone else { return }
-                once.isDone = true
-                once.timer?.cancel()
                 switch result {
-                case let .success(value):
-                    continuation.resume(returning: ScriptValue(value))
-                case .failure:
-                    continuation.resume(throwing: Failure.loadFailed)
+                case let .success(value): self.finish(call, .success(ScriptValue(value)))
+                case .failure: self.finish(call, .failure(Failure.loadFailed))
                 }
             }
-            once.timer = Task { @MainActor in
+            call.timer = Task { @MainActor in
                 try? await Task.sleep(for: settling.scriptTimeout)
-                guard !once.isDone else { return }
-                once.isDone = true
-                continuation.resume(throwing: Failure.timedOut)
+                self.finish(call, .failure(Failure.timedOut))
             }
         }
     }
 
+    /// How many scripts are waiting for an answer.
+    var pendingScriptCount: Int { pendingScripts.count }
+
+    /// Answers `call` once; a later answer to the same call is ignored.
+    private func finish(_ call: PendingScript, _ result: Result<ScriptValue, Error>) {
+        guard pendingScripts.removeValue(forKey: ObjectIdentifier(call)) != nil else { return }
+        call.timer?.cancel()
+        call.continuation.resume(with: result)
+    }
+
+    /// A script whose answer has not arrived, which the browser answers if it closes first.
     @MainActor
-    private final class Once {
-        var isDone = false
+    private final class PendingScript {
+        let continuation: CheckedContinuation<ScriptValue, Error>
         var timer: Task<Void, Never>?
+
+        init(_ continuation: CheckedContinuation<ScriptValue, Error>) {
+            self.continuation = continuation
+        }
     }
 
     // MARK: Waiting

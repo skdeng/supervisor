@@ -843,6 +843,66 @@ struct SignInBrokerTests {
         #expect(probe.hasVisiblePassword)
     }
 
+    @Test("The probe reports a visible sign-in control by its whole label, as it does a sign-out control", .timeLimit(.minutes(1)))
+    func probeSignInControl() async throws {
+        let site = TestSite()
+        let page = SiteBrowser(
+            policy: SiteNavigationPolicy(browseHosts: ["example.com"]),
+            dataStore: .nonPersistent(),
+            simulatedPages: site.answer,
+            settling: .fast
+        )
+        defer { page.close() }
+        let broker = SignInBroker(browser: page)
+        func controls(_ body: String) async throws -> (signIn: Bool, signOut: Bool) {
+            site.route("/page", page: TestPages.page("Page", body))
+            _ = try await page.open(URL(string: "https://example.com/page")!)
+            let probe = try await broker.probe()
+            return (probe.hasSignInControl, probe.hasSignOutControl)
+        }
+
+        for label in ["Sign in", "Log in", "Login", "Signin", "Sign on", "Log on", "  SIGN \n  In "] {
+            let link = try await controls("<a href=\"/login\">\(label)</a>")
+            #expect(link.signIn && !link.signOut, "link \(label)")
+            let button = try await controls("<button>\(label)</button>")
+            #expect(button.signIn && !button.signOut, "button \(label)")
+        }
+        let inputButton = try await controls("<input type=\"submit\" value=\"Log in\">")
+        #expect(inputButton.signIn)
+        let roleButton = try await controls("<div role=\"button\">Sign in</div>")
+        #expect(roleButton.signIn)
+
+        for hidden in [
+            "display:none", "visibility:hidden", "opacity:0", "display:inline-block;width:0;height:0;padding:0;border:0;overflow:hidden",
+        ] {
+            let result = try await controls("<a href=\"/login\" style=\"\(hidden)\">Sign in</a>")
+            #expect(!result.signIn, "\(hidden)")
+        }
+        let nested = try await controls("<div style=\"display:none\"><a href=\"/login\">Sign in</a></div>")
+        #expect(!nested.signIn)
+
+        for other in ["Sign in here", "Sign up", "Sign in with Google", "Signed in", "Log into your account", ""] {
+            let result = try await controls("<a href=\"/login\">\(other)</a><span>Sign in</span>")
+            #expect(!result.signIn, "\(other)")
+        }
+
+        let signOutOnly = try await controls("<a href=\"/logout\">Sign out</a>")
+        #expect(!signOutOnly.signIn && signOutOnly.signOut)
+        let signInFirst = try await controls("<a href=\"/login\">Sign in</a><a href=\"/logout\">Sign out</a>")
+        #expect(signInFirst.signIn && signInFirst.signOut)
+        let signOutFirst = try await controls("<a href=\"/logout\">Log out</a><a href=\"/login\">Log in</a>")
+        #expect(signOutFirst.signIn && signOutFirst.signOut)
+        let neither = try await controls("<p>Welcome</p>")
+        #expect(!neither.signIn && !neither.signOut)
+
+        // Both scans stop at the same 3,000th control.
+        let filler = { (count: Int) in String(repeating: "<a>x</a>", count: count) }
+        let within = try await controls(filler(2_999) + "<a>Sign in</a>")
+        #expect(within.signIn)
+        let beyond = try await controls(filler(3_000) + "<a>Sign in</a>")
+        #expect(!beyond.signIn)
+    }
+
     @Test("A password field that is not shown does not make a page a sign-in page", .timeLimit(.minutes(1)))
     func hiddenPasswordIsNotAShownOne() async throws {
         let bank = TestBank()
@@ -1824,7 +1884,8 @@ struct SignInBrokerRuleTests {
     private func grant(
         start: String = "https://example.com/account",
         steps: [SignInStep] = [],
-        signOutSeen: Bool = false
+        signOutSeen: Bool = false,
+        signInAbsent: Bool = false
     ) -> SiteGrant {
         SiteGrant(
             username: "u",
@@ -1837,7 +1898,8 @@ struct SignInBrokerRuleTests {
             codeKind: .none,
             codeSender: nil,
             signInSteps: steps,
-            signOutControlSeen: signOutSeen
+            signOutControlSeen: signOutSeen,
+            signInControlAbsent: signInAbsent
         )
     }
 
@@ -1894,6 +1956,35 @@ struct SignInBrokerRuleTests {
         #expect(!signedIn(signOut: true, secure: false, grant: strict))
     }
 
+    @Test("A sign-in control on the page is a signed-out page only for a grant that recorded its absence")
+    func signInControlOnTheStartPage() {
+        func isSignedIn(signIn: Bool, signOut: Bool = false, grant: SiteGrant) -> Bool {
+            let probe = PageProbe(
+                origin: "https://example.com",
+                path: "/account",
+                isSecureTopFrame: true,
+                hasChallenge: false,
+                fields: [],
+                hasSignOutControl: signOut,
+                hasSignInControl: signIn
+            )
+            return SignInRules.isSignedIn(page: probe, grant: grant)
+        }
+        let marked = grant(signInAbsent: true)
+        let unmarked = grant()
+
+        #expect(!isSignedIn(signIn: true, grant: marked))
+        #expect(isSignedIn(signIn: false, grant: marked))
+        #expect(isSignedIn(signIn: true, grant: unmarked))
+        #expect(isSignedIn(signIn: false, grant: unmarked))
+
+        // The marker adds to the sign-out rule rather than replacing it.
+        let both = grant(signOutSeen: true, signInAbsent: true)
+        #expect(isSignedIn(signIn: false, signOut: true, grant: both))
+        #expect(!isSignedIn(signIn: true, signOut: true, grant: both))
+        #expect(!isSignedIn(signIn: false, signOut: false, grant: both))
+    }
+
     @Test("The start page's path is the same when its encodings are, and a bare host is the root")
     func startPagePaths() {
         func isStart(_ path: String, _ start: String, origin: String = "https://example.com") -> Bool {
@@ -1937,6 +2028,7 @@ struct SignInBrokerRuleTests {
             "top": .bool(true),
             "challenge": .bool(false),
             "signOut": .bool(false),
+            "signIn": .bool(false),
             "loginFrame": .bool(false),
             "inputs": .array(inputs ?? []),
         ]
@@ -1962,6 +2054,8 @@ struct SignInBrokerRuleTests {
         #expect(PageProbe(probeValue(["top": .bool(false)]))?.isSecureTopFrame == false)
         #expect(PageProbe(probeValue(["challenge": .bool(true)]))?.hasChallenge == true)
         #expect(PageProbe(probeValue(["signOut": .bool(true)]))?.hasSignOutControl == true)
+        #expect(PageProbe(probeValue(["signIn": .bool(true)]))?.hasSignInControl == true)
+        #expect(PageProbe(probeValue())?.hasSignInControl == false)
         #expect(PageProbe(probeValue(["loginFrame": .bool(true)]))?.hasLoginFrame == true)
         #expect(PageProbe(probeValue(inputs: [inputValue()]))?.fields.first?.form == nil)
 
@@ -1970,6 +2064,8 @@ struct SignInBrokerRuleTests {
         #expect(PageProbe(probeValue(["origin": .number(1)])) == nil)
         #expect(PageProbe(probeValue(["secure": .string("true")])) == nil)
         #expect(PageProbe(probeValue(["signOut": .string("true")])) == nil)
+        #expect(PageProbe(probeValue(["signIn": .string("true")])) == nil)
+        #expect(PageProbe(probeValue(["signIn": .null])) == nil)
         #expect(PageProbe(probeValue(["loginFrame": .null])) == nil)
         #expect(PageProbe(probeValue(["secure": .number(1)])) == nil)
         #expect(PageProbe(probeValue(["inputs": .string("none")])) == nil)

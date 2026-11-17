@@ -437,7 +437,10 @@ struct SiteFormModelTests {
     // MARK: Save stores what signed in
 
     /// A center, a fake bank, and an enrollment on it for a flow test.
+    /// `seesVisitors` gives the enrollment the bank's visitor site, so a page that shows no
+    /// sign-out control is also loaded as a visitor would load it.
     private func flow(
+        seesVisitors: Bool = false,
         _ configure: (TestBank) -> Void = { _ in }
     ) throws -> (fixture: SiteCenterFixture, center: SiteAccessCenter, bank: TestBank, enrollment: SiteEnrollment) {
         let fixture = try SiteCenterFixture()
@@ -448,7 +451,9 @@ struct SiteFormModelTests {
             dataStore: .nonPersistent(),
             codes: CodeStub().codes,
             simulatedPages: bank.site.answer,
-            settling: .fast
+            settling: .fast,
+            visitorPages: seesVisitors ? bank.visitorPages : nil,
+            visitorRecheckDelay: .milliseconds(50)
         )
         return (fixture, center, bank, enrollment)
     }
@@ -806,6 +811,115 @@ struct SiteFormModelTests {
         #expect(!grant.remembersPassword)
         #expect(grant.password.isEmpty)
         #expect(try #require(center.sites.first).keepsSessionOnly)
+    }
+
+    @Test("Saving a page a visitor sees the same way says so, offers Save Anyway, and stores nothing until it is chosen", .timeLimit(.minutes(1)))
+    func keepSessionPageLooksPublic() async throws {
+        let (fixture, center, bank, enrollment) = try flow(seesVisitors: true) { $0.startPageIsPublic = true }
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime((fixture, bank)) {}
+        }
+        let model = SiteFormModel()
+        model.address = "example.com/account"
+        await model.openPage(using: enrollment)
+
+        // An answer given before the question was put counts for nothing.
+        #expect(await model.save(using: enrollment, into: center, confirmingSignIn: true) == .notSaved)
+        #expect(model.problem == .pageLooksPublic)
+        #expect(model.problem?.message == "SuperVisor can't tell this page from what a visitor sees, so it wouldn't notice if the site signed you out. Open a page only you can see, such as your account page, then save. Or save this page anyway.")
+        #expect(model.canSave)
+        #expect(model.offersSaveAnyway)
+        #expect(center.sites.isEmpty)
+
+        // Save Site asks again; it never stands for the confirmation.
+        #expect(await model.save(using: enrollment, into: center) == .notSaved)
+        #expect(model.problem == .pageLooksPublic)
+        #expect(center.sites.isEmpty)
+
+        var saved: [SiteRecord] = []
+        #expect(await model.save(using: enrollment, into: center, confirmingSignIn: true) { saved.append($0) } == .saved)
+        #expect(model.problem == nil)
+        #expect(!model.offersSaveAnyway)
+        #expect(saved.map(\.id) == ["example.com"])
+        let grant = try #require(center.storedGrant(for: "example.com"))
+        #expect(!grant.remembersPassword)
+        #expect(!grant.signInControlAbsent)
+        #expect(try #require(center.sites.first).keepsSessionOnly)
+    }
+
+    /// What a visitor's load gets, which a test switches between the site's page and nothing.
+    @MainActor
+    private final class VisitorSwitch {
+        var answers = true
+    }
+
+    private func switchedFlow(
+        _ visitor: VisitorSwitch
+    ) throws -> (fixture: SiteCenterFixture, center: SiteAccessCenter, bank: TestBank, enrollment: SiteEnrollment) {
+        let fixture = try SiteCenterFixture()
+        let bank = TestBank()
+        bank.startPageIsPublic = true
+        let enrollment = SiteEnrollment(
+            dataStore: .nonPersistent(),
+            codes: CodeStub().codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast,
+            visitorPages: { request in visitor.answers ? bank.visitorSite.answer(request) : nil },
+            visitorRecheckDelay: .milliseconds(50)
+        )
+        return (fixture, fixture.center(), bank, enrollment)
+    }
+
+    @Test("Save Anyway answers the refusal on screen: a page that has since come to look the same is refused for that, and then saved", .timeLimit(.minutes(1)))
+    func saveAnywayAnswersTheRefusalShown() async throws {
+        let visitor = VisitorSwitch()
+        visitor.answers = false
+        let (fixture, center, bank, enrollment) = try switchedFlow(visitor)
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime((fixture, bank)) {}
+        }
+        let model = SiteFormModel()
+        model.address = "example.com/account"
+        await model.openPage(using: enrollment)
+        #expect(await model.save(using: enrollment, into: center) == .notSaved)
+        #expect(model.problem == .signInNotSeen)
+
+        visitor.answers = true
+        #expect(await model.save(using: enrollment, into: center, confirmingSignIn: true) == .notSaved)
+        #expect(model.problem == .pageLooksPublic)
+        #expect(model.offersSaveAnyway)
+        #expect(center.sites.isEmpty)
+
+        #expect(await model.save(using: enrollment, into: center, confirmingSignIn: true) == .saved)
+        #expect(model.problem == nil)
+        #expect(center.sites.count == 1)
+    }
+
+    @Test("Save Anyway answers the refusal on screen: a page that has since stopped looking the same is refused for want of a sign-in, and then saved", .timeLimit(.minutes(1)))
+    func saveAnywayAnswersTheOtherRefusalShown() async throws {
+        let visitor = VisitorSwitch()
+        let (fixture, center, bank, enrollment) = try switchedFlow(visitor)
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime((fixture, bank)) {}
+        }
+        let model = SiteFormModel()
+        model.address = "example.com/account"
+        await model.openPage(using: enrollment)
+        #expect(await model.save(using: enrollment, into: center) == .notSaved)
+        #expect(model.problem == .pageLooksPublic)
+
+        visitor.answers = false
+        #expect(await model.save(using: enrollment, into: center, confirmingSignIn: true) == .notSaved)
+        #expect(model.problem == .signInNotSeen)
+        #expect(model.offersSaveAnyway)
+        #expect(center.sites.isEmpty)
+
+        #expect(await model.save(using: enrollment, into: center, confirmingSignIn: true) == .saved)
+        #expect(model.problem == nil)
+        #expect(center.sites.count == 1)
     }
 
     @Test("Opening the page again withdraws the offer to save anyway", .timeLimit(.minutes(1)))

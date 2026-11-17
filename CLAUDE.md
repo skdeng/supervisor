@@ -565,20 +565,37 @@ sink. Preserve these guards when touching the relevant code:
   password field reads as signed in to the probe, and a public home page has none, so the
   enrollment refuses (`signInNotSeen`) unless some page of it asked for a sign-in
   (`SignInRules.asksForSignIn`: a password field, a code field, a row of four or more
-  single-character boxes, or a sign-in frame), the person typed into a password field, or the
-  page it saves shows a sign-out control. **The page is probed when a load finishes, at once each time
+  single-character boxes, or a sign-in frame), the person typed into a password field, the
+  page it saves shows a sign-out control, or a visitor with no cookies is shown to be signed
+  out there (below). **The page is probed when a load finishes, at once each time
   the person types into it, and every 2 s while a session is being kept**, because a sign-in
   that moves from step to step inside one page finishes no load, a code field that submits on
   its last digit is gone before a page would settle, and a sign-in can end on a button press
   with no typing at all. A sign-in can still leave no evidence (a session an earlier window left in
   the data store, a passkey, a link opened from an email), so after that refusal the form
   offers **Save Anyway**, which saves on the person's confirmation
-  (`SiteFormModel.offersSaveAnyway`; counted only while the refusal is what the form shows,
-  and logged). Such a grant holds no secret, and a mistaken one reads only what the site shows
-  a visitor. **A lapsed session is noticed only when the start page then asks for a sign-in
-  or lacks a sign-out control the grant recorded** (`SignInRules.isSignedIn`): a grant with
-  no recorded sign-out control, on a site whose start page is public to a visitor, goes on
-  reading as signed in after the session ends. When the session
+  (`SiteSaveProblem.confirmation`; the confirmation answers the one refusal on screen, so a
+  save that would refuse for another reason shows that reason, and it is logged by the
+  refusal's name). Such a grant holds no secret, and a mistaken one reads only what the site
+  shows a visitor. **A lapsed session is noticed when the start page then asks for a
+  sign-in, has moved, lacks a sign-out control the grant recorded, or shows a sign-in control
+  the grant recorded as absent** (`SignInRules.isSignedIn`, `SiteGrant.signInControlAbsent`).
+  A start page that is public to a visitor would give none of those, so **when the grant
+  will record no sign-out control the save looks at the page as a visitor** (`VisitorCheck`:
+  one load of the start page, without its query, on a fresh non-persistent store, held to the
+  site's hosts, never shown, typed into, or filled, closed when its bound of 10 s passes;
+  only a verdict leaves it). The visitor is signed out, which is evidence of a sign-in, when
+  the same page asks them to sign in or shows a sign-in control the person's page lacks, or
+  when the site sends them to a page that asks for a sign-in or a user name. **A challenge, a
+  load taken off the site's hosts, and a redirect to any other page prove nothing**: a
+  visitor with no cookies meets consent walls, locale redirects, and bot checks that have
+  nothing to do with a session. A page the visitor sees identically is refused
+  (`pageLooksPublic`) even after a sign-in was seen, since saved as a start page it could
+  never show a lapse; the message asks for a page only the person can see, and Save Anyway
+  stands. **The two controls are recorded only when a hidden read of the start page on the
+  person's own store shows the same thing** (`HiddenRead`, `SiteEnrollment.markers`): later
+  reads are fresh loads at the browser's default size, and a control a page tucks into a
+  menu at one width would otherwise flag a healthy site on every visit. When the session
   ends the site needs the person: `SiteAccess` never signs in to such a grant and counts no
   attempt, and Settings shows **Needs you** until the user signs in again.
 - **A site the agent asks for is an offer, never a grant** (`Proposal.site`,
@@ -1243,7 +1260,11 @@ at runtime.
   Untrusted Input): `SiteVault` (Keychain, one item per site), `SiteRegistry` (`sites.json`,
   written atomically at mode 0600, at most 50 sites; a symlink or an oversized file reads as
   empty), `TOTP`, `SiteNavigationPolicy`, `PageSnapshot`, `SiteBrowser`, `SignInBroker`,
-  `SiteEnrollment`, and `SiteAccess`, the one writer of `sites.json` and what a run's tools call.
+  `SiteEnrollment`, `HiddenRead` and `VisitorCheck` (a page read once in a browser of its
+  own, on the person's store or as a visitor), and `SiteAccess`, the one writer of
+  `sites.json` and what a run's tools call. **Closing a `SiteBrowser` answers every script call
+  still waiting on it**, so a read bounded by a timer that closes the browser ends when the
+  timer does.
   `SiteBrowser` is a `WKWebView` in a window that is never ordered on screen (an enrollment
   moves the view into the site window for the user to watch), on a persistent data store of its
   own (`WKWebsiteDataStore(forIdentifier:)`, under `~/Library/WebKit/<bundle id>/WebsiteDataStore`)

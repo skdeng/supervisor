@@ -11,6 +11,8 @@ enum SiteSaveProblem: Equatable {
     case passwordNotConfirmed
     case passwordNotFilled
     case signInNotSeen
+    /// The page cannot be told from what a visitor who is not signed in sees.
+    case pageLooksPublic
     case notSaved
     /// The site a session would be saved as keeps a saved password, which the save would discard.
     case hasSavedPassword
@@ -31,6 +33,8 @@ enum SiteSaveProblem: Equatable {
             "SuperVisor didn't fill the sign-in itself, so it couldn't record it. Press Sign In and let it fill the page."
         case .signInNotSeen:
             "SuperVisor didn't see a sign-in here. If the page shows your account, save it anyway. If it doesn't, sign in on the page first."
+        case .pageLooksPublic:
+            "SuperVisor can't tell this page from what a visitor sees, so it wouldn't notice if the site signed you out. Open a page only you can see, such as your account page, then save. Or save this page anyway."
         case .notSaved:
             "The site could not be saved to the Keychain."
         case .hasSavedPassword:
@@ -46,12 +50,29 @@ enum SiteSaveProblem: Equatable {
             "Finish signing in on the page first, then press Done."
         case .signInNotSeen:
             "SuperVisor didn't see a sign-in here. If the page shows your account, press Save Anyway. If it doesn't, sign in on the page first."
+        case .pageLooksPublic:
+            "SuperVisor can't tell this page from what a visitor sees, so it wouldn't notice if the site signed you out. Open a page only you can see, such as your account page, then press Done. Or press Save Anyway."
         case .pageDidNotLoad:
             "The page did not finish loading."
         case .invalidAddress, .invalidGrant, .passwordNotConfirmed, .passwordNotFilled, .notSaved,
              .hasSavedPassword:
             message
         }
+    }
+
+    /// The refusal a person who can see the page may answer by saving on their own word, for a
+    /// problem that is one; nil for any other.
+    var confirmation: SiteEnrollment.Failure? {
+        switch self {
+        case .signInNotSeen: .signInNotSeen
+        case .pageLooksPublic: .pageLooksPublic
+        default: nil
+        }
+    }
+
+    /// Whether the person may answer the problem by saving on their own word.
+    var allowsSavingAnyway: Bool {
+        confirmation != nil
     }
 
     /// A problem a new sign-in, not another Save, puts right.
@@ -71,6 +92,7 @@ enum SiteSaveProblem: Equatable {
         case .passwordNotConfirmed?: .passwordNotConfirmed
         case .passwordNotFilled?: .passwordNotFilled
         case .signInNotSeen?: .signInNotSeen
+        case .pageLooksPublic?: .pageLooksPublic
         case .invalidAddress?, .notSignedIn?, nil: .notSignedIn
         }
     }
