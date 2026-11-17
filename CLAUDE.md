@@ -1013,7 +1013,10 @@ names below are the code paths.
     let the agent check it itself: a connector tool to allow in `access.json`, or a site that
     needs the user's sign-in, named in the proposal's `site` field (see Untrusted Input). The
     scout writes that proposal itself; a reviewed run leaves it in `raised/` for
-    `RaisedItems.admit`. A follow-up note is free text the agent writes for itself; the app
+    `RaisedItems.admit`. **The fact a possible proposal turns on is a check too**: a scout
+    whose lead stops at a site it has not been given (a balance a statement mail only links
+    to) asks for that site and keeps a follow-up note waiting on it, and treats a lead its
+    watchlist set aside at a site the same way. A follow-up note is free text the agent writes for itself; the app
     reads only its first two lines (below) and acts on nothing in it.
   - **The brief is two documents with two owners**, joined and passed as
     `--append-system-prompt`. `CHARTER.md` is the user's: what to look for and what is worth

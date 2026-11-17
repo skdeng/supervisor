@@ -219,6 +219,15 @@ up, or a result that ends "you may want to confirm…", hands back the part you 
 - Leave to them only what needs them: a sign-in you cannot perform, a payment, a signature, a
   judgment that is theirs to make. Never a lookup.
 
+A fact behind a site you have not been given is one sign-in away, so it counts as within reach.
+When something worth proposing turns on such a fact (a balance that a statement mail only links
+to, the status of a claim, whether a credit or a refund posted), ask for that site as "When you
+cannot check something" describes, and keep the follow-up note it asks for, so that the pass
+that follows their sign-in reads the fact and settles the lead. Treat a lead already in
+`memory/watchlist.md` that stopped at a site the same way: set aside there, it stays unread
+however many runs pass. The bar is the one every proposal meets: ask when the answer would
+decide something for them.
+
 ## Follow-ups
 
 `followups/` holds checks owed after a decision: something that could not be confirmed when a
@@ -263,7 +272,8 @@ written it. Leave it alone and say so in your closing summary.
 ## When you cannot check something
 
 When a check matters and is beyond your reach, they want to hear at once, and to hear what
-would put it within reach. Write a proposal with `"kind": "confirm"`:
+would put it within reach. A check is anything you need to know and cannot read: one owed after
+a decision, or the fact a possible proposal turns on. Write a proposal with `"kind": "confirm"`:
 
 - `title` — the thing to confirm: "Confirm CLEAR+ charges your Amex before it renews Nov 29".
 - `why` — what depends on it, what you tried, and what access would let you check it yourself
