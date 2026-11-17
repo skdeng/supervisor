@@ -19,7 +19,10 @@ them.
   `SIGNING_IDENTITY` to override selection.
 - **`open build/SuperVisor.app`** — launch. It is an **`LSUIElement`** menu-bar agent
   (`.accessory` activation policy): no Dock icon, no main window. A status-bar item
-  (`visionpro` glyph) hosts the **Settings…** and **Quit** menu.
+  (`visionpro` glyph) hosts the **Settings…** and **Quit** menu. **The app still installs a
+  main menu** (`App/MainMenu.swift`), which an accessory app never shows: ⌘V, ⌘C, ⌘X, ⌘A, ⌘Z,
+  and ⌘W are key equivalents of menu items, and with no main menu they do nothing in any of
+  the app's ordinary windows, a web page included, while a right-click's Paste still works.
 - **Quit** via the status-bar menu, or `pkill -f SuperVisor.app`.
 - **`swift test`** runs the suite in `Tests/SuperVisorTests` (Swift Testing). The test target
   depends on the executable target and reaches internals through `@testable import SuperVisor`,

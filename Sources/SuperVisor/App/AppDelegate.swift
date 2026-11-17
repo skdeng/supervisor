@@ -47,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Menu-bar agent: no Dock icon, never the active app's foreground UI.
         NSApp.setActivationPolicy(.accessory)
+        NSApp.mainMenu = MainMenu.make()
         AppManagedFileStorage.sweepOrphans()
 
         installStatusItem()
