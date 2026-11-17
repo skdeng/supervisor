@@ -247,8 +247,11 @@ final class SiteBrowser: NSObject {
     /// connection.
     var locationObserver: (@MainActor () -> Void)?
     /// Called on the main actor each time the person types into a password field on the page.
-    /// Only a browser made with `observesPasswordTyping` calls it.
+    /// Only a browser made with `observesTyping` calls it.
     var passwordTypedObserver: (@MainActor () -> Void)?
+    /// Called on the main actor each time the person types into any field on the page, a
+    /// password field included. Only a browser made with `observesTyping` calls it.
+    var typedObserver: (@MainActor () -> Void)?
     /// Called on the main actor each time the main frame finishes a load.
     var pageFinishedObserver: (@MainActor () -> Void)?
 
@@ -265,20 +268,35 @@ final class SiteBrowser: NSObject {
     private(set) var isClosed = false
     private var secureContentObservation: NSKeyValueObservation?
     private var closeHandlers: [UUID: @MainActor () -> Void] = [:]
-    private let passwordTypingRelay: PasswordTypingRelay?
+    private let typingRelay: TypingRelay?
 
-    /// The message the password-typing script posts. It carries nothing but the fact.
-    nonisolated static let passwordTypedMessage = "supervisorPasswordTyped"
+    /// The message the typing script posts. Its body is one of `TypedField`'s raw values: which
+    /// kind of field took the input, never what was typed.
+    nonisolated static let typingMessage = "supervisorTyping"
 
-    /// With `observesPasswordTyping`, a script in the app's isolated content world reports each
-    /// input a person makes into a password field (see `passwordTypedObserver`). Events a
-    /// script dispatches, the app's own fills among them, are not trusted and are not reported.
+    enum TypedField: String {
+        case password
+        case other
+
+        /// The kind a message body names; nil for anything that is not exactly one of them.
+        init?(messageBody: Any) {
+            guard let text = messageBody as? String, let kind = TypedField(rawValue: text) else {
+                return nil
+            }
+            self = kind
+        }
+    }
+
+    /// With `observesTyping`, a script in the app's isolated content world reports each input
+    /// a person makes into a field of the page (see `typedObserver` and
+    /// `passwordTypedObserver`). Events a script dispatches, the app's own fills among them,
+    /// are not trusted and are not reported.
     init(
         policy: SiteNavigationPolicy,
         dataStore: WKWebsiteDataStore = SiteBrowser.sharedStore,
         simulatedPages: SimulatedPages? = nil,
         settling: Settling = .standard,
-        observesPasswordTyping: Bool = false
+        observesTyping: Bool = false
     ) {
         self.policy = policy
         self.simulatedPages = simulatedPages
@@ -290,10 +308,10 @@ final class SiteBrowser: NSObject {
         configuration.mediaTypesRequiringUserActionForPlayback = .all
         // Sites refuse the bare WebKit agent string as an unsupported browser.
         configuration.applicationNameForUserAgent = Self.agentSuffix
-        if observesPasswordTyping {
-            let relay = PasswordTypingRelay()
+        if observesTyping {
+            let relay = TypingRelay()
             configuration.userContentController.addUserScript(WKUserScript(
-                source: Scripts.passwordTyping,
+                source: Scripts.typing,
                 injectionTime: .atDocumentStart,
                 forMainFrameOnly: false,
                 in: .defaultClient
@@ -301,11 +319,11 @@ final class SiteBrowser: NSObject {
             configuration.userContentController.add(
                 relay,
                 contentWorld: .defaultClient,
-                name: Self.passwordTypedMessage
+                name: Self.typingMessage
             )
-            passwordTypingRelay = relay
+            typingRelay = relay
         } else {
-            passwordTypingRelay = nil
+            typingRelay = nil
         }
         webView = WKWebView(frame: Self.initialFrame, configuration: configuration)
 
@@ -324,7 +342,7 @@ final class SiteBrowser: NSObject {
         super.init()
         webView.navigationDelegate = self
         webView.uiDelegate = self
-        passwordTypingRelay?.browser = self
+        typingRelay?.browser = self
         secureContentObservation = webView.observe(\.hasOnlySecureContent, options: [.new]) { [weak self] _, _ in
             MainActor.assumeIsolated {
                 self?.locationObserver?()
@@ -360,6 +378,7 @@ final class SiteBrowser: NSObject {
         locationObserver = nil
         pageFinishedObserver = nil
         passwordTypedObserver = nil
+        typedObserver = nil
         let handlers = closeHandlers.values
         closeHandlers.removeAll()
         handlers.forEach { $0() }
@@ -382,10 +401,12 @@ final class SiteBrowser: NSObject {
         closeHandlers.removeValue(forKey: token)
     }
 
-    /// Reports a person's typing into a password field; the page script's message lands here.
-    func notePasswordTyped() {
+    /// Reports a person's typing into a field of the page; the page script's message lands
+    /// here.
+    func noteTyped(into field: TypedField) {
         guard !isClosed else { return }
-        passwordTypedObserver?()
+        if field == .password { passwordTypedObserver?() }
+        typedObserver?()
     }
 
     private func ensureOpen() throws {
@@ -685,30 +706,33 @@ final class SiteBrowser: NSObject {
 
         /// Runs in the isolated content world, where the page's scripts cannot reach the
         /// listener or the message handler. Only a trusted event, which comes from the person,
-        /// is reported, and the message carries no value.
-        static let passwordTyping = """
+        /// is reported, and the message names the kind of field, never what was typed.
+        static let typing = """
             document.addEventListener('input', (event) => {
               if (!event.isTrusted) return;
               const target = event.composedPath()[0];
-              if (target instanceof HTMLInputElement && target.type === 'password') {
-                window.webkit.messageHandlers.\(SiteBrowser.passwordTypedMessage).postMessage(null);
-              }
+              if (!(target instanceof HTMLInputElement)) return;
+              const kind = target.type === 'password'
+                ? '\(SiteBrowser.TypedField.password.rawValue)'
+                : '\(SiteBrowser.TypedField.other.rawValue)';
+              window.webkit.messageHandlers.\(SiteBrowser.typingMessage).postMessage(kind);
             }, true);
             """
     }
 }
 
-/// Receives the password-typing script's message for a browser, holding it weakly: the web
-/// view's content controller keeps its handlers alive for as long as the web view lives.
+/// Receives the typing script's message for a browser, holding it weakly: the web view's
+/// content controller keeps its handlers alive for as long as the web view lives.
 @MainActor
-private final class PasswordTypingRelay: NSObject, WKScriptMessageHandler {
+private final class TypingRelay: NSObject, WKScriptMessageHandler {
     weak var browser: SiteBrowser?
 
     func userContentController(
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        browser?.notePasswordTyped()
+        guard let field = SiteBrowser.TypedField(messageBody: message.body) else { return }
+        browser?.noteTyped(into: field)
     }
 }
 

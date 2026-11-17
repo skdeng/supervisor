@@ -207,6 +207,37 @@ struct SiteBrowserTests {
         ) != nil)
     }
 
+    @Test("A typing message names a kind of field and nothing else")
+    func typedFieldMessages() {
+        #expect(SiteBrowser.TypedField(messageBody: "password") == .password)
+        #expect(SiteBrowser.TypedField(messageBody: "other") == .other)
+
+        #expect(SiteBrowser.TypedField(messageBody: "Password") == nil)
+        #expect(SiteBrowser.TypedField(messageBody: "") == nil)
+        #expect(SiteBrowser.TypedField(messageBody: NSNull()) == nil)
+        #expect(SiteBrowser.TypedField(messageBody: ["password"]) == nil)
+        #expect(SiteBrowser.TypedField(messageBody: 1) == nil)
+    }
+
+    @Test("Typing into a password field reaches both observers; into any other field, one")
+    func typingObservers() {
+        let browser = SiteBrowser(policy: .anyHTTPSHost, dataStore: .nonPersistent(), observesTyping: true)
+        defer { browser.close() }
+        var passwords = 0
+        var any = 0
+        browser.passwordTypedObserver = { passwords += 1 }
+        browser.typedObserver = { any += 1 }
+
+        browser.noteTyped(into: .other)
+        #expect((passwords, any) == (0, 1))
+        browser.noteTyped(into: .password)
+        #expect((passwords, any) == (1, 2))
+
+        browser.close()
+        browser.noteTyped(into: .password)
+        #expect((passwords, any) == (1, 2))
+    }
+
     @Test("The agent string carries the installed Safari's version, else the system's")
     func agentVersion() {
         let system = OperatingSystemVersion(majorVersion: 27, minorVersion: 1, patchVersion: 0)

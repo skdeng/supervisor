@@ -768,10 +768,63 @@ struct SiteFormModelTests {
         model.address = "example.com/account"
         await model.openPage(using: enrollment)
 
-        #expect(await model.save(using: enrollment, into: center) == .notSaved)
+        #expect(!model.offersSaveAnyway)
+        // An answer given before the question was put counts for nothing.
+        #expect(await model.save(using: enrollment, into: center, confirmingSignIn: true) == .notSaved)
         #expect(model.problem == .signInNotSeen)
-        #expect(model.problem?.message == "SuperVisor hasn't seen you sign in yet. Sign in on the page, then save.")
+        #expect(model.problem?.message == "SuperVisor didn't see a sign-in here. If the page shows your account, save it anyway. If it doesn't, sign in on the page first.")
         #expect(model.canSave)
+        #expect(model.offersSaveAnyway)
+        #expect(center.sites.isEmpty)
+
+        // Save Site asks again; it never stands for the confirmation.
+        #expect(await model.save(using: enrollment, into: center) == .notSaved)
+        #expect(model.offersSaveAnyway)
+        #expect(center.sites.isEmpty)
+    }
+
+    @Test("Save Anyway, offered after that refusal, saves the page as a kept session", .timeLimit(.minutes(1)))
+    func keepSessionSaveAnyway() async throws {
+        let (fixture, center, bank, enrollment) = try flow { $0.startPageIsPublic = true }
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime((fixture, bank)) {}
+        }
+        let model = SiteFormModel()
+        model.address = "example.com/account"
+        await model.openPage(using: enrollment)
+        #expect(await model.save(using: enrollment, into: center) == .notSaved)
+        #expect(model.offersSaveAnyway)
+
+        var saved: [SiteRecord] = []
+        let outcome = await model.save(using: enrollment, into: center, confirmingSignIn: true) { saved.append($0) }
+
+        #expect(outcome == .saved)
+        #expect(model.problem == nil)
+        #expect(saved.map(\.id) == ["example.com"])
+        let grant = try #require(center.storedGrant(for: "example.com"))
+        #expect(!grant.remembersPassword)
+        #expect(grant.password.isEmpty)
+        #expect(try #require(center.sites.first).keepsSessionOnly)
+    }
+
+    @Test("Opening the page again withdraws the offer to save anyway", .timeLimit(.minutes(1)))
+    func keepSessionOfferEndsWithANewPage() async throws {
+        let (fixture, center, bank, enrollment) = try flow { $0.startPageIsPublic = true }
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime((fixture, bank)) {}
+        }
+        let model = SiteFormModel()
+        model.address = "example.com/account"
+        await model.openPage(using: enrollment)
+        #expect(await model.save(using: enrollment, into: center) == .notSaved)
+        #expect(model.offersSaveAnyway)
+
+        await model.openPage(using: enrollment)
+
+        #expect(!model.offersSaveAnyway)
+        #expect(await model.save(using: enrollment, into: center, confirmingSignIn: true) == .notSaved)
         #expect(center.sites.isEmpty)
     }
 

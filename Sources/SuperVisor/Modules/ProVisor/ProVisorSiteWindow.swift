@@ -297,7 +297,7 @@ struct ProVisorSiteView: View {
                 Button("Cancel", action: onClose)
                     .controlSize(.large)
                     .help("Close without saving")
-                Button("Save Site", action: save)
+                Button("Save Site") { save() }
                     .buttonStyle(SiteProminentButtonStyle())
                     .disabled(!model.canSave)
                     .help("Save this sign-in so ProVisor can read the site signed in")
@@ -489,8 +489,13 @@ struct ProVisorSiteView: View {
             if let problem = model.problem {
                 Text(problem.message)
                     .font(.callout)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(model.offersSaveAnyway ? .orange : .red)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if model.offersSaveAnyway {
+                Button("Save Anyway") { save(confirmingSignIn: true) }
+                    .help("Save this page as signed in, on your own word that it shows your account")
             }
 
             if let blocker = model.saveBlocker {
@@ -514,9 +519,14 @@ struct ProVisorSiteView: View {
         Task { await model.openPage(using: enrollment) }
     }
 
-    private func save() {
+    private func save(confirmingSignIn: Bool = false) {
         Task {
-            switch await model.save(using: enrollment, into: center, onSaved: onSaved) {
+            switch await model.save(
+                using: enrollment,
+                into: center,
+                confirmingSignIn: confirmingSignIn,
+                onSaved: onSaved
+            ) {
             case .notSaved:
                 break
             case .saved:

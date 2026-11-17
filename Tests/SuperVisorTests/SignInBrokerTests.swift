@@ -1785,6 +1785,40 @@ struct SignInBrokerRuleTests {
         )
     }
 
+    // MARK: Asking for a sign-in
+
+    @Test("Four or more single-character boxes read as a code; fewer, or a password's, do not")
+    func splitCode() {
+        let box = field(maxLength: 1)
+        #expect(SignInRules.showsSplitCode(page(Array(repeating: box, count: 4))))
+        #expect(SignInRules.showsSplitCode(page(Array(repeating: box, count: 6) + [field(name: "q")])))
+        #expect(!SignInRules.showsSplitCode(page(Array(repeating: box, count: 3))))
+        #expect(!SignInRules.showsSplitCode(page(Array(repeating: field(maxLength: 2), count: 6))))
+        #expect(!SignInRules.showsSplitCode(page(Array(repeating: field(type: "password", maxLength: 1), count: 6))))
+        #expect(!SignInRules.showsSplitCode(page([])))
+    }
+
+    @Test("A page asks for a sign-in by a password field, a code field, code boxes, or a sign-in frame")
+    func asksForSignIn() {
+        #expect(SignInRules.asksForSignIn(page([field(type: "password")])))
+        #expect(SignInRules.asksForSignIn(page([field(autocomplete: "one-time-code")])))
+        #expect(SignInRules.asksForSignIn(page(Array(repeating: field(maxLength: 1), count: 4))))
+        #expect(SignInRules.asksForSignIn(page([], loginFrame: true)))
+
+        #expect(!SignInRules.asksForSignIn(page([])))
+        #expect(!SignInRules.asksForSignIn(page([field(name: "email", type: "email")])))
+        #expect(!SignInRules.asksForSignIn(page([field(name: "q", type: "search")], signOut: true)))
+    }
+
+    @Test("A page that asks for a code one digit to a box is not past the sign-in")
+    func splitCodeIsNotPastSignIn() {
+        let boxes = page(Array(repeating: field(maxLength: 1), count: 6), path: "/account")
+        #expect(!SignInRules.isPastSignIn(boxes))
+        #expect(!SignInRules.isSignedIn(page: boxes, grant: grant()))
+
+        #expect(SignInRules.isPastSignIn(page([field(name: "q", type: "search")], path: "/account")))
+    }
+
     // MARK: Signed in
 
     private func grant(

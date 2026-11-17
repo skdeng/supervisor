@@ -23,11 +23,16 @@ import WebKit
 /// the person signs in on the page themselves, the app fills nothing, and the grant keeps the
 /// browser session alone (`SiteGrant.remembersPassword == false`).
 ///
-/// **A kept session must have crossed a sign-in.** A page with no password field reads as
-/// signed in to the probe, and a public home page has none. So while a session is being kept,
-/// each finished page is probed, and `finishKeepingSession` refuses (`signInNotSeen`) unless
-/// some page of this enrollment showed a password field, a code field, or a sign-in frame, or
-/// the person typed into a password field, before the signed-in page it saves.
+/// **A kept session is saved on evidence of a sign-in, or on the person's word.** A page with
+/// no password field reads as signed in to the probe, and a public home page has none. So
+/// while a session is being kept, the page is probed each time a load finishes and each time
+/// the person types into it, and `finishKeepingSession` refuses (`signInNotSeen`) unless some
+/// page of this enrollment asked for a sign-in (`SignInRules.asksForSignIn`), the person typed
+/// into a password field, or the page it saves shows a sign-out control. A sign-in can leave
+/// none of those: a session an earlier window left in the data store, a passkey, a link opened
+/// from an email. The person can see the page, so after that refusal their confirmation
+/// (`confirmedByPerson`) saves it; such a grant holds no secret, and a mistaken one reads
+/// only what the site shows a visitor.
 @MainActor
 final class SiteEnrollment: ObservableObject {
     enum Failure: Error, Equatable {
@@ -44,7 +49,7 @@ final class SiteEnrollment: ObservableObject {
         case passwordNotFilled
         /// The enrollment was cancelled while it finished.
         case cancelled
-        /// No page of a kept session asked for a sign-in, so nothing shows the person signed in.
+        /// Nothing the app observed shows the person signed in, and they have not confirmed it.
         case signInNotSeen
     }
 
@@ -106,6 +111,8 @@ final class SiteEnrollment: ObservableObject {
     private var keptSessionSawSignIn = false
     private var observeTask: Task<Void, Never>?
     private var observeRequested = false
+    /// Whether a pending observation waits for the page to settle before it probes.
+    private var observeSettles = false
 
     init(
         dataStore: WKWebsiteDataStore = SiteBrowser.sharedStore,
@@ -121,7 +128,7 @@ final class SiteEnrollment: ObservableObject {
             dataStore: dataStore,
             simulatedPages: simulatedPages,
             settling: settling,
-            observesPasswordTyping: true
+            observesTyping: true
         )
         browser.locationObserver = { [weak self] in
             self?.refreshLocation()
@@ -133,6 +140,13 @@ final class SiteEnrollment: ObservableObject {
             self?.passwordTyped = true
             if self?.keptSessionURL != nil { self?.keptSessionSawSignIn = true }
             self?.refreshPasswordConfirmation()
+        }
+        // A sign-in that moves from step to step inside one page finishes no load, so the
+        // fields of a later step are met only by looking again while the person types. The
+        // look is immediate: a code field that submits on its last digit is gone within the
+        // time a page takes to settle.
+        browser.typedObserver = { [weak self] in
+            if self?.keptSessionURL != nil { self?.requestObservation(settling: false) }
         }
     }
 
@@ -257,7 +271,7 @@ final class SiteEnrollment: ObservableObject {
             wipe()
             throw Failure.invalidAddress
         }
-        requestObservation()
+        requestObservation(settling: true)
         await idle()
     }
 
@@ -336,11 +350,38 @@ final class SiteEnrollment: ObservableObject {
         return (grant, record)
     }
 
+    /// What shows that a kept session is a signed-in one, strongest first.
+    enum KeptSessionBasis: Equatable {
+        /// A page of the enrollment asked for a sign-in, or the person typed a password.
+        case sighting
+        /// The page being saved shows a sign-out control.
+        case signOutControl
+        /// Nothing the app observed; the person confirmed it.
+        case personsWord
+
+        /// Nil when nothing shows it and the person has not confirmed.
+        init?(sawSignIn: Bool, showsSignOutControl: Bool, confirmedByPerson: Bool) {
+            if sawSignIn {
+                self = .sighting
+            } else if showsSignOutControl {
+                self = .signOutControl
+            } else if confirmedByPerson {
+                self = .personsWord
+            } else {
+                return nil
+            }
+        }
+    }
+
     /// The person says they are signed in: builds a grant that keeps the session and holds no
     /// secret. The page must pass the check `finish` makes (`signedInPage`); the start page and
     /// browse hosts are derived as `finish` derives them, and the only fill host is the
-    /// sign-in host. A refusal leaves the enrollment as it was.
-    func finishKeepingSession(name: String) async throws -> (grant: SiteGrant, record: SiteRecord) {
+    /// sign-in host. `confirmedByPerson` stands in for evidence of a sign-in when the app saw
+    /// none. A refusal leaves the enrollment as it was.
+    func finishKeepingSession(
+        name: String,
+        confirmedByPerson: Bool = false
+    ) async throws -> (grant: SiteGrant, record: SiteRecord) {
         guard !isCancelled else { throw Failure.cancelled }
         guard keptSessionURL != nil, let broker else { throw Failure.notSignedIn }
         await idle()
@@ -348,7 +389,11 @@ final class SiteEnrollment: ObservableObject {
         guard !isCancelled else { throw Failure.cancelled }
         guard let signInURL = keptSessionURL else { throw Failure.notSignedIn }
         let page = try await signedInPage(broker: broker)
-        guard keptSessionSawSignIn else { throw Failure.signInNotSeen }
+        guard let basis = KeptSessionBasis(
+            sawSignIn: keptSessionSawSignIn,
+            showsSignOutControl: page.probe.hasSignOutControl,
+            confirmedByPerson: confirmedByPerson
+        ) else { throw Failure.signInNotSeen }
         guard let signInHost = signInURL.host(percentEncoded: false)?.lowercased() else {
             throw Failure.invalidGrant
         }
@@ -369,6 +414,9 @@ final class SiteEnrollment: ObservableObject {
             remembersPassword: false
         )
         guard grant.isValid(for: signInHost) else { throw Failure.invalidGrant }
+        if basis == .personsWord {
+            AppLog.notice(.sites, "kept session taken on the person's word, with no sign-in seen")
+        }
 
         let label = Proposal.displayText(name, limit: SiteRecord.nameLimit) ?? signInHost
         var record = SiteRecord(id: signInHost, name: label, added: Date(), lastSignedIn: Date())
@@ -378,8 +426,9 @@ final class SiteEnrollment: ObservableObject {
     }
 
     /// The page on display, read afresh, when it shows the user signed in: an `https` page on
-    /// a valid host, done loading, with no password field, no field that asks for a code, and
-    /// no large sign-in frame. Returns it as a start page, without its query and fragment.
+    /// a valid host, done loading, with no password field, no field or row of boxes that asks
+    /// for a code, and no large sign-in frame. Returns it as a start page, without its query
+    /// and fragment.
     private func signedInPage(
         broker: SignInBroker
     ) async throws -> (startURL: URL, startHost: String, probe: PageProbe) {
@@ -451,7 +500,7 @@ final class SiteEnrollment: ObservableObject {
         if isArmed {
             requestAssist()
         } else if keptSessionURL != nil {
-            requestObservation()
+            requestObservation(settling: true)
         }
     }
 
@@ -459,37 +508,51 @@ final class SiteEnrollment: ObservableObject {
 
     private func stopObserving() {
         observeRequested = false
+        observeSettles = false
         observeTask?.cancel()
     }
 
     /// Asks for the open page of a kept session to be probed for a sign-in, once the page in
     /// flight, if any, has been. A request made while one runs is met by one more probe.
-    private func requestObservation() {
+    /// `settling` waits for the page to finish loading and hold still first, which a page
+    /// that has just loaded needs and a page the person is typing into does not.
+    private func requestObservation(settling: Bool) {
         observeRequested = true
+        if settling { observeSettles = true }
         guard observeTask == nil else { return }
         observeTask = Task { [weak self] in
             while let self, self.keptSessionURL != nil, self.observeRequested, !Task.isCancelled {
                 self.observeRequested = false
-                await self.observeCurrentPage()
+                let settles = self.observeSettles
+                self.observeSettles = false
+                await self.observeCurrentPage(settling: settles)
             }
-            self?.observeTask = nil
+            guard let self else { return }
+            self.observeTask = nil
+            // A request that arrived while a cancelled task was winding down found the task
+            // still in place and started none.
+            if self.observeRequested, self.keptSessionURL != nil {
+                self.requestObservation(settling: false)
+            }
         }
     }
 
-    /// Notes whether the page on display asks for a sign-in: a password field, a code field,
-    /// or a sign-in frame. Only the noting is kept, never what the page holds.
-    private func observeCurrentPage() async {
+    /// Notes whether the page on display asks for a sign-in (`SignInRules.asksForSignIn`).
+    /// Only the noting is kept, never what the page holds.
+    private func observeCurrentPage(settling: Bool) async {
         guard let broker, keptSessionURL != nil else { return }
-        do {
-            try await browser.settleLoadedPage()
-        } catch {
-            return
+        if settling {
+            do {
+                try await browser.settleLoadedPage()
+            } catch {
+                return
+            }
         }
         guard !Task.isCancelled, keptSessionURL != nil,
               let probe = try? await broker.probe(),
               !Task.isCancelled, keptSessionURL != nil
         else { return }
-        if probe.hasVisiblePassword || probe.hasCodeField || probe.hasLoginFrame {
+        if SignInRules.asksForSignIn(probe) {
             keptSessionSawSignIn = true
         }
     }
@@ -504,8 +567,14 @@ final class SiteEnrollment: ObservableObject {
                 self.assistRequested = false
                 await self.examineCurrentPage()
             }
-            self?.assistTask = nil
-            self?.refreshWorking()
+            guard let self else { return }
+            self.assistTask = nil
+            // A request that arrived while a cancelled task was winding down found the task
+            // still in place and started none.
+            if self.isArmed, self.assistRequested {
+                self.requestAssist()
+            }
+            self.refreshWorking()
         }
         refreshWorking()
     }

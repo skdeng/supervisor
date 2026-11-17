@@ -517,8 +517,9 @@ sink. Preserve these guards when touching the relevant code:
   grant is built from the password handed to the sign-in, and `finish` refuses unless the app
   filled that password (`passwordNotFilled`) and the sign-in then left the password form with no
   later page asking for it again and no typing by the person into a password field in the page
-  (`passwordNotConfirmed`; an isolated-world listener reports only the fact that a trusted
-  input event, never one the app dispatched, hit a password field). Either way it saves
+  (`passwordNotConfirmed`; an isolated-world listener reports each trusted input event, never
+  one the app dispatched, as the kind of field it hit, password or other, and never what was
+  typed). Either way it saves
   nothing, since it has no sign-in to replay or cannot tell which password worked, and the form
   asks for the working password. Save is open only while the form still shows exactly what the last Open Page or Sign
   In started with. The start page, browse hosts, and fill hosts are what the sign-in observed,
@@ -556,11 +557,24 @@ sink. Preserve these guards when touching the relevant code:
 - **A keep-signed-in grant holds a browser session and no secret.** The user signs in on the
   page themselves; the grant (`remembersPassword == false`) carries an empty user name and
   password, no key, no code source, no recorded steps, and only the sign-in host to fill on,
-  and `SiteGrant.isValid` rejects one that carries more. **Save requires that a sign-in was
-  seen** (`SiteEnrollment.finishKeepingSession`): a page with no password field reads as signed
-  in to the probe, and a public home page has none, so the enrollment refuses (`signInNotSeen`)
-  unless some page of it showed a password field, a code field, or a sign-in frame, or the
-  person typed into a password field, before the signed-in page it saves. When the session
+  and `SiteGrant.isValid` rejects one that carries more. **Save needs evidence of a
+  sign-in, or the person's word** (`SiteEnrollment.finishKeepingSession`): a page with no
+  password field reads as signed in to the probe, and a public home page has none, so the
+  enrollment refuses (`signInNotSeen`) unless some page of it asked for a sign-in
+  (`SignInRules.asksForSignIn`: a password field, a code field, a row of four or more
+  single-character boxes, or a sign-in frame), the person typed into a password field, or the
+  page it saves shows a sign-out control. **The page is probed when a load finishes and, at once, each time
+  the person types into it**, because a sign-in that moves from step to step inside one page
+  finishes no load, and a code field that submits on its last digit is gone before a page
+  would settle. A sign-in can still leave no evidence (a session an earlier window left in
+  the data store, a passkey, a link opened from an email), so after that refusal the form
+  offers **Save Anyway**, which saves on the person's confirmation
+  (`SiteFormModel.offersSaveAnyway`; counted only while the refusal is what the form shows,
+  and logged). Such a grant holds no secret, and a mistaken one reads only what the site shows
+  a visitor. **A lapsed session is noticed only when the start page then asks for a sign-in
+  or lacks a sign-out control the grant recorded** (`SignInRules.isSignedIn`): a grant with
+  no recorded sign-out control, on a site whose start page is public to a visitor, goes on
+  reading as signed in after the session ends. When the session
   ends the site needs the person: `SiteAccess` never signs in to such a grant and counts no
   attempt, and Settings shows **Needs you** until the user signs in again.
 - **A site the agent asks for is an offer, never a grant** (`Proposal.site`,
@@ -1053,7 +1067,11 @@ names below are the code paths.
     pauses site and text reading when one fails.
   - **The site window** (`ProVisorSiteWindow`) is one reused window, the form on the left and
     the live page on the right. **Keep me signed in**, the default, asks for the address only:
-    the user signs in on the page and the grant keeps the session and no secret. **Sign in for
+    the user signs in on the page and the grant keeps the session and no secret; when the app
+    saw no sign-in, Save Site says so and offers **Save Anyway**. The address is the one the
+    user normally starts from: one that carries a query or sits on a sign-in service's host
+    draws a note (`SiteFormModel.addressAdvice`), because a page from the middle of a sign-in
+    another browser started is answered with an error. **Sign in for
     me** also takes the user name, password, and a code source (none, authenticator key,
     texted, or emailed); the app fills what it recognises while the user watches, and the user
     can finish in the page. The bar above the page shows the host and padlock of the page

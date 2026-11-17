@@ -289,6 +289,22 @@ enum SignInRules {
         return field.inputMode == "numeric" && field.maxLength.map { (4...8).contains($0) } == true
     }
 
+    /// Whether the page shows a row of single-character boxes, the way a site asks for a code
+    /// one digit to a box. Such boxes often carry no name, token, or input mode that marks
+    /// them as a code field.
+    static func showsSplitCode(_ page: PageProbe) -> Bool {
+        page.fields.filter { !$0.isPassword && $0.maxLength == 1 }.count >= splitCodeBoxes
+    }
+
+    /// The fewest single-character boxes that read as a code: the shortest code sites send.
+    static let splitCodeBoxes = 4
+
+    /// Whether the page asks the person to sign in: it shows a password field, a field or row
+    /// of boxes for a code, or a sign-in frame.
+    static func asksForSignIn(_ page: PageProbe) -> Bool {
+        page.hasVisiblePassword || page.hasCodeField || page.hasLoginFrame || showsSplitCode(page)
+    }
+
     private static func matches(_ pattern: String, _ text: String) -> Bool {
         text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
     }
@@ -344,8 +360,8 @@ enum SignInRules {
 
     /// Whether the settled page, which is what loading the grant's start page led to, is one a
     /// signed-in session shows. All of these hold: it has the start page's origin and path; it
-    /// shows no password field, no field that asks for a code, no field a recorded step was
-    /// recorded for, no challenge, and no large frame that reads as a sign-in; and, when the
+    /// shows nothing that asks for a sign-in (`isPastSignIn`) and no field a recorded step was
+    /// recorded for; and, when the
     /// page the user ended enrollment on had a sign-out control, it has one too.
     static func isSignedIn(page: PageProbe, grant: SiteGrant) -> Bool {
         guard page.isSecureTopFrame,
@@ -356,10 +372,10 @@ enum SignInRules {
         return !grant.signOutControlSeen || page.hasSignOutControl
     }
 
-    /// Whether a page shows nothing that asks for a sign-in: no password field, no field that
-    /// asks for a code, no large frame that reads as a sign-in, and no challenge to answer.
+    /// Whether a page shows nothing that asks for a sign-in (`asksForSignIn`) and no challenge
+    /// to answer.
     static func isPastSignIn(_ page: PageProbe) -> Bool {
-        !page.hasVisiblePassword && !page.hasCodeField && !page.hasLoginFrame && !page.hasChallenge
+        !asksForSignIn(page) && !page.hasChallenge
     }
 
     /// Whether the page's origin and path are those of `start`, a path being the same when its

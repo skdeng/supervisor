@@ -109,7 +109,7 @@ final class SiteFormModel: ObservableObject {
             case .passwordNotFilled:
                 "SuperVisor didn't fill the sign-in itself, so it couldn't record it. Press Sign In and let it fill the page."
             case .signInNotSeen:
-                "SuperVisor hasn't seen you sign in yet. Sign in on the page, then save."
+                "SuperVisor didn't see a sign-in here. If the page shows your account, save it anyway. If it doesn't, sign in on the page first."
             case .notSaved:
                 "The site could not be saved to the Keychain."
             }
@@ -466,6 +466,12 @@ final class SiteFormModel: ObservableObject {
         started != nil && !detailsChanged && !isSaving
     }
 
+    /// Whether the last Save was refused for want of a sign-in the app saw, which the person
+    /// may answer by saving on their own word.
+    var offersSaveAnyway: Bool {
+        problem == .signInNotSeen && canSave
+    }
+
     /// What Sign In passes to `begin`, or nil while something required is missing or invalid.
     var signInRequest: SignInRequest? {
         textsBlockSignIn ? nil : currentDetails
@@ -616,12 +622,17 @@ final class SiteFormModel: ObservableObject {
     /// Builds the grant from the page the user is on and stores it, then hands the saved
     /// record to `onSaved`. Nothing is stored once the enrollment has been cancelled, however
     /// far the save had got.
+    ///
+    /// `confirmingSignIn` is the person's answer to a Save refused for want of a sign-in the
+    /// app saw, and counts only while that refusal is what the form shows.
     func save(
         using enrollment: SiteEnrollment,
         into center: SiteAccessCenter,
+        confirmingSignIn: Bool = false,
         onSaved: (SiteRecord) -> Void = { _ in }
     ) async -> SaveOutcome {
         guard canSave, let started else { return .notSaved }
+        let confirmed = confirmingSignIn && offersSaveAnyway
         isSaving = true
         defer { isSaving = false }
         problem = nil
@@ -634,7 +645,10 @@ final class SiteFormModel: ObservableObject {
             do {
                 switch started {
                 case .keepingSession:
-                    made = try await enrollment.finishKeepingSession(name: resolvedName)
+                    made = try await enrollment.finishKeepingSession(
+                        name: resolvedName,
+                        confirmedByPerson: confirmed
+                    )
                 case .signingIn:
                     made = try await enrollment.finish(name: resolvedName)
                 }

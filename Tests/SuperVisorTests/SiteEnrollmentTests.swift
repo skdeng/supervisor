@@ -245,7 +245,7 @@ struct SiteEnrollmentTests {
         #expect(session.passwordIsConfirmed)
 
         // The message the page script posts for a person's typing lands here.
-        session.browser.notePasswordTyped()
+        session.browser.noteTyped(into: .password)
 
         #expect(!session.passwordIsConfirmed)
         await #expect(throws: SiteEnrollment.Failure.passwordNotConfirmed) { _ = try await session.finish(name: "Bank") }
@@ -254,6 +254,21 @@ struct SiteEnrollmentTests {
         bank.signOut()
         try await begin(session, bank)
         #expect(session.passwordIsConfirmed)
+    }
+
+    @Test("Typing into a field other than the password leaves the filled password confirmed", .timeLimit(.minutes(1)))
+    func typingElsewhereKeepsThePasswordConfirmed() async throws {
+        let bank = TestBank()
+        let session = enrollment(bank)
+        defer { session.cancel() }
+        try await begin(session, bank)
+        #expect(session.passwordIsConfirmed)
+
+        session.browser.noteTyped(into: .other)
+        await session.idle()
+
+        #expect(session.passwordIsConfirmed)
+        _ = try await session.finish(name: "Bank")
     }
 
     @Test("A synthetic input event on a password field is not taken for the person typing", .timeLimit(.minutes(1)))
@@ -266,6 +281,11 @@ struct SiteEnrollmentTests {
         session.browser.passwordTypedObserver = {
             typed += 1
             observer?()
+        }
+        let anyObserver = session.browser.typedObserver
+        session.browser.typedObserver = {
+            typed += 1
+            anyObserver?()
         }
         _ = try await session.browser.open(url("https://example.com/login"))
         _ = try await session.browser.run("""
@@ -692,6 +712,147 @@ struct SiteEnrollmentTests {
 
         let (grant, _) = try await session.finishKeepingSession(name: "Bank")
         #expect(!grant.remembersPassword)
+    }
+
+    @Test("A code step a page shows without a load is seen once the person types", .timeLimit(.minutes(1)))
+    func stepShownWithoutALoadIsSeen() async throws {
+        let bank = TestBank()
+        bank.startPageIsPublic = true
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/account")
+        _ = try await session.browser.run("""
+            const box = document.createElement('input');
+            box.id = 'step';
+            box.autocomplete = 'one-time-code';
+            document.body.appendChild(box);
+            """)
+        await session.idle()
+        // The field appeared with no load, so nothing has looked at the page since.
+        await #expect(throws: SiteEnrollment.Failure.notSignedIn) {
+            _ = try await session.finishKeepingSession(name: "Bank")
+        }
+
+        session.browser.noteTyped(into: .other)
+        await session.idle()
+        _ = try await session.browser.run("document.getElementById('step').remove();")
+
+        let (grant, _) = try await session.finishKeepingSession(name: "Bank")
+        #expect(!grant.remembersPassword)
+    }
+
+    @Test("A row of single-character boxes is a sign-in step, and a page showing one is not saved", .timeLimit(.minutes(1)))
+    func splitCodeBoxes() async throws {
+        let bank = TestBank()
+        bank.startPageIsPublic = true
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/account")
+        _ = try await session.browser.run("""
+            const row = document.createElement('div');
+            row.id = 'row';
+            for (let index = 0; index < 6; index++) {
+              const box = document.createElement('input');
+              box.maxLength = 1;
+              row.appendChild(box);
+            }
+            document.body.appendChild(row);
+            """)
+        session.browser.noteTyped(into: .other)
+        await session.idle()
+
+        await #expect(throws: SiteEnrollment.Failure.notSignedIn) {
+            _ = try await session.finishKeepingSession(name: "Bank", confirmedByPerson: true)
+        }
+
+        _ = try await session.browser.run("document.getElementById('row').remove();")
+        let (grant, _) = try await session.finishKeepingSession(name: "Bank")
+        #expect(grant.isValid(for: "example.com"))
+    }
+
+    @Test("Typing on a page that asks for no sign-in is not a sign-in", .timeLimit(.minutes(1)))
+    func typingElsewhereIsNoSignIn() async throws {
+        let bank = TestBank()
+        bank.startPageIsPublic = true
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/account")
+        _ = try await session.browser.run("""
+            const box = document.createElement('input');
+            box.type = 'email';
+            box.name = 'newsletter';
+            document.body.appendChild(box);
+            """)
+        session.browser.noteTyped(into: .other)
+        await session.idle()
+
+        await #expect(throws: SiteEnrollment.Failure.signInNotSeen) {
+            _ = try await session.finishKeepingSession(name: "Bank")
+        }
+    }
+
+    @Test("A page that shows a sign-out control is saved with no sign-in seen", .timeLimit(.minutes(1)))
+    func signOutControlIsEvidence() async throws {
+        let bank = TestBank()
+        bank.site.route("/members", page: TestPages.page("Members", """
+            <p>Welcome back</p><a href="/logout">Sign out</a>
+            """))
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/members")
+        let (grant, _) = try await session.finishKeepingSession(name: "Bank")
+
+        #expect(grant.signOutControlSeen)
+        #expect(grant.startURL == url("https://example.com/members"))
+    }
+
+    @Test("A kept session rests on a sighting first, then a sign-out control, then the person's word")
+    func keptSessionBasis() {
+        typealias Basis = SiteEnrollment.KeptSessionBasis
+        #expect(Basis(sawSignIn: true, showsSignOutControl: true, confirmedByPerson: true) == .sighting)
+        #expect(Basis(sawSignIn: true, showsSignOutControl: false, confirmedByPerson: false) == .sighting)
+        #expect(Basis(sawSignIn: false, showsSignOutControl: true, confirmedByPerson: true) == .signOutControl)
+        #expect(Basis(sawSignIn: false, showsSignOutControl: true, confirmedByPerson: false) == .signOutControl)
+        #expect(Basis(sawSignIn: false, showsSignOutControl: false, confirmedByPerson: true) == .personsWord)
+        #expect(Basis(sawSignIn: false, showsSignOutControl: false, confirmedByPerson: false) == nil)
+    }
+
+    @Test("The person's confirmation does not save a page that still asks for a sign-in", .timeLimit(.minutes(1)))
+    func confirmationDoesNotSaveASignInPage() async throws {
+        let bank = TestBank()
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/login")
+
+        await #expect(throws: SiteEnrollment.Failure.notSignedIn) {
+            _ = try await session.finishKeepingSession(name: "Bank", confirmedByPerson: true)
+        }
+    }
+
+    @Test("With no sign-in seen, the person's confirmation saves the page and nothing else does", .timeLimit(.minutes(1)))
+    func confirmationStandsInForASighting() async throws {
+        let bank = TestBank()
+        bank.startPageIsPublic = true
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/account")
+        await #expect(throws: SiteEnrollment.Failure.signInNotSeen) {
+            _ = try await session.finishKeepingSession(name: "Bank")
+        }
+
+        let (grant, record) = try await session.finishKeepingSession(name: "Bank", confirmedByPerson: true)
+
+        #expect(!grant.remembersPassword)
+        #expect(grant.password.isEmpty)
+        #expect(!grant.signOutControlSeen)
+        #expect(grant.startURL == url("https://example.com/account"))
+        #expect(record.keepsSessionOnly)
     }
 
     @Test("A sign-in seen in an earlier kept session does not carry into the next", .timeLimit(.minutes(1)))
