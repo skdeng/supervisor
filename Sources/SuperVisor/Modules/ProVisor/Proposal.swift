@@ -48,8 +48,9 @@ struct Proposal: Identifiable, Equatable, Sendable {
     let status: Status
     /// What the acting run reported, or why it failed.
     let result: String?
-    /// Set when the user clears a finished proposal's row. The status stays `done`, so the
-    /// agent still reads the proposal as one that was wanted.
+    /// Whether a finished proposal has no row: the user cleared it, the run that carried it
+    /// out said nothing is left for them to see (`ActionReport`), or their own sign-in settled
+    /// it. The status stays `done`, so the agent still reads the proposal as one that was wanted.
     let isCleared: Bool
     /// A rule the agent offers to make standing: when this holds, do that, from now on without
     /// asking. Shown in full beside the action; it becomes a rule only if the user says so.
@@ -283,9 +284,10 @@ enum ProposalQueue {
     static let leadCount = 3
 
     /// The proposals worth a row: those awaiting a decision and not yet expired, then those
-    /// carried out and not yet cleared. Something done under a standing approval is shown so
-    /// the user can see what happened, and then leaves by itself after a day — rows that had to
-    /// be cleared by hand would turn "stop asking me" into a different chore. Within each group
+    /// carried out whose result the person still needs to see. A finished proposal has a row
+    /// only when its run asked for one (`ActionReport`), until the user clears it. One kept
+    /// under a standing approval leaves by itself after a day — rows that had to be cleared by
+    /// hand would turn "stop asking me" into a different chore. Within each group
     /// the newest leads, and the id settles a tie so a reload never reshuffles the rows. Of
     /// several open requests for one site, only the first is shown (`repeatedSiteRequests`).
     static func visible(_ proposals: [Proposal], now: Date) -> [Proposal] {
@@ -609,6 +611,29 @@ enum ProposalStore {
         try write(fields, id: id, in: directory)
     }
 
+    /// Records a proposal carried out, with what its run reported. `cleared` is written either
+    /// way, so the run's word on whether the result is shown stands over whatever the file held.
+    static func recordCarriedOut(
+        id: String,
+        in directory: URL,
+        report: ActionReport,
+        automatic: Bool,
+        now: Date = Date(),
+        timeZone: TimeZone = .current
+    ) throws {
+        try record(
+            id: id,
+            in: directory,
+            status: .done,
+            result: Proposal.displayText(report.result, limit: Proposal.resultLimit)
+                ?? ActionReport.emptyResult,
+            cleared: !report.needsNotice,
+            automatic: automatic ? true : nil,
+            now: now,
+            timeZone: timeZone
+        )
+    }
+
     /// Why a site request was, or was not, settled.
     enum SiteRequestSettlement: Equatable {
         case settled
@@ -618,10 +643,11 @@ enum ProposalStore {
         case siteChanged
     }
 
-    /// Records a site request done with `result`, as a compare-and-set against the file: only
-    /// when the proposal on disk is `proposed` or `failed` and its `site`, read the way
-    /// `Proposal.parse` reads it, is `host`. Otherwise nothing is written. What decides is the
-    /// file, never a copy held in memory, since the agent can rewrite or settle it at any time.
+    /// Records a site request done with `result`, and cleared, as a compare-and-set against the
+    /// file: only when the proposal on disk is `proposed` or `failed` and its `site`, read the
+    /// way `Proposal.parse` reads it, is `host`. Otherwise nothing is written. What decides is
+    /// the file, never a copy held in memory, since the agent can rewrite or settle it at any
+    /// time.
     static func settleSiteRequest(
         id: String,
         in directory: URL,
@@ -640,6 +666,7 @@ enum ProposalStore {
         guard Proposal.parsedSite(fields["site"]) == host else { return .siteChanged }
         stamp(.done, into: &fields, now: now, timeZone: timeZone)
         fields["result"] = result
+        fields["cleared"] = true
         try write(fields, id: id, in: directory)
         return .settled
     }

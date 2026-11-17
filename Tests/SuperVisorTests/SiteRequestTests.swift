@@ -141,7 +141,7 @@ struct SiteRequestTests {
         )
     }
 
-    @Test("Saving the site the request asked for records it done with the site's name, and no choice")
+    @Test("Saving the site the request asked for records it done with the site's name, no choice, and no row")
     func settleRecordsDone() throws {
         let (directory, file) = try folder(with: request)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -154,6 +154,8 @@ struct SiteRequestTests {
         #expect(loaded.decided == Date(timeIntervalSince1970: 1_794_936_720))
         #expect(loaded.choice == nil)
         #expect(loaded.site == "example.com")
+        #expect(loaded.isCleared)
+        #expect(ProposalQueue.visible([loaded], now: Date(timeIntervalSince1970: 1_794_936_780)).isEmpty)
         let fields = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
         #expect(fields["chose"] == nil)
         #expect(fields["instructed"] == nil)

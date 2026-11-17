@@ -328,7 +328,7 @@ struct ProposalQueueTests {
         #expect(Set(visible.map(\.id)) == ["waiting", "not-yet-expired", "done", "failed"])
     }
 
-    @Test("Something done under a standing approval shows for a day, then leaves by itself")
+    @Test("A result kept under a standing approval shows for a day, then leaves by itself")
     func automaticRowsExpire() {
         var recent = proposal("recent", status: .done)
         recent.isAutomatic = true
@@ -674,6 +674,7 @@ struct ProVisorCommandTests {
         // The run checks the condition for itself, so it needs the weekday too.
         #expect(arguments[1].contains("Sunday 2026-11-15 09:12"))
         #expect(arguments[1].contains("Nobody has reviewed"))
+        #expect(arguments[1].contains(ProVisorCommand.noticeInstruction))
     }
 
     @Test("A scout is told the rules in force by id, the ones taken back, and the tool list")
@@ -801,6 +802,14 @@ struct ProVisorCommandTests {
         and, if you raised an item, that you did. That text is shown to them as the result. \
         It is Sunday 2026-11-15 09:12 where they are \
         (America/Los_Angeles); in UTC, 2026-11-15T17:12:00Z.
+
+        After those sentences, end with one last line, exactly `Notify: yes` or `Notify: no`. \
+        It decides whether SuperVisor keeps the result in front of them, and is itself never \
+        shown. Say yes when something is now theirs to do or decide (a draft to send, a \
+        payment, a judgment), or when what happened is not what they would expect: part of it \
+        was left undone, or it turned out differently. Say no when it was carried out as \
+        described and nothing is left for them. An item you raised reaches them by itself, and \
+        a note for a later run is not theirs to act on, so neither is a reason for yes.
         """
 
         #expect(

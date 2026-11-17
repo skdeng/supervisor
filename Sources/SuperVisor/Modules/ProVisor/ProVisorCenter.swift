@@ -1129,13 +1129,19 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
 
         switch outcome {
         case let .success(result):
-            AppLog.notice(.provisor, "action finished")
-            record(
-                id,
-                status: .done,
-                result: result.text.isEmpty ? "Done." : result.text,
-                automatic: isAutomatic ? true : nil
+            let report = ActionReport(result.text)
+            AppLog.notice(
+                .provisor,
+                "action finished, \(report.needsNotice ? "result kept in the sheet" : "nothing left to show")"
             )
+            write {
+                try ProposalStore.recordCarriedOut(
+                    id: id,
+                    in: ProVisorHome.proposalsURL,
+                    report: report,
+                    automatic: isAutomatic
+                )
+            }
         case let .failure(error):
             AppLog.error(.provisor, "action failed: \(Self.logName(error))")
             record(
@@ -1169,7 +1175,7 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         cleared: Bool? = nil,
         automatic: Bool? = nil
     ) {
-        do {
+        write {
             try ProposalStore.record(
                 id: id,
                 in: ProVisorHome.proposalsURL,
@@ -1178,6 +1184,13 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
                 cleared: cleared,
                 automatic: automatic
             )
+        }
+    }
+
+    /// Makes one change to a proposal file and reloads the queue.
+    private func write(_ change: () throws -> Void) {
+        do {
+            try change()
         } catch {
             AppLog.error(.provisor, "decision not recorded")
         }

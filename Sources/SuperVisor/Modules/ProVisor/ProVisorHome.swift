@@ -396,6 +396,10 @@ enum ProVisorCommand {
     /// (`BriefRevision`).
     static let briefChangedSentence = "Your brief has changed since your last scouting pass, so your notes were written under an earlier one. Read it afresh, then go through what your notes set aside, scheduled for later, or ruled out, the watchlist first: a conclusion that rested on something the brief now says differently is open again."
 
+    /// Said to every run that carries out a proposal: how it says whether the person still
+    /// needs to see the result. `ActionReport` reads the line it asks for.
+    static let noticeInstruction = "After those sentences, end with one last line, exactly `Notify: yes` or `Notify: no`. It decides whether SuperVisor keeps the result in front of them, and is itself never shown. Say yes when something is now theirs to do or decide (a draft to send, a payment, a judgment), or when what happened is not what they would expect: part of it was left undone, or it turned out differently. Say no when it was carried out as described and nothing is left for them."
+
     /// Said to every run that looks for tools, and in the brief's limits section.
     static let connectorLagSentence = "Data tools can take a few seconds to connect, so a tool that seems missing at the very start should be looked for once more with ToolSearch before it is reported missing."
 
@@ -728,6 +732,9 @@ enum ProVisorCommand {
         and, if you raised an item, that you did. That text is shown to them as the result. \
         It is \(ProVisorClock.localStamp(now, timeZone: timeZone)) where they are \
         (\(timeZone.identifier)); in UTC, \(now.formatted(.iso8601)).
+
+        \(noticeInstruction) An item you raised reaches them by itself, and a note for a later \
+        run is not theirs to act on, so neither is a reason for yes.
         """
     }
 
@@ -780,6 +787,8 @@ enum ProVisorCommand {
 
         Finish with one or two plain sentences saying what you did. That text is shown to them \
         afterwards as the result.
+
+        \(noticeInstruction)
 
         Title: \(proposal.title)
         Why it was proposed: \(proposal.why ?? "not stated")

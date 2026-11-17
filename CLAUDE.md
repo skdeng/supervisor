@@ -507,8 +507,11 @@ sink. Preserve these guards when touching the relevant code:
   run is also told the rule and the current weekday and local time, and to do nothing unless
   the condition holds and the action falls inside the rule, but that is the model's judgment
   and the tool list is the guarantee: the worst a hostile message can do through a
-  standing approval is get some mail wrongly labelled or trashed, a handful at a time, in rows
-  the user sees afterwards with a way to revoke the rule.
+  standing approval is get some mail wrongly labelled or trashed, a handful at a time.
+  **Whether the result is then shown is the run's own word** (`ActionReport`, under "A
+  finished proposal" in ProVisor), which the same message can shape, so a row is no record of
+  what a rule did: that is in the proposal files (`automatic`, `under`, `result`), and
+  Settings lists every rule in force with a way to revoke it.
 - **Signed-in sites: a secret goes only where the user watched it go** (`Services/Sites/`). One
   Keychain item per site (`SiteGrant`, in the login keychain addressed by path, since the
   default keychain is a user setting) holds the secrets and everything that decides where they
@@ -1146,8 +1149,9 @@ names below are the code paths.
     (`proposed` → `done` / `failed` / `dismissed`; the agent may set `withdrawn`), `decided`,
     `result`, `cleared`, and the choice (`chose`, an option counted from one, or `instructed`,
     the text the user typed) back into the same file, which is how the agent learns what the
-    user wants. Expanded: rows for proposals awaiting a decision, then those carried out and
-    not yet cleared, three unprompted and the rest behind **N more**. A row opens the **review
+    user wants. Expanded: rows for proposals awaiting a decision, then those carried out whose
+    result the person still needs to see (next bullet), three unprompted and the rest behind
+    **N more**. A row opens the **review
     window** (`ProVisorReviewWindow`) or dismisses; it cannot approve. The review is an
     ordinary window because deciding can involve typing and the notch panel never takes
     keyboard focus; opening it closes the sheet. **The window sizes itself to its content
@@ -1162,6 +1166,20 @@ names below are the code paths.
     selected option or the typed instruction (one at a time; it may overlap a scouting pass).
     No button is the default, so Return never approves anything. By default an acting run can
     label, trash, and mark mail and write drafts, and cannot send.
+  - **A finished proposal has a row only when the run that carried it out asked for one.**
+    Whether the person still needs to see a result is the agent's judgment, so every acting
+    run, reviewed or under a standing approval, is told to end on a last line
+    `Notify: yes` or `Notify: no` (`ProVisorCommand.noticeInstruction`): yes when something
+    is now theirs to do or decide (a draft to send) or the outcome is not what they would
+    expect, no when it went as described and nothing is left for them. `ActionReport` reads
+    the line (searching only the end of the text), takes it off the result, and records the
+    proposal `done` with `cleared` set to the run's answer (`ProposalStore.recordCarriedOut`),
+    so on no the row leaves when the run ends. A run that does not end on the
+    line keeps its row, and a failed one stays in the queue. **A request settled by
+    the person's own sign-in is recorded cleared too** (`ProposalStore.settleSiteRequest`):
+    no run decides, and "Signed in to <site>" tells them nothing new. To see what a wording
+    change to the instruction does, give the CLI a reviewed run's prompt with `--tools ""`,
+    say what to assume the tools did, and ask for the closing message alone.
   - **Standing approvals** are how "ask me" becomes "just do it", and **both the rule and its
     condition are the agent's to work out from the decision history** — there is no per-kind
     switch and no condition grammar in Swift. A rule is two sentences, a condition and an
@@ -1183,9 +1201,10 @@ names below are the code paths.
     time condition is acted on once per occurrence, and only on a pass that happens to run
     then — the schedule is not driven by the rules. From then on the scout is told the rules in
     force and may mark a proposal `"under": "<id>"`; `ProVisorCenter` admits it without a tap,
-    carries it out with the `auto` tool list, records `automatic: true`, and shows it as a
-    **Done automatically** row that leaves by itself after a day. Its review window names the
-    rule and offers **Stop Doing This**; Settings lists every rule in force with **Remove**. A
+    carries it out with the `auto` tool list, and records `automatic: true`. When the run asks
+    for its result to be shown, it is a **Done automatically** row that leaves by itself after
+    a day; its review window names the rule and offers **Stop Doing This**. Settings lists
+    every rule in force with **Remove**. A
     revoked rule stays on file, and the scout is told never to offer it again. Something
     admitted under a rule is not announced: only what needs a decision raises the banner.
   - **Asking for a sign-in.** `SignInDemand` is the list of sites that need the person: a

@@ -3,9 +3,10 @@ import Foundation
 /// A proposal that asks for a site (`Proposal.site`), settled by the user signing in to it.
 ///
 /// Signing in is the answer, so the proposal is recorded `done` the way a carried-out action
-/// is, with a fixed result naming the site; no run is started and no choice is recorded. Only
-/// the site the request was for settles it, and only while the file on disk still asks for it
-/// (`ProposalStore.settleSiteRequest`).
+/// is, with a fixed result naming the site; no run is started and no choice is recorded. It is
+/// recorded cleared as well, since the person just signed in themselves and a row saying so
+/// would tell them nothing. Only the site the request was for settles it, and only while the
+/// file on disk still asks for it (`ProposalStore.settleSiteRequest`).
 enum SiteRequests {
     enum Outcome: Equatable {
         case settled
