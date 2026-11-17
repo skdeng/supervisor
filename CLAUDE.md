@@ -30,10 +30,23 @@ them.
   `#expect(a == b)` fails on two `CGFloat`s whose bit patterns are identical (the failure prints
   `205.0 == 205.0`); the operator resolves differently inside the macro's expansion without
   CoreGraphics in scope. Comparisons against an integer literal pass either way, so the gap
-  shows only once a test holds both sides in `CGFloat` variables.
+  shows only once a test holds both sides in `CGFloat` variables. **Tests that start the built
+  executable** (the bridge helper's and the disclaimed launcher's process tests) run only when
+  `.build/debug/SuperVisor` is newer than every source file, and need `DYLD_FRAMEWORK_PATH` to
+  name the `Sparkle.framework` beside it (`BuiltExecutable` in `BridgeTestSupport.swift`): the
+  bare executable carries no run-path for it, and only the app bundle's embedded copy resolves
+  without help. A binary that predates a launch mode starts the whole app when handed that
+  mode's flag, so a stale or missing one skips those tests (`BuiltExecutable.skipReason`) and
+  they report as skipped, not failed. The build system relinks only when a source's *content*
+  changed, so after a checkout or restore that moved modification times alone, delete
+  `.build/debug/SuperVisor` and run `swift build`. A Unix socket path holds 104 bytes and the
+  temporary directory already takes about 50, so tests name their sockets with short folder and
+  file names (`ScratchFolder`). Site tests run against `SiteBrowser`'s simulated pages (see
+  `Services/Sites/` under Shared Services).
 - **`swift build`** alone compiles the binary but does *not* produce the bundle. The bundle is
-  required because TCC permission grants (Location, Calendar, Reminders, Accessibility, Bluetooth) and the
-  now-playing read only persist for a **stable, signed bundle identity** — a bare `swift run`
+  required because TCC permission grants (Location, Calendar, Reminders, Accessibility,
+  Bluetooth, Full Disk Access) and the now-playing read only persist for a **stable, signed
+  bundle identity** — a bare `swift run`
   binary gets a fresh identity each launch and grants never stick. `make-app.sh` also compiles
   the MediaRemote adapter dylib (see below), embeds Sparkle.framework from the SPM artifact
   into `Contents/Frameworks` (rewriting the binary's rpath to resolve it there), signs every
@@ -46,6 +59,32 @@ them.
   newer than the installed Xcode its `.tbd` stubs fail to link under Xcode's clang with
   `unknown architecture`. `swift build` is unaffected, so the package compiles while the bundle
   build fails at the adapter step.
+- **`open -n build/SuperVisor.app --args --self-check <name> --report <file>`** runs one check of
+  operating-system behaviour no test can reach, writes one JSON object to the report file, and
+  exits (`App/SelfCheck.swift`; `SuperVisorMain.main()` dispatches it before the menu-bar app
+  starts). A report holds counts, statuses, and timings, never message text, page content, or a
+  secret. **Start it through `open`, never as a binary from a shell**: privacy grants and
+  Keychain access are decided for the app responsible for a process, and a shell-started binary
+  answers for the terminal, so its result says nothing about SuperVisor. It needs the bundle
+  `make-app.sh` builds. The checks:
+  - `keychain` — an item the app wrote is readable by the next launch with no prompt (run it
+    twice; `foundEarlierItem`, `readSeconds`).
+  - `messages` — whether the app reads the Messages database, and whether `/bin/cat` started the
+    ordinary way and started with responsibility disclaimed can. With Full Disk Access granted
+    the first can and the second cannot; without the grant neither can. `disclaimed-exec` asks
+    the same of a program started through `--exec-disclaimed`.
+  - `history` — the browsing-history files open and carry the tables and columns
+    `BrowsingHistory` reads (counts and flags; Chrome's and Safari's need Full Disk Access).
+  - `webkit` — a web view that is never shown loads a page, and its data store keeps a cookie
+    across launches (run it twice; `cookieFromEarlierLaunch`). `site-read` — `SiteBrowser` reads
+    `https://example.com/` and reports counts (needs a network).
+  - `agent`, `bridge`, `tools`, `connectors` — start real agent runs, each capped at a $0.05 to
+    $0.10 spending limit on the user's plan. `agent`: the CLI answers a one-turn prompt when
+    started through `AgentTaskService`, disclaimed. `bridge`: a run reaches a served tool through
+    the helper, and `helperDepth` (the parents between the helper and the CLI) must not exceed
+    `admittedDepth`. `tools`: a run's `open_site` call reaches `ProVisorTools` and returns its
+    unknown-site answer. `connectors`: three runs carrying the hold configuration each find a
+    Gmail tool on their first turn (`foundTool` should equal `runs`).
 - **`./release.sh <version> [notes…]`** — cuts a Sparkle auto-update release: asserts
   main/clean-tree/Developer ID, stamps `Info.plist`, builds, zips, EdDSA-signs the zip (private
   key in the login Keychain as "Private key for signing Sparkle updates"), prepends the
@@ -322,10 +361,11 @@ sink. Preserve these guards when touching the relevant code:
   scratch dir and `--tools Read --allowedTools Read(<copy path>) --strict-mcp-config
   --setting-sources project`. The toolset is Read-only (no exfiltration tool), the auto-allow is
   scoped to the single copied file, MCP is disabled, and the user's own hooks/settings do not load,
-  so a prompt-injection payload in the file cannot read anything but the copy. A natural-language
-  preamble marks the content as data, not instructions, as defense-in-depth. The on-device path has
-  no tools, so injected instructions in file content cannot act; the same preamble still marks the
-  content as data.
+  so a prompt-injection payload in the file cannot read anything but the copy. The CLI starts as
+  every agent process does (disclaimed, with a fixed environment; see the child-process bullet
+  below). A natural-language preamble marks the content as data, not instructions, as
+  defense-in-depth. The on-device path has no tools, so injected instructions in file content
+  cannot act; the same preamble still marks the content as data.
 - **The Claude sign-in and the usage endpoint** (`ClaudeUsageClient`). The credential JSON comes
   from the Keychain item Claude Code writes, or from `~/.claude/.credentials.json`, which anything
   running as the user can edit: it is size-capped, only `accessToken`/`expiresAt`/`scopes` are
@@ -347,10 +387,32 @@ sink. Preserve these guards when touching the relevant code:
   finishing". It grants nothing: looking a tool up does not allow calling it. The **scout** is
   allowed writes only under `proposals/`, `memory/`, and `followups/` (`Edit(/proposals/**)` —
   a leading slash on a command-line rule anchors at the working directory, and `Edit` rules
-  cover every file-writing tool) plus the **read** connector tools in `access.json`, so nothing
-  it reads can make it send, change, or delete. The tools that change something are granted
-  only to the **acting run**, which exists only after the user approved one proposal or typed
-  an instruction. A reviewed acting run may write under `followups/` and `raised/`
+  cover every file-writing tool) plus the **read** connector tools in `access.json`, so no
+  connector tool it holds can send, change, or delete. **Tools that change mail go only to an
+  acting run**, which exists only after the user approved one proposal or typed an instruction,
+  or under a standing approval with its shorter list (next bullet). **The site and text tools**
+  (`open_site`, `follow_link`, `read_more`,
+  `read_texts`; the bridge's rules join the connector rules in `--allowedTools` as
+  `mcp__supervisor__<tool>`) **go only to passes that can change nothing outside the
+  workspace**: the scout and the follow-up pass, never an acting or standing-approval run,
+  which can write drafts the user may later send, into which a page or a text could steer
+  account data. A pass that holds them can cause a sign-in attempt on a granted site and
+  whatever following a link on a signed-in site does, as bounded under "Signed-in sites"
+  below. The bridge is attached only while all of these hold (`ProVisorBridge`): a site is
+  granted or texts are on; the scout's connector list is sealed; responsibility for the agent
+  process can be disclaimed; and the installed CLI is the signed build (judged on the file
+  before the run, remembered while its size, inode, and times hold, and judged again on the
+  running process when the server accepts it as the run's root). A list is sealed when every
+  rule is on `ProVisorAccess.sealedReadRules`, the tools known to read and nothing else.
+  **Sealing is what keeps site and text reading from becoming a way to leak**: a connector
+  tool that could send, invite, post, or fetch an address would carry what a page or a text
+  says out of the Mac. That is why Notion's `notion-fetch`, which loads any address it is
+  given, public pages anyone can publish included, is off the list. The list covers Gmail and
+  Google Calendar by read pattern (`search_*`, `get_*`, `list_*`), and Microsoft 365, Slack,
+  and Notion by exact tool name, because those connectors mix reading and writing under one
+  prefix and a pattern would admit a tool added later. A pass that fails a condition runs
+  without the tools, and Settings says which one failed (`ProVisorBridge.Unavailable`). A
+  reviewed acting run may write under `followups/` and `raised/`
   (`ProVisorCommand.reviewedRunDirectories`): a note for a later pass, and an item to put to
   the user when something it checked is wrong or beyond its tools. **It is given no way to
   write in `proposals/`**: it holds acting tools and has been reading mail, and a rule
@@ -359,8 +421,10 @@ sink. Preserve these guards when touching the relevant code:
   queue under an id the app makes up, keeping only the fields a proposal is written with
   (never `under`, `standing`, or anything the app writes) and never over an existing file, at
   most three per sweep. A follow-up is the agent's own note about a read-only check. Memory
-  stays the scout's, and a run under a standing approval writes no files at all. The brief, `access.json`, and `standing.json` sit *outside* the
-  working directory, where the agent's file tools cannot reach them. `access.json` accepts only connector rules
+  stays the scout's, and a run under a standing approval writes no files at all. The brief,
+  `access.json`, `standing.json`, `sites.json`, and every run's tool-channel configuration (it
+  holds the run's token) sit *outside* the working directory, where the agent's file tools
+  cannot reach them. `access.json` accepts only connector rules
   under a literal server (`\Amcp__<server>__<tool or tool*>\z`), and one malformed rule rejects
   the file: it can never name a built-in tool, so it cannot grant a shell. **A proposal file is
   model output shaped by that mail**: `Proposal.parse` validates the id against
@@ -393,10 +457,13 @@ sink. Preserve these guards when touching the relevant code:
   `instructed`) for the scout to learn from and is read back **for display only**: a retry
   starts from the recommended option and an empty box, because a box pre-filled from a file
   the scout can rewrite would run the scout's words as the user's. The banner carries a count only, and `AppLog` records names and counts —
-  never proposal text or a failure's message, which can quote the agent's output. Verify a change
-  to the flags by running the CLI in a scratch directory and asking it to write outside the
-  folders that run is allowed, read outside the directory, run a command, and call a connector tool that is not
-  allowed: each must come back denied.
+  never proposal text or a failure's message, which can quote the agent's output, and never
+  page text, message text, browsing history, or an address with a query string (a site is named
+  by its host). Verify a change to the flags by running the CLI in a scratch directory and
+  asking it to write outside the folders that run is allowed, read outside the directory, run a
+  command, and call a connector tool that is not allowed: each must come back denied. For a
+  pass that carries the bridge, the `bridge` and `tools` self-checks confirm a real run reaches
+  a served tool.
 - **A standing approval lets a ProVisor action run that nobody looked at first**, so a claim to
   be under one is worth only what the code grants it (`StandingApprovals`). A rule exists only
   because the user tapped **Always** beside its condition and action in full — an offer with
@@ -411,6 +478,192 @@ sink. Preserve these guards when touching the relevant code:
   and the tool list is the guarantee: the worst a hostile message can do through a
   standing approval is get some mail wrongly labelled or trashed, a handful at a time, in rows
   the user sees afterwards with a way to revoke the rule.
+- **Signed-in sites: a secret goes only where the user watched it go** (`Services/Sites/`). One
+  Keychain item per site (`SiteGrant`, in the login keychain addressed by path, since the
+  default keychain is a user setting) holds the secrets and everything that decides where they
+  may be used: the sign-in address, the hosts the password may be filled on, the hosts pages may
+  load from, and the fills recorded while the user watched the app sign in (`SignInStep`: the
+  kind, the origin and path, and the field's name, id, autocomplete token, and type).
+  **`sites.json` is display and bookkeeping only** (name, last sign-in, attempt counters, a
+  needs-you flag), because anything running as the user can edit a file, and an edited sign-in
+  address would send the password there. A stored grant is used only when it is at most 16 KiB
+  and valid for its site id (`SiteGrant.isValid`: `https` addresses with no credentials or
+  port; hosts matched exactly, never as suffixes, since a suffix match on `co.uk` would cover
+  every site under it; the sign-in host as the id; fill hosts within the browse hosts); an item
+  that fails reads as absent. A write deletes the item and adds a fresh one, never updating in
+  place, because an item planted under the same name keeps its own access list and would let
+  its planter read the password; a failed add puts the earlier item back. Every type that holds
+  a secret (`SiteGrant`, `TOTPKey`, the sign-in request, form, and session types) renders as a
+  fixed placeholder in every textual form, `dump` included.
+  **The broker replays the recorded fills and does nothing else** (`SignInBroker`). A value
+  goes only into the recorded field on the recorded origin and path, and the check that the
+  page is still that page, in a secure top frame, runs inside the same script call that fills,
+  so a redirect between check and fill cannot slip through. Values reach the page only as
+  arguments to a script in an isolated content world (the page's own scripts can still read a
+  field once it is filled, as with any password manager). A form whose action is not an `https`
+  fill host is not submitted, and one that would send by GET is submitted only if the page's own
+  script takes the submission over, since sending it would put the password in the address.
+  **A password field anywhere else is left alone**: a page that shows one no recorded step
+  matches stops the sign-in with nothing filled. So do a visible challenge widget, a page whose
+  fields differ from the recorded ones, a sign-in still showing after its fills, and one that
+  needs more than six fills. How an attempt ended decides what follows. A person-needed stop
+  (those, and a grant with no recorded steps) parks the site until the user signs in again; a
+  transient one (a code that did not arrive, a page that moved or would not load) uses up an
+  attempt and nothing more; an interrupted one (the task cancelled, or the browser closed under
+  it) is taken back uncounted. A site gets three unattended attempts a local day, counted in
+  `sites.json` *before* the sign-in starts so that one that cannot be recorded is never made,
+  and one sign-in at a time across runs.
+- **Save stores only a sign-in the app filled itself** (`SiteEnrollment`, `SiteFormModel`). The
+  grant is built from the password handed to the sign-in, and `finish` refuses unless the app
+  filled that password (`passwordNotFilled`) and the sign-in then left the password form with no
+  later page asking for it again and no typing by the person into a password field in the page
+  (`passwordNotConfirmed`; an isolated-world listener reports only the fact that a trusted
+  input event, never one the app dispatched, hit a password field). Either way it saves
+  nothing, since it has no sign-in to replay or cannot tell which password worked, and the form
+  asks for the working password. Save is open only while the form still shows exactly what the last Open Page or Sign
+  In started with. The start page, browse hosts, and fill hosts are what the sign-in observed,
+  never what the form says. **Sign In Again fills a saved password or authenticator key only on
+  the hosts recorded for that site**, into a form that sends to one of them; on any other host
+  it stops (`unvettedHost`) and asks for the secret to be typed. A texted or emailed code the
+  site never asked for is saved as no code, and the window says so.
+- **Signed-in sites: a run reads pages and follows offered links, and does nothing else**
+  (`SiteAccess`, `ProVisorTools`). No tool types, presses a button, or takes an address:
+  `open_site` names a granted site, `follow_link` a link by its number on the page the visit
+  last read, `read_more` a part of that page. Links come from nowhere else, a visit follows at
+  most `SiteAccess.linksPerVisit` (12), and following one is a `load` of its address, never a
+  click on the page. Signing in happens only inside `open_site`, before the first page is
+  returned; a page reached by a link never gets a fill. The navigation policy
+  (`SiteNavigationPolicy`) loads a main frame only over `https` from a host in the site's
+  browse list, matched exactly, with no port or credentials; a frame inside a page may load from
+  any `https` host. A link is offered only if it passes that test and neither its text nor its
+  address (path, query, and fragment, read as written and percent-decoded) holds a refused word
+  whole — sign-out, delete, remove, cancel, deactivate, enroll, confirm, pay, transfer, send,
+  unsubscribe, submit, redeem, apply, terminate, revoke, close account — so `payment-methods` is
+  offered and `/pay` is not. The policy reads a link's text whole before it is cut for display,
+  so a refused word past the cut still refuses the link. The list guards against
+  state-changing links and guarantees nothing: a GET to the site's own hosts is still a GET,
+  and a link another user posted on a granted site is offered like any other. New windows are
+  refused, downloads and unrenderable responses cancelled, credential prompts declined, and a
+  page's dialogs answered at once. Page text is cleaned and capped before a model sees it
+  (`PageText`: control and format characters removed, so an ANSI escape or a bidirectional
+  override cannot redraw a line; 400,000 characters kept and served in parts of 40,000; at most
+  200 links, each text cut at 120). **A reply puts what the app wrote first and the page's own
+  text last** (`ProVisorTools.pageReply`: the data-not-instruction line, site and title,
+  address, the numbered links, then the text, which runs to the end of the message), so a page
+  cannot imitate the list of links. Addresses are shown without their query or fragment, which
+  can carry session data. A call from a run that has ended is refused before it touches a
+  site, and a run that ends mid-call has its visit closed when the call returns.
+- **A keep-signed-in grant holds a browser session and no secret.** The user signs in on the
+  page themselves; the grant (`remembersPassword == false`) carries an empty user name and
+  password, no key, no code source, no recorded steps, and only the sign-in host to fill on,
+  and `SiteGrant.isValid` rejects one that carries more. **Save requires that a sign-in was
+  seen** (`SiteEnrollment.finishKeepingSession`): a page with no password field reads as signed
+  in to the probe, and a public home page has none, so the enrollment refuses (`signInNotSeen`)
+  unless some page of it showed a password field, a code field, or a sign-in frame, or the
+  person typed into a password field, before the signed-in page it saves. When the session
+  ends the site needs the person: `SiteAccess` never signs in to such a grant and counts no
+  attempt, and Settings shows **Needs you** until the user signs in again.
+- **A site the agent asks for is an offer, never a grant** (`Proposal.site`,
+  `SiteFormModel.requestedStart`). A `confirm` proposal may name the site that stands between
+  the agent and a check in a `site` field, which `Proposal.parsedSite` accepts only as a plain
+  ASCII host name, lowercased as ASCII alone (Unicode case mapping would turn a look-alike
+  letter into a real one); a bad value drops the field and keeps the proposal. The text is
+  model output shaped by mail from anyone, and a look-alike address placed in the app's own
+  sign-in window would arrive with the app's authority. So the review window's **Sign In
+  to <host>…** button opens the site window with its address field **filled only when that
+  exact host is in the user's own browsing history on two different local days**
+  (`BrowsingHistory`: `https` pages on that host alone, across Chromium-family profiles and
+  Safari; a parent, a subdomain, a port, or an `http` page counts for nothing, and days are
+  counted, not visits, since one click can count twice). Otherwise the field starts empty and a
+  sentence names the host for the user to type. A host that is already a granted site opens
+  Sign In Again instead. Saving settles the proposal as a **compare-and-set against the file on
+  disk** (`ProposalStore.settleSiteRequest`): it is recorded done, with no run started, only
+  while the file is still open and still names the site the window was opened for, and only
+  that site settles it. The queue shows, and the banner announces, one open request per site,
+  the earliest (`ProposalQueue.repeatedSiteRequests`).
+- **Texts are read-only, bounded, and masked for a model** (`MessagesStore`). The database
+  opens `SQLITE_OPEN_READONLY`, each call on a connection of its own that closes before the call
+  returns (an open read transaction would pin the write-ahead log, and a fresh connection sees
+  rows Messages has written there but not yet merged), with every value bound as a parameter and
+  at most 2,000 rows scanned. A message's text is its `text` column, else the string in its
+  `attributedBody` archive, read by a bounded extractor (`MessageBody`: an archive over 512 KiB
+  or text over 20,000 bytes reads as absent, and every offset and length is checked against the
+  buffer, never taken on trust). **A sign-in code is taken only from the sender recorded when
+  the user granted the site, and only from rows after a baseline** taken before the code was
+  requested (`latestCode(afterRowID:sender:)`; row ids order messages by arrival, so no clock
+  decides). Enrollment alone takes the first code from any sender (`firstCode`), while the user
+  watches, to learn whom the site texts from, and the window shows that handle for the user to
+  confirm. **What a model sees has digit groups masked** (`messagesForModel`, the only read for
+  showing texts to a model): in any message that may carry a code, meaning one from a short-code
+  sender or holding a code-related word, every run of 3 to 8 digits becomes `••••`, and a
+  `containing` filter matches the masked text, so a search for a guessed code finds nothing.
+  **The `provisor.readTexts` setting, off by default, gates every read**: the tool, the code
+  sources, and the baseline all consult it (`TextsSwitch` carries it to the code sources, which
+  run off the main actor), and the bridge offers `read_texts` only while it is on. Reading needs
+  Full Disk Access, and any failure to read is reported as that missing grant, the cause the user
+  can fix.
+- **The bridge serves a run's tools only to that run's own helper** (`Services/AgentBridge/`).
+  The CLI starts `SuperVisor --agent-bridge` as an MCP server over stdio from a per-run
+  configuration file, and the helper relays each call over `agent-bridge.sock`. The server
+  examines a caller in this order, and every refusal is a fixed sentence plus a log line naming
+  the reason alone: (1) **the caller's process runs this app's own code** (its audit token,
+  which names one process even if its pid is reused, satisfies the app's designated
+  requirement), judged before anything the caller sends is read, so a program that is not the
+  app learns nothing about tokens, versions, or runs; (2) the request is one well-formed line of
+  at most 64 KiB, read within a second; (3) its token names a live run, compared against every
+  registered token in constant time; (4) the helper's bundle version equals the app's, so a
+  helper from a bundle Sparkle replaced mid-run is told to start a fresh run; (5) **the run's
+  root process is the signed CLI** (`AgentExecutableTrust`: the CLI's bundle identifier, an
+  Apple-anchored chain, and the vendor's team, judged on the running process once the app has
+  started it and recorded with its start time; the CLI's path is writable by anything running
+  as the user, so a replaced binary is never trusted), the server waiting up to 2 s for the app
+  to record the pid, since the helper can connect first; (6) **the caller is a direct child of
+  that root** (`maximumPeerDepth` 1), the root matched by start time as well as pid so a reused
+  pid is not the root; (7) the caller's signature is judged again, because the parent walk went
+  by pid and the second judgement shows the pid still belongs to the caller verified; (8) the
+  tool is on the run's list. At most eight connections are served at once. **The helper
+  verifies the app before it sends its token**, which it is handed in its environment and
+  holds as its only secret. The helper runs before AppKit and the app's log exist, and **its
+  standard output carries protocol lines and nothing else**. A helper started with no token
+  (the shared `connector-hold.json`) offers no tools and never contacts the app; it only holds
+  its first `initialize` answer back (see ProVisor). A debug build (`make-app.sh` without
+  `--release`) honours `SUPERVISOR_BRIDGE_TRUST_ANY_SERVER=1`, which skips the helper's
+  check on the server so a test runner can serve it; a release build has no such switch. After
+  a CLI update re-run the `bridge` self-check: should the CLI ever start MCP servers through an
+  intermediary, `helperDepth` exceeds `admittedDepth` and every call is refused with "SuperVisor
+  refused this connection."
+- **Child processes inherit nothing the app holds** (`Services/Process/`). macOS attributes a
+  child's access to protected data to the app that started it, so **with Full Disk Access
+  granted to the app, a child started the ordinary way reads the Messages database and one
+  started with responsibility disclaimed cannot** (the `messages` self-check reports both
+  cases, and `disclaimed-exec` the same for the `--exec-disclaimed` launcher). An agent reads
+  mail from anyone, so every agent process, ProVisor's and FileShelf's alike, is started with
+  responsibility disclaimed (`ProcessResponsibility`,
+  the private `responsibility_spawnattrs_setdisclaim` reached by `dlsym`) and **is not started
+  at all when that fails**: `AgentTaskService` throws `launchFailed` rather than run an agent
+  that would answer for the app's grants. It inherits no descriptor beyond its three standard
+  streams (`POSIX_SPAWN_CLOEXEC_DEFAULT`; the disclaim is applied after the spawn flags, at
+  every spawn site). Every child the app starts, agent or helper, gets `ChildEnvironment`'s
+  fixed short environment (a fixed `PATH`, and the account's name, home, and temporary folder
+  from the system's record of the user), so a variable planted in the app's own environment,
+  through `launchctl setenv` say, cannot steer what a child loads or runs. A third-party helper
+  whose binary sits where anything running as the user can replace it (the Codex app-server) is
+  started through `SuperVisor --exec-disclaimed <absolute path> args…` (`DisclaimedExec`),
+  which replaces the app's executable with that program, disclaimed, with only the standard
+  streams open; any failure ends it with status 127 and one fixed line on stderr.
+- **An emailed sign-in code is read by a run that can read mail and nothing else**
+  (`EmailedCodeLookup`, `ProVisorCommand.emailedCodeArguments`). The run holds the CLI's
+  small-model alias, `--tools ToolSearch` (no file tools), only the Gmail read rules found on
+  the sealed list, and no bridge; it works in an empty folder of its own, within six turns and
+  $0.15, and answers with digits or `NONE`. **Only a whole answer of 4 to 8 digits is a
+  code**, so whatever an email tells the run, the most it can do is choose which digits are
+  typed into the code field recorded for that site, where a wrong code fails the sign-in and
+  parks the site until the user signs in again; nothing else it says is used. An answer of
+  `NONE` waits 20 s and asks once more. The sender in the prompt is the one recorded at grant
+  time and must match `\A[A-Za-z0-9+@._-]{2,80}\z` before it is interpolated. The lookup sits
+  outside the acting queue, so a pass waiting on a sign-in cannot deadlock behind it, and it
+  is the center's own: **while ProVisor is disabled a sign-in that asks for an emailed code
+  gets none**.
 
 ## Module Roster
 
@@ -574,8 +827,8 @@ names below are the code paths.
   AppleScript, from the row, the banner, or **⌘⇧⎋** without the sheet open (`swarm.jumpHotKey`,
   default on). A session hosted anywhere else — the Claude desktop app (which runs the CLI under
   a pty of its own, so a tty alone does not mean iTerm2), an editor's terminal, Terminal.app — is
-  reached through `SessionHost`: the session PID's parents are walked (`sysctl`) to the first
-  regular app, resolved once per session, and Jump brings that app forward through
+  reached through `SessionHost`: the session PID's parents are walked (`ProcessAncestry`, over
+  `sysctl`) to the first regular app, resolved once per session, and Jump brings that app forward through
   `NSWorkspace.openApplication` (an accessory app cannot satisfy `activate`'s cooperative
   activation). That focuses the app, not the specific conversation inside it — except in the
   Claude desktop app, which Jump opens on the session itself: a desktop session's registry record
@@ -658,7 +911,8 @@ names below are the code paths.
 - **ProVisor** (`Modules/ProVisor`) — a background agent that reads the user's own data and
   proposes things they would want done but have not thought to ask for (an unused subscription
   still billing, a question nobody answered, senders never opened). **Off until enabled**
-  (`SettingsStore.optInModules`): it reads mail and spends Claude quota. **The app's part is
+  (`SettingsStore.optInModules`): it reads mail and spends Claude quota. Reading texts is a
+  second, separate opt-in (`provisor.readTexts`, default off). **The app's part is
   deliberately thin; the judgment lives with the agent.** `ProVisorCenter` (a singleton, because
   Settings needs the live state and the registry builds a second, never-activated module set
   just to list names) starts a headless Claude Code run through
@@ -668,22 +922,28 @@ names below are the code paths.
   - **The agent's home** is `~/Library/Application Support/SuperVisor/ProVisor/`: `CHARTER.md`
     (its standing brief, seeded once from `Resources/provisor-charter.md` and then the user's to
     edit), `access.json` (which connector tools each kind of run may call), `standing.json`
-    (the standing approvals), and `workspace/` — the run's working directory — holding
+    (the standing approvals), `sites.json` (the granted sites as Settings lists them; their
+    secrets and the hosts those may go to are in the Keychain), `runs/` (one tool-channel
+    configuration per run that carries the bridge, holding that run's token, deleted when the
+    run ends and swept at launch if a crash left one, beside the shared token-free
+    `connector-hold.json`), and `workspace/` — the run's working directory — holding
     `proposals/` (one JSON file each), `memory/` (the agent's own notes: what it has learned
-    about the user, what it has already examined), and `followups/` (checks owed after a
-    decision, one short note each). Each run starts with no recollection, so those notes and
-    the statuses on past proposals are all it knows.
+    about the user, what it has already examined), `followups/` (checks owed after a decision,
+    one short note each), and `raised/` (items a reviewed run wants put to the user, which the
+    app admits into `proposals/` itself). Each run starts with no recollection, so those notes
+    and the statuses on past proposals are all it knows.
   - **The agent does the checking, and the user hears only when a check goes wrong.** A run
     never hands the user something it could look up (`ProVisorCommand.closingInstructions`,
     and "Do the checking yourself" in the protocol). What a reviewed run cannot confirm yet —
-    a receipt that has not arrived — it writes to `followups/<proposal id>.md`; each scouting
-    pass re-checks the open ones and settles them silently when they pass. One that turns out
-    wrong, or that the agent's tools cannot reach at all, is raised at once as a new proposal
-    of kind `confirm`, whose `why` names the access that would let the agent check it itself:
-    a connector tool to allow in `access.json`, or a site that needs the user's sign-in. The
+    a receipt that has not arrived — it writes to `followups/<proposal id>.md`; a follow-up
+    pass (below) and each scouting pass re-check the open ones and settle them silently when
+    they pass. One that turns out wrong, or that the agent's tools cannot reach at all, is
+    raised at once as a new proposal of kind `confirm`, whose `why` names the access that would
+    let the agent check it itself: a connector tool to allow in `access.json`, or a site that
+    needs the user's sign-in, named in the proposal's `site` field (see Untrusted Input). The
     scout writes that proposal itself; a reviewed run leaves it in `raised/` for
-    `RaisedItems.admit`. Follow-up notes are free text the agent writes for itself; the app
-    never parses them.
+    `RaisedItems.admit`. A follow-up note is free text the agent writes for itself; the app
+    reads only its first two lines (below) and acts on nothing in it.
   - **The brief is two documents with two owners**, joined and passed as
     `--append-system-prompt`. `CHARTER.md` is the user's: what to look for and what is worth
     proposing. `Resources/provisor-protocol.md` is the app's, read from the bundle on every run
@@ -696,8 +956,37 @@ names below are the code paths.
     Calendar. Connectors load only for a Claude-account sign-in, not an API key. The connector
     names in the defaults follow the documented naming but vary by account — the agent's closing
     summary, shown in Settings, says when a data tool it expected was missing.
-  - **A scouting pass** runs every `provisor.scoutHours` (0 = only when asked, 3, 6 default, 24)
-    or from **Look Now** in Settings. One sleeping task waits for the next pass; it is dropped
+  - **Sites and texts are two more sources, read through the bridge** by a scouting pass and a
+    follow-up pass (Untrusted Input says what bounds them). `open_site`, `follow_link`, and
+    `read_more` read pages of a granted site signed in as the user; `read_texts` reads recent
+    texts. A pass is told which sites it can read and whether texts are on, and the protocol's
+    "Sites and texts" section says how to use them. The tools are offered only while every
+    condition under Untrusted Input holds; otherwise the pass runs without them. **A headless
+    run's first turn starts before the account's connectors have connected**, so a quick run
+    has no mail tool on it. Measured with the real CLI, the first turn had no Gmail tool in 4
+    of 4 runs with no tool server, and in 2 of 3 with one that answered `initialize` at once,
+    and had it in 3 of 3 with one that answered after 4 seconds. **Every ProVisor run therefore
+    carries the bridge helper, which holds its first answer for
+    `ProVisorBridge.connectorSettle` (6 s)**, as its own server or, for a run with no tools,
+    as the shared token-free configuration; the `connectors` self-check re-measures it. Without
+    the hold a pass reports a mail tool missing that was seconds from connecting.
+  - **A follow-up pass** works through the notes in `followups/`. A note's first line is
+    `Status: open` and its second `Check from: yyyy-MM-dd`, the first local day the check can
+    be made; the app reads only those two lines, from a regular, non-symlink `*.md` file of at
+    most 64 KiB, and a missing or unreadable date leaves the note due (`FollowUpNotes`). A pass
+    is owed when a note is open and due, or once after the user saved a site from a window a
+    proposal's request opened, so the check that waited on it is made with it
+    (`FollowUpDemand`). It starts a minute after it is owed, at least ten minutes after the
+    last start, and at most six a local day (`FollowUpSchedule`; the ledger is in
+    `UserDefaults`). It waits while a scouting pass or another follow-up pass runs, is dropped
+    on sleep and re-armed on wake like the scouting timer, carries the scout's confinement and
+    bridge with a smaller allowance (30 turns, $0.75, 10 minutes), looks for nothing beyond the
+    owed checks, and leaves the scouting report in Settings alone. Proposals it writes are
+    admitted and announced like a scout's, and **a standing approval admitted from one draws on
+    the scouting pass's allowance of five**: only a scouting pass resets that count
+    (`automaticRunsThisPass`).
+  - **A scouting pass** runs every `provisor.scoutHours` (0 = only when asked, 1, 3, 6 default,
+    24) or from **Look Now** in Settings. One sleeping task waits for the next pass; it is dropped
     on system sleep and re-armed on wake, never fires sooner than 45 s after launch or wake, and
     backs off 15 min after a failed pass (`ProVisorSchedule`). A pass is capped at 80 turns, $2,
     and 20 minutes; one cut off by a limit keeps the proposals it had already written.
@@ -749,10 +1038,33 @@ names below are the code paths.
     rule and offers **Stop Doing This**; Settings lists every rule in force with **Remove**. A
     revoked rule stays on file, and the scout is told never to offer it again. Something
     admitted under a rule is not announced: only what needs a decision raises the banner.
-  - **Attention:** a finished run that adds proposals needing a decision — a scouting pass, or
-    a reviewed run raising something it could not settle — raises the attention glow and an
-    8-second banner carrying a count only (`ProposalAnnouncer`; each proposal is announced
-    once, since a pass and a reviewed run can overlap). No compact presence.
+  - **Attention:** a finished run that adds proposals needing a decision — a scouting pass, a
+    follow-up pass, or a reviewed run raising something it could not settle — raises the
+    attention glow and an 8-second banner carrying a count only (`ProposalAnnouncer`; each
+    proposal is announced once, since passes and a reviewed run can overlap, and a repeated
+    request for a site already asked for is not news). No compact presence.
+  - **Settings › ProVisor** lists the granted sites, each with its name, host, and one of
+    **Needs you**, **Signed in** *(when)* (with "asks you when it signs you out" for a kept
+    session), or **Not signed in yet**, and with **Sign In Again** and **Remove**. Remove
+    deletes the Keychain item, the registry entry, and the cookies and site data the site's
+    browse hosts left, except what another granted site shares (data is kept per registrable
+    domain). It also holds **Add Site…**, the **Read my texts** toggle with a Full Disk Access
+    row that opens System Settings while a read fails, and a line naming the condition that
+    pauses site and text reading when one fails.
+  - **The site window** (`ProVisorSiteWindow`) is one reused window, the form on the left and
+    the live page on the right. **Keep me signed in**, the default, asks for the address only:
+    the user signs in on the page and the grant keeps the session and no secret. **Sign in for
+    me** also takes the user name, password, and a code source (none, authenticator key,
+    texted, or emailed); the app fills what it recognises while the user watches, and the user
+    can finish in the page. The bar above the page shows the host and padlock of the page
+    *displayed* (`committedURL`, since `webView.url` names a page the moment its load starts)
+    and says **Not secure** when any of its content came over an unencrypted connection.
+    **The window's size is the user's**: its hosting controller carries no sizing options (the
+    hazard `FittedWindow` describes), so nothing the form shows or hides resizes it from inside
+    a layout pass. Closing it by any route ends the enrollment, which forgets the typed secrets
+    and closes the browser. A proposal that names a site gives the review window a **Sign In
+    to <host>…** button (**Sign In Again to <site>…** for a granted one) that opens this window
+    for that request.
 
 **`Modules/SystemHUD/`** (volume / brightness / keyboard-backlight HUD — `VolumeController`,
 `BrightnessController`, `KeyboardBacklightController`, `MediaKeyMonitor`) is present but **NOT wired
@@ -764,7 +1076,8 @@ at runtime.
 - **`Services/Logging/`** — `AppLog` sends sparse lifecycle, state-transition, helper, and failure
   events to the unified log while `FileLogMirror` keeps a plain rotating file for direct
   inspection. Callers log only names, states, counts, durations, and error descriptions — never
-  file, OCR, or clipboard content — and logging failures never throw or crash the app.
+  file, OCR, clipboard, page, or message content, browsing history, or an address with a query
+  string — and logging failures never throw or crash the app.
 - **`Services/Attention/AttentionGlowCenter.swift`** — a module-agnostic one-shot attention signal
   read by the root view and cleared when the sheet opens.
 - **`Services/Hotkeys/GlobalHotKey.swift`** — a system-wide shortcut over Carbon's
@@ -810,8 +1123,8 @@ at runtime.
   the main actor only materializes the resulting `NSImage`.
 - **SIGPIPE is ignored process-wide** (`AppDelegate.applicationDidFinishLaunching`). The app writes
   to pipes/sockets whose peer can vanish at any moment (codex app-server, the headless agent CLI,
-  the perl now-playing adapter, hook clients on the swarm socket); the default signal action kills
-  the process with **no crash report and no stderr**. With it ignored, such writes fail with EPIPE
+  the perl now-playing adapter, clients of the swarm and bridge sockets); the default signal
+  action kills the process with **no crash report and no stderr**. With it ignored, such writes fail with EPIPE
   and flow into each client's error path — which every helper client must therefore have.
 - **`Services/LocalIntelligence/`** — the single FoundationModels touchpoint for on-device text
   generation; routing and UI lifecycle code remain provider-agnostic.
@@ -833,6 +1146,71 @@ at runtime.
   never matches on removal and leaks the registration on every remove. `LocalAudioOutputMonitor`
   answers "is any other process producing sound here?" from CoreAudio's per-process objects,
   event-driven through listeners on the process list and on each process's output state.
+- **`Services/IPC/`** — `UnixSocketListener` binds, listens, and accepts on a Unix-domain stream
+  socket (the file mode 0600 inside a folder created 0700, a socket file left by an earlier
+  process replaced) and hands each connection's descriptor to its owner blocking, close-on-exec,
+  and exempt from SIGPIPE; `UnixSocket` holds the address, connect, and option plumbing both
+  ends share. `AgentEventSocket` (SwarmVisor's hook socket) and `AgentBridgeServer` are built on
+  the listener. **`SO_NOSIGPIPE` is set on the listening socket and inherited**: setting it on an
+  accepted connection fails with `EINVAL` once the peer has closed, which a client that writes
+  and exits can do before the accept. `start()` and `stop()` run synchronously on the listener's
+  queue, so neither may be called from it. `sun_path` holds 104 bytes: a home directory long
+  enough to overrun it fails the bind (`pathTooLong`, logged), the bridge helper takes
+  `SUPERVISOR_BRIDGE_SOCKET` as an override, and tests keep their socket paths short.
+- **`Services/Process/`** — `ProcessResponsibility` (the disclaim call by symbol, reporting when
+  it is absent so a caller can refuse to proceed), `DisclaimedExec` (`--exec-disclaimed`),
+  `ChildEnvironment` (the fixed environment), and `ProcessAncestry` (a process's parent and
+  start time from the kernel's process table, which `SessionHost` and the bridge share). The
+  reasons are under Untrusted Input. **`NSHomeDirectory()`, `NSUserName()`, and
+  `NSTemporaryDirectory()` ignore `$HOME`, `$USER`, and `$TMPDIR`**, so setting those for a
+  test process or a child moves nothing they report.
+- **`Services/AgentBridge/`** — the tool channel between an agent run and the app (rules under
+  Untrusted Input). `AgentBridgeServer` is the app's end; `AgentBridgeHelper` is the
+  `--agent-bridge` mode, speaking MCP over stdio through `AgentBridgeProtocol` (a tool result is
+  cut at 100,000 characters) and newline-delimited JSON over the socket through
+  `AgentBridgeWire` (a request line is at most 64 KiB, a reply 2 MiB); `PeerIdentity` holds the
+  caller checks (audit token, designated requirement, parent walk) and `AgentExecutableTrust`
+  the CLI's signing requirement, the one place the CLI's vendor is named. `--exec-disclaimed` and
+  `--agent-bridge` run before `NSApplication` exists, from `SuperVisorMain.main()`, and use
+  neither AppKit nor the app's log; **the bridge helper ignores SIGPIPE itself**, since the app's
+  process-wide setting does not reach it. ProVisor's side is `ProVisorBridge` (tokens, per-run
+  configuration, eligibility) and `ProVisorTools` (the four tools).
+- **`Services/Sites/`** — signed-in page reading and the app-side sign-in (rules under
+  Untrusted Input): `SiteVault` (Keychain, one item per site), `SiteRegistry` (`sites.json`,
+  written atomically at mode 0600, at most 50 sites; a symlink or an oversized file reads as
+  empty), `TOTP`, `SiteNavigationPolicy`, `PageSnapshot`, `SiteBrowser`, `SignInBroker`,
+  `SiteEnrollment`, and `SiteAccess`, the one writer of `sites.json` and what a run's tools call.
+  `SiteBrowser` is a `WKWebView` in a window that is never ordered on screen (an enrollment
+  moves the view into the site window for the user to watch), on a persistent data store of its
+  own (`WKWebsiteDataStore(forIdentifier:)`, under `~/Library/WebKit/<bundle id>/WebsiteDataStore`)
+  with a Safari user-agent string, because sites refuse WebKit's bare one. A script's result
+  crosses one boundary (`ScriptValue`: types checked, depth and sizes bounded) before anything
+  reads it. **`simulatedPages` is the test seam**: it answers each main-frame navigation with
+  HTML that `loadSimulatedRequest` serves at the request's own `https` URL, so a page sees a real
+  origin, path, and secure context while nothing leaves the machine, and a navigation the
+  closure answers with nil fails. **That load re-enters the navigation delegate**, which
+  recognises its own serve (`pendingServe`) and lets it through; frames other than `about:` ones
+  are cancelled and sub-resources are not intercepted, so simulated pages must be
+  self-contained. `TestSite`, in the test target, is an in-memory site built on the seam.
+- **`Services/Messages/MessagesStore.swift`** — a read-only view of
+  `~/Library/Messages/chat.db`, which needs Full Disk Access. It reads texts since a date (one
+  sender, or containing a phrase), the newest row id, and the newest or first code message after
+  a row id. `SignInCode` finds and masks codes: a candidate is a standalone run of 4 to 8 digits
+  (or two groups of three), not one inside a date, price, or phone number, and not one after an
+  account word (`card ending 4821`). `message.date` counts nanoseconds since 2001-01-01 on
+  current macOS and seconds on old versions, and the date filter handles both. Two reads exist
+  on purpose: `messages` (as sent, for the app's own matching) and `messagesForModel` (masked,
+  the only read for anything a model sees).
+- **`Services/Browsing/BrowsingHistory.swift`** — answers one question and exposes nothing else
+  (no address, title, or date leaves it): has the user visited exactly this host over `https` on
+  at least two distinct local days? It reads each Chromium-family profile's `History` file,
+  opened immutable because the browser keeps it locked while it runs, and Safari's `History.db`.
+  **Chrome's folder and Safari's are protected by macOS and are read only with Full Disk
+  Access**: touching them without it can put a consent prompt in front of the user, so they are
+  skipped unless Safari's file opens (`canReadProtectedData`), while the other browsers' folders
+  are read regardless. Anything that keeps a file from being read (missing, no access, another
+  schema, busy) reads as no visits, so an unfamiliar browser layout fails into an empty address
+  field. The `history` self-check confirms both layouts.
 
 ## Theme & Settings
 
@@ -887,7 +1265,7 @@ artifacts:
 
 - The app logs lifecycle/state/helper/failure events to unified-log subsystem
   `com.supervisor.SuperVisor` (categories: `engine`, `module`, `swarm`, `calls`, `media`, `usage`,
-  `agentDispatch`, `fileShelf`, `flow`, `provisor`) and mirrors notice/error lines to
+  `agentDispatch`, `fileShelf`, `flow`, `provisor`, `sites`) and mirrors notice/error lines to
   `~/Library/Logs/SuperVisor/SuperVisor.log` (1 MiB rotation, two generations kept). Query it with
   `/usr/bin/log show --predicate 'subsystem == "com.supervisor.SuperVisor"'`.
 - A crash (`fatalError`, force-unwrap, EXC_BAD_ACCESS) writes
@@ -900,10 +1278,20 @@ artifacts:
   processes' messages are often privacy-redacted, so search by PID as well.
 - `pgrep -f SuperVisor.app` and `ps | grep` also match the **perl now-playing helper** (its argv
   contains the bundle path). Match the executable exactly (`ps -o comm | grep "MacOS/SuperVisor$"`)
-  before concluding the app is alive.
+  before concluding the app is alive. That executable is also the bridge helper (`--agent-bridge`,
+  one per ProVisor run in progress) and a self-check instance, so read its arguments too
+  (`ps -o pid,args`): a helper alone is no sign the app is up.
 - The swarm socket (`~/Library/Application Support/SuperVisor/agent-hooks.sock`) doubles as a
   liveness/timeline record: it exists iff an instance bound it and
   died uncleanly since; its mtime is the moment that instance's SwarmModule activated.
+
+**A pass can run without its site and text tools while nothing fails.** The `provisor` log
+carries `site and text tools off: <reason>` (`nothingGranted`, `accessNotSealed`,
+`cliNotTrusted`, `disclaimUnavailable`, `serverFailed`) when a pass starts without them, and
+`tool <name>: <outcome>` for each call; Settings states the reason, `nothingGranted` apart. A
+bridge refusal logs `agent bridge refused: <reason>` in `agentDispatch`, written to the file
+once per reason per 30 s with the rest at debug level in the unified log, and a sign-in logs
+`sign-in for <host>: <result>` in `sites`.
 
 **A fresh screenshot with no `com.apple.metadata:` attributes is a Spotlight symptom, not a
 capture bug.** `screencapture` applies `kMDItemIsScreenCapture` through the metadata framework,

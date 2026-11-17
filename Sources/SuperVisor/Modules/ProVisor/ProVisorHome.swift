@@ -29,6 +29,8 @@ enum ProVisorSetupError: Error, LocalizedError {
 ///   workspace/     the agent's working directory
 ///     proposals/   one JSON file per proposal
 ///     memory/      the agent's own notes between runs
+///     followups/   checks owed after a decision, one note each
+///     raised/      items a reviewed run wants put to the user, admitted by `RaisedItems`
 /// ```
 ///
 /// The brief, the access list, the standing approvals, and each run's tool-channel
@@ -182,10 +184,11 @@ enum ProVisorClock {
 /// Which connector tools each kind of run may call, read from `access.json`.
 ///
 /// This is the boundary that makes an agent reading untrusted mail safe to leave unattended.
-/// The scout holds read tools only, so nothing it reads can make it send, change, or delete.
-/// The tools that change something are granted to a run only after the user has approved the
-/// one proposal that run carries out — or, for a run under a standing approval that nobody
-/// reviews, a shorter list still: only what can be undone.
+/// The scout holds connector tools that read. The tools that change something are granted to
+/// a run only after the user has approved the one proposal that run carries out — or, for a
+/// run under a standing approval that nobody reviews, a shorter list still: only what can be
+/// undone. While the scout's list is sealed (`sealedReadRules`), a scouting or follow-up pass
+/// may also read granted sites and the user's texts through the bridge (`ProVisorBridge`).
 struct ProVisorAccess: Equatable, Sendable {
     /// Read-only data tools: what the scout looks through.
     let scout: [String]
