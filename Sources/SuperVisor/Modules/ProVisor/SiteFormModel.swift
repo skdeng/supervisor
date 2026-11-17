@@ -84,11 +84,13 @@ final class SiteFormModel: ObservableObject {
     struct SignInRequest: Equatable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
         let address: String
         let username: String
-        let password: String
+        /// Nil when the password is withheld from the app's fills.
+        let password: String?
         let authenticatorKey: String?
         let codeKind: SiteGrant.CodeKind
         let codeSender: String?
-        /// The hosts the password may be filled on, when it is the saved one; nil for a typed one.
+        /// The hosts the password, and with it the user name, may be filled on, when it is the
+        /// saved one; nil for a typed one.
         let passwordHosts: [String]?
         /// The same for the authenticator key.
         let authenticatorHosts: [String]?
@@ -96,6 +98,76 @@ final class SiteFormModel: ObservableObject {
         var description: String { "SignInRequest(redacted)" }
         var debugDescription: String { description }
         var customMirror: Mirror { Mirror(self, children: []) }
+
+        /// A sign-in again with everything `grant` saved, the request `currentDetails` makes
+        /// when nothing is typed over the saved values: the saved password, and the saved
+        /// authenticator key, go only to the hosts the grant fills on.
+        init(saved grant: SiteGrant) {
+            self.init(saved: grant, password: grant.password)
+        }
+
+        /// A sign-in again with everything `grant` saved but its password, which is withheld:
+        /// the person types it into the page.
+        init(savedWithholdingPassword grant: SiteGrant) {
+            self.init(saved: grant, password: nil)
+        }
+
+        private init(saved grant: SiteGrant, password: String?) {
+            address = grant.signInURL.absoluteString
+            username = grant.username
+            self.password = password
+            codeKind = grant.codeKind
+            switch grant.codeKind {
+            case .none:
+                authenticatorKey = nil
+                codeSender = nil
+                authenticatorHosts = nil
+            case .authenticator:
+                authenticatorKey = grant.authenticatorKey
+                codeSender = nil
+                authenticatorHosts = grant.fillHosts
+            case .text, .email:
+                authenticatorKey = nil
+                codeSender = grant.codeSender
+                authenticatorHosts = nil
+            }
+            passwordHosts = grant.fillHosts
+        }
+
+        init(
+            address: String,
+            username: String,
+            password: String?,
+            authenticatorKey: String?,
+            codeKind: SiteGrant.CodeKind,
+            codeSender: String?,
+            passwordHosts: [String]?,
+            authenticatorHosts: [String]?
+        ) {
+            self.address = address
+            self.username = username
+            self.password = password
+            self.authenticatorKey = authenticatorKey
+            self.codeKind = codeKind
+            self.codeSender = codeSender
+            self.passwordHosts = passwordHosts
+            self.authenticatorHosts = authenticatorHosts
+        }
+
+        /// Starts an assisted sign-in with this request (`SiteEnrollment.begin`).
+        @MainActor
+        func begin(on enrollment: SiteEnrollment) async throws {
+            try await enrollment.begin(
+                signInAddress: address,
+                username: username,
+                password: password,
+                authenticatorKey: authenticatorKey,
+                codeKind: codeKind,
+                codeSender: codeSender,
+                passwordHosts: passwordHosts,
+                authenticatorHosts: authenticatorHosts
+            )
+        }
     }
 
     /// The saved secrets and record a sign-in-again form stands on.
@@ -491,16 +563,7 @@ final class SiteFormModel: ObservableObject {
         finished = nil
         started = .signingIn(request)
         do {
-            try await enrollment.begin(
-                signInAddress: request.address,
-                username: request.username,
-                password: request.password,
-                authenticatorKey: request.authenticatorKey,
-                codeKind: request.codeKind,
-                codeSender: request.codeSender,
-                passwordHosts: request.passwordHosts,
-                authenticatorHosts: request.authenticatorHosts
-            )
+            try await request.begin(on: enrollment)
         } catch {
             let problem = SiteSaveProblem.ofSignIn(error)
             self.problem = problem

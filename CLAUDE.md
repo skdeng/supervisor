@@ -526,9 +526,11 @@ sink. Preserve these guards when touching the relevant code:
   nothing, since it has no sign-in to replay or cannot tell which password worked, and the form
   asks for the working password. Save is open only while the form still shows exactly what the last Open Page or Sign
   In started with. The start page, browse hosts, and fill hosts are what the sign-in observed,
-  never what the form says. **Sign In Again fills a saved password or authenticator key only on
-  the hosts recorded for that site**, into a form that sends to one of them; on any other host
-  it stops (`unvettedHost`) and asks for the secret to be typed. A texted or emailed code the
+  never what the form says. **A sign-in started with a site's saved secrets fills the user name, the password, and the
+  authenticator key only on the hosts recorded for that site**, into a form that sends to one
+  of them; on any other host it stops (`unvettedHost`) and asks for it to be typed. The user
+  name is held to those hosts too, since a fill on a page the sign-in was sent through would
+  otherwise add that page's host to the refreshed grant's fill hosts. A texted or emailed code the
   site never asked for is saved as no code, and the window says so.
 - **A password the person typed is kept only on their say, and only for the page it was typed
   on** (`TypedCredential`, `CredentialCapture`, `PasswordOffer`). The sign-in window can offer
@@ -538,8 +540,8 @@ sink. Preserve these guards when touching the relevant code:
   - **Recording is on only in the sign-in window, only for an address something vouched for**
     (a granted site's saved address, or a host the browsing-history check recognised), and
     only while `provisor.offerPasswords` is on (`SiteBrowser.Observation.typingAndCredentials`,
-    reached only through `SiteAccessCenter.makeRecordingEnrollment`). The Add Site form, Sign
-    In Again, a window that asks for a typed address, and every hidden browser never record.
+    reached only through `SiteAccessCenter.makeRecordingEnrollment`). The Add Site form, a
+    window that asks for a typed address, and every hidden browser never record.
     The window says so before anything is typed.
   - **The script** runs in the app's isolated world, in the main frame only, and reports a
     trusted `input` event into a password field or a user-name field: the value, the field's
@@ -1186,8 +1188,8 @@ names below are the code paths.
     to <host>…** button (**Sign In Again to <site>…** for a granted one) that opens this window
     for that request.
   - **The sign-in window** (`SiteSignInModel`, `ProVisorSignInView`) is what every request to
-    sign in opens: a notch prompt, the review window's button, and Settings › Sign In Again
-    for a site kept by its session. It shares the site window and its live page
+    sign in opens: a notch prompt, the review window's button, and Settings › Sign In Again,
+    for any site whose stored sign-in can be read. It shares the site window and its live page
     (`SiteWindowParts.swift`) and shows a title, one sentence, **Done**, and Cancel, with an
     address field only when no address is vouched for (see Untrusted Input). The user signs in
     on the page and presses Done once. **Done is always pressable and never presses itself**:
@@ -1199,13 +1201,38 @@ names below are the code paths.
     save would land on and refuses when that site's grant remembers a password
     (`SiteSignInModel.Destination`), which a typed address can otherwise reach; an existing
     kept-session site keeps its name and the date it was added. A page that fails to load
-    offers **Try Again**. A site with a saved password keeps the Sign In Again form. After
+    offers **Try Again**. After
     Done, when a typed password can be kept (see Untrusted Input), the window stays open on
     **Keep Password** / **Session Only**, showing the user name and the host it was typed on;
     when one was typed but cannot be kept it shows why and a Close button. **Follow-up passes
     are held while that offer is up** (`FollowUpHolds`): keeping the password saves the site a
     second time, which closes the visits open on it and would cut off the pass the sign-in
     just set off. The pass starts when the window closes.
+  - **A site with a saved password** opens the same window with the app filling its saved
+    secrets while the person watches and finishes what it cannot (a challenge, a new-device
+    check). Done then does the first of these that applies
+    (`SiteSignInModel.doneWithSavedPassword`):
+    1. the app's fill was accepted: the refreshed grant is saved;
+    2. it was not, and the person typed a password that can be kept: **Keep Typed Password** /
+       **Leave As Is**. **A replacement is the stored grant with only its password changed**
+       (`PasswordOffer.grant(replacingPasswordOf:)`), whenever the password was typed on one
+       of the site's recorded fill hosts: the person usually retypes only the password, often
+       on an error page, and a grant rebuilt from that typing would have no user name, no
+       code source, and a step on the wrong page. A password typed on a host the site did not
+       record is judged as a new sign-in is;
+    3. otherwise the stored grant is left exactly as it is and the person's sign-in is
+       recorded (`SiteAccess.personSignedIn`, after a hidden read confirms the stored grant
+       reads as signed in), so the site is read on its session until that ends.
+    **A password the site turned away is not submitted again** (`SiteRecord.passwordRejected`,
+    set when an unattended sign-in is still signed out after filling it, or when the window
+    saw the fill refused): the app makes no unattended attempt and asks the person, and the
+    window opens with the password withheld, so the person types the working one and can keep
+    it. A site that locks an account after repeated failures would otherwise be sent the same
+    wrong password on every lapse. After Done reaches a panel no saved secret is filled into
+    any page, and typing that the app's fill then overwrote is not a typed password. No path
+    saves a session, or a password, over a stored password without the Keep press. The form
+    this window replaced for such sites (`SiteFormModel`'s signing-in-again path) remains in
+    the code with nothing routing to it.
 
 **`Modules/SystemHUD/`** (volume / brightness / keyboard-backlight HUD — `VolumeController`,
 `BrightnessController`, `KeyboardBacklightController`, `MediaKeyMonitor`) is present but **NOT wired

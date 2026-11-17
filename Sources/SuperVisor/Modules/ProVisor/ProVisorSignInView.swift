@@ -5,8 +5,8 @@ import SwiftUI
 ///
 /// Only Done succeeding with nothing more to ask, Cancel, or the window's close button closes
 /// it; a page that looks signed in (`SiteEnrollment.appearsSignedIn`) only makes Done
-/// prominent, since a sign-in can pass through pages that look finished. Once the session is
-/// saved, a panel about the password (`SiteSignInModel.panel`) takes the place of the status
+/// prominent, since a sign-in can pass through pages that look finished. Once Done has
+/// something to ask or say, a panel (`SiteSignInModel.panel`) takes the place of the status
 /// and the buttons, and the window closes only on the person's answer.
 @MainActor
 struct ProVisorSignInView: View {
@@ -29,6 +29,9 @@ struct ProVisorSignInView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .tint(NotchTheme.brandColor)
+        // Full Disk Access is granted in System Settings, so the texts status is read again on
+        // coming back to the window.
+        .onWindowBecomesKey { center.refresh() }
     }
 
     private var pane: some View {
@@ -98,33 +101,67 @@ struct ProVisorSignInView: View {
                 Text(SiteSignInModel.offerQuestion(siteName: siteName))
                     .font(.callout)
                     .fixedSize(horizontal: false, vertical: true)
-                offerDetail("User name") {
-                    Text(username ?? SiteSignInModel.noUsernameTyped)
-                        .foregroundStyle(username == nil ? .secondary : .primary)
-                }
-                offerDetail("Typed on") {
-                    // The host as the location bar shows it: plain text that cannot be selected.
-                    HStack(spacing: 6) {
-                        Image(systemName: "lock.fill")
-                            .foregroundStyle(.secondary)
-                        Text(host)
-                            .fontWeight(.medium)
-                    }
-                }
-                if let problem = model.problem {
-                    Text(problem.signInWindowMessage)
-                        .font(.callout)
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                typedPasswordDetails(username: username, host: host)
             }
         case let .refused(refusal):
             if let sentence = refusal.sentence {
-                Label(sentence, systemImage: "key.slash")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                refusalLine(sentence)
             }
+        case let .replacement(_, username, host):
+            VStack(alignment: .leading, spacing: 12) {
+                Text(SiteSignInModel.replacementQuestion)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                typedPasswordDetails(username: username, host: host)
+            }
+        case let .savedPasswordKept(refusal):
+            signedInLines(refusal: refusal, message: SiteSignInModel.savedPasswordKeptMessage)
+        case let .savedPasswordTurnedAway(refusal):
+            signedInLines(refusal: refusal, message: SiteSignInModel.savedPasswordTurnedAwayMessage)
+        }
+    }
+
+    /// Why a typed password was not kept, when one was, above what became of the sign-in.
+    private func signedInLines(refusal: OfferRefusal?, message: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let sentence = refusal?.sentenceBesideSavedPassword {
+                refusalLine(sentence)
+            }
+            Label(message, systemImage: "checkmark.circle")
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func refusalLine(_ sentence: String) -> some View {
+        Label(sentence, systemImage: "key.slash")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// The user name as typed and the host the password was typed on, with the problem a failed
+    /// keep left.
+    @ViewBuilder
+    private func typedPasswordDetails(username: String?, host: String) -> some View {
+        offerDetail("User name") {
+            Text(username ?? SiteSignInModel.noUsernameTyped)
+                .foregroundStyle(username == nil ? .secondary : .primary)
+        }
+        offerDetail("Typed on") {
+            // The host as the location bar shows it: plain text that cannot be selected.
+            HStack(spacing: 6) {
+                Image(systemName: "lock.fill")
+                    .foregroundStyle(.secondary)
+                Text(host)
+                    .fontWeight(.medium)
+            }
+        }
+        if let problem = model.problem {
+            Text(problem.signInWindowMessage)
+                .font(.callout)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -155,6 +192,19 @@ struct ProVisorSignInView: View {
             Button("Close", action: onClose)
                 .controlSize(.large)
                 .help("Close; the session is saved")
+        case .replacement:
+            Button("Leave As Is", action: leaveAsIs)
+                .controlSize(.large)
+                .disabled(model.isWorking)
+                .help("Keep the saved password as it is; SuperVisor forgets the one you typed")
+            Button("Keep Typed Password", action: keepTypedPassword)
+                .controlSize(.large)
+                .disabled(model.isWorking)
+                .help("Keep the password you typed in your Keychain in place of the saved one")
+        case .savedPasswordKept, .savedPasswordTurnedAway:
+            Button("Close", action: onClose)
+                .controlSize(.large)
+                .help("Close; the saved password is kept")
         }
     }
 
@@ -162,6 +212,16 @@ struct ProVisorSignInView: View {
         if model.keepPassword(using: enrollment, into: center) == .kept {
             onClose()
         }
+    }
+
+    private func keepTypedPassword() {
+        if model.keepTypedPassword(using: enrollment, into: center) == .kept {
+            onClose()
+        }
+    }
+
+    private func leaveAsIs() {
+        Task { _ = await model.leaveAsIs(using: enrollment, into: center) }
     }
 
     /// Why the person is asked. A host in it is plain text that cannot be selected, so it is
@@ -203,12 +263,24 @@ struct ProVisorSignInView: View {
 
     @ViewBuilder
     private var status: some View {
-        // The enrollment's own "sign in on the page" note names a Save button this window
-        // does not have; the caption below says the same for Done.
-        if let note = enrollment.note, note != SiteEnrollment.Notes.signInYourself {
+        if let fill = enrollment.unvettedFill {
+            Text(SiteSignInModel.movedMessage(fill))
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if let note = SiteSignInModel.windowNote(enrollment.note) {
             Text(note)
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+
+        if let sender = enrollment.learnedCodeSender {
+            Label("Codes come from \(sender)", systemImage: "message")
+                .font(.callout)
+        }
+
+        if model.readsTextedCodes {
+            SiteTextsWarning(status: center.textsStatus, center: center)
         }
 
         if let problem = model.problem {

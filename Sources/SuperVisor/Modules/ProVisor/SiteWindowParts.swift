@@ -105,6 +105,46 @@ struct SiteProminentButtonStyle: ButtonStyle {
     }
 }
 
+/// Why texted codes cannot be read, with the button that puts it right: shown wherever a sign-in
+/// reads its code from texts while texts are off or the Messages database cannot be read.
+struct SiteTextsWarning: View {
+    let status: SiteAccessCenter.TextsStatus
+    let center: SiteAccessCenter
+
+    /// The sentence for `status`; nil while texts can be read.
+    static func message(for status: SiteAccessCenter.TextsStatus) -> String? {
+        switch status {
+        case .on: nil
+        case .off: "Texts are off, so SuperVisor can't read the code."
+        case .accessDenied: "Full Disk Access is off, so texts can't be read."
+        }
+    }
+
+    var body: some View {
+        if let message = Self.message(for: status) {
+            VStack(alignment: .leading, spacing: 6) {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Group {
+                    switch status {
+                    case .off:
+                        Button("Turn On Texts") { center.setTextsEnabled(true) }
+                            .help("Let SuperVisor read your texts")
+                    case .accessDenied:
+                        Button("Open System Settings") { SiteAccessCenter.openFullDiskAccessSettings() }
+                            .help("Open Privacy & Security › Full Disk Access")
+                    case .on:
+                        EmptyView()
+                    }
+                }
+                .controlSize(.small)
+            }
+        }
+    }
+}
+
 extension View {
     /// A text field drawn in the system's colours, outlined in the brand gradient while focused.
     func siteFieldChrome(isFocused: Bool) -> some View {

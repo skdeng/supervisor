@@ -2,9 +2,8 @@ import AppKit
 import SwiftUI
 import WebKit
 
-/// Opens the site window: the Add Site form for a new site, the Sign In Again form for a site
-/// that keeps a saved password, and the sign-in window (`ProVisorSignInView`) for a site kept
-/// by its session and for a site a ProVisor proposal asked for.
+/// Opens the site window: the Add Site form for a new site, and the sign-in window
+/// (`ProVisorSignInView`) for every granted site and for a site a ProVisor proposal asked for.
 ///
 /// One window is reused. Asking for what it already shows brings it forward; asking for
 /// anything else ends the enrollment it shows.
@@ -59,10 +58,9 @@ final class ProVisorSiteWindow {
 
     /// Which window a sign-in is expected to open, before the stored sign-in is read.
     enum SignInRoute: Equatable {
-        /// The sign-in window, for a site kept by its session or a host a proposal asked for.
+        /// The sign-in window, for a granted site or a host a proposal asked for.
         case signingIn(host: String, requestedBy: String?)
-        /// The Sign In Again form, for a site that keeps a saved password: saving a session
-        /// over it would discard the password.
+        /// The Sign In Again form, for a site that keeps a saved password.
         case signingInAgain(siteID: String, requestedBy: String?)
 
         var host: String {
@@ -80,30 +78,27 @@ final class ProVisorSiteWindow {
         }
     }
 
-    /// The window for a sign-in prompt: a granted site by the way it is kept, and a requested
-    /// host in the sign-in window. Nil for a requested host with no proposal, which no demand
-    /// produces.
+    /// The window for a sign-in prompt: the sign-in window, for a granted site however it is
+    /// kept and for a requested host. Nil for a requested host with no proposal, which no
+    /// demand produces.
     static func route(for item: SignInDemand.Item) -> SignInRoute? {
         switch item.kind {
-        case .signedOut(keepsSession: true):
+        case .signedOut:
             return .signingIn(host: item.host, requestedBy: item.proposalID)
-        case .signedOut(keepsSession: false):
-            return .signingInAgain(siteID: item.host, requestedBy: item.proposalID)
         case .requested:
             guard let proposalID = item.proposalID else { return nil }
             return .signingIn(host: item.host, requestedBy: proposalID)
         }
     }
 
-    /// The window for signing in to a granted site again, by the way it is kept.
+    /// The window for signing in to a granted site again: the sign-in window, however the site
+    /// is kept.
     static func route(forSite record: SiteRecord, requestedBy proposalID: String?) -> SignInRoute {
-        record.keepsSessionOnly
-            ? .signingIn(host: record.id, requestedBy: proposalID)
-            : .signingInAgain(siteID: record.id, requestedBy: proposalID)
+        .signingIn(host: record.id, requestedBy: proposalID)
     }
 
-    /// The window for a host a proposal asked for: a granted site's by the way it is kept, and
-    /// the sign-in window for any other host.
+    /// The window for a host a proposal asked for: the sign-in window, for a granted site and
+    /// for any other host.
     static func route(
         forRequestedHost host: String,
         proposalID: String,
@@ -121,15 +116,16 @@ final class ProVisorSiteWindow {
         case addingSite
         /// The sign-in window.
         case signIn(host: String, requestedBy: String?)
-        /// The Sign In Again form for a grant that keeps a saved password.
+        /// The Sign In Again form, for a grant that keeps a saved password.
         case signingInAgain(grant: SiteGrant, record: SiteRecord, requestedBy: String?)
         /// The Add Site form for a granted site whose stored sign-in cannot be read.
         case unreadable(record: SiteRecord, requestedBy: String?)
     }
 
     /// Settles `route` against the site's `record` and stored `grant`, which may have changed
-    /// since the route was chosen. The grant decides between the two kinds of window, so a
-    /// saved password is never shown the sign-in window, whose save would discard it.
+    /// since the route was chosen. A granted site with a readable grant opens the sign-in
+    /// window, which fills a saved password and never saves a session over it
+    /// (`SiteSignInModel.Start.fillsSavedPassword`).
     ///
     /// A granted site whose grant cannot be read opens the Add Site form with its address
     /// empty, whichever route asked: the record comes from `sites.json`, which anything running
@@ -141,10 +137,8 @@ final class ProVisorSiteWindow {
         guard let record else {
             return proposalID == nil ? .addingSite : .signIn(host: host, requestedBy: proposalID)
         }
-        guard let grant else { return .unreadable(record: record, requestedBy: proposalID) }
-        return grant.remembersPassword
-            ? .signingInAgain(grant: grant, record: record, requestedBy: proposalID)
-            : .signIn(host: host, requestedBy: proposalID)
+        guard grant != nil else { return .unreadable(record: record, requestedBy: proposalID) }
+        return .signIn(host: host, requestedBy: proposalID)
     }
 
     /// Opens what `route` leads to, from the center's site list as last refreshed.
@@ -219,10 +213,11 @@ final class ProVisorSiteWindow {
         bringForward(window)
     }
 
-    /// The enrollment a sign-in window starts with: one that records what the person types
-    /// only when the model may offer to keep a password (`SiteSignInModel.recordsCredentials`).
+    /// The enrollment a sign-in window starts with: one that probes the page however the
+    /// sign-in runs, and records what the person types only when the model may offer to keep a
+    /// password (`SiteSignInModel.recordsCredentials`).
     static func signInEnrollment(for model: SiteSignInModel, center: SiteAccessCenter) -> SiteEnrollment {
-        model.recordsCredentials ? center.makeRecordingEnrollment() : center.makeEnrollment()
+        model.recordsCredentials ? center.makeRecordingEnrollment() : center.makeWatchingEnrollment()
     }
 
     private func reusableWindow() -> SiteEnrollmentWindow {
@@ -584,22 +579,8 @@ struct ProVisorSiteView: View {
         }
     }
 
-    @ViewBuilder
     private var textsWarning: some View {
-        switch model.textsStatus {
-        case .on:
-            EmptyView()
-        case .off:
-            warning("Texts are off, so SuperVisor can't read the code.") {
-                Button("Turn On Texts") { center.setTextsEnabled(true) }
-                    .help("Let SuperVisor read your texts")
-            }
-        case .accessDenied:
-            warning("Full Disk Access is off, so texts can't be read.") {
-                Button("Open System Settings") { SiteAccessCenter.openFullDiskAccessSettings() }
-                    .help("Open Privacy & Security › Full Disk Access")
-            }
-        }
+        SiteTextsWarning(status: model.textsStatus, center: center)
     }
 
     // MARK: Signing in
@@ -723,17 +704,6 @@ struct ProVisorSiteView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func warning<Action: View>(_ text: String, @ViewBuilder action: () -> Action) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(text, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-            action()
-                .controlSize(.small)
-        }
     }
 }
 

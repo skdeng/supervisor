@@ -160,7 +160,7 @@ struct SiteRegistryTests {
         }
     }
 
-    @Test("The file holds nothing but the display fields, the attempt bookkeeping, and how the site is kept")
+    @Test("The file holds nothing but the display fields, the attempt bookkeeping, how the site is kept, and whether its password was turned away")
     func fileHoldsNoDestinations() throws {
         try withTemporaryDirectory { directory in
             let file = directory.appendingPathComponent("sites.json")
@@ -169,11 +169,11 @@ struct SiteRegistryTests {
                 JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [[String: Any]]
             )
 
-            #expect(Set(object[0].keys) == ["id", "name", "added", "attemptCount", "needsPerson", "keepsSessionOnly"])
+            #expect(Set(object[0].keys) == ["id", "name", "added", "attemptCount", "needsPerson", "keepsSessionOnly", "passwordRejected"])
         }
     }
 
-    @Test("A file without the attempt keys or keepsSessionOnly loads with no attempts, as a site that signs in by itself")
+    @Test("A file without the attempt keys, keepsSessionOnly, or passwordRejected loads with no attempts, as a site that signs in by itself with a password not turned away")
     func fileWithoutAttemptKeys() throws {
         try withTemporaryDirectory { directory in
             let file = directory.appendingPathComponent("sites.json")
@@ -191,7 +191,23 @@ struct SiteRegistryTests {
             #expect(loaded.attemptCount == 0)
             #expect(!loaded.needsPerson)
             #expect(!loaded.keepsSessionOnly)
+            #expect(!loaded.passwordRejected)
             #expect(loaded.lastSignedIn == Date(timeIntervalSince1970: 1_700_003_600))
+        }
+    }
+
+    @Test("A turned-away password is recorded so through the file, and the person's sign-in sets or clears it as told")
+    func passwordRejectedRoundTrips() throws {
+        try withTemporaryDirectory { directory in
+            let file = directory.appendingPathComponent("sites.json")
+            var rejected = record()
+            rejected.passwordRejected = true
+            try SiteRegistry.save([rejected], to: file)
+            #expect(SiteRegistry.load(from: file).first?.passwordRejected == true)
+
+            let now = Date(timeIntervalSince1970: 1_700_100_000)
+            #expect(!SignInAttempts.recordingPersonSignedIn(rejected, now: now, storedPasswordWorked: true).passwordRejected)
+            #expect(SignInAttempts.recordingPersonSignedIn(record(), now: now, storedPasswordWorked: false).passwordRejected)
         }
     }
 
@@ -605,7 +621,7 @@ struct SiteRegistryTests {
         #expect(!SignInAttempts.mayAttempt(failed, now: utc(hour: 9), timeZone: utcZone))
         #expect(!SignInAttempts.mayAttempt(failed, now: utc(hour: 9, day: 20), timeZone: utcZone))
 
-        let signedIn = SignInAttempts.recordingPersonSignedIn(failed, now: utc(hour: 12))
+        let signedIn = SignInAttempts.recordingPersonSignedIn(failed, now: utc(hour: 12), storedPasswordWorked: true)
         #expect(!signedIn.needsPerson)
         #expect(signedIn.attemptCount == 0)
         #expect(signedIn.lastSignedIn == utc(hour: 12))
@@ -700,7 +716,7 @@ struct SiteRegistryTests {
         )
         #expect(!succeeded.needsPerson)
 
-        let person = SignInAttempts.recordingPersonSignedIn(flagged, now: utc(hour: 9))
+        let person = SignInAttempts.recordingPersonSignedIn(flagged, now: utc(hour: 9), storedPasswordWorked: true)
         #expect(!person.needsPerson)
         #expect(person.attemptCount == 0)
         #expect(SignInAttempts.mayAttempt(person, now: utc(hour: 9), timeZone: utcZone))

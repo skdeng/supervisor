@@ -330,7 +330,8 @@ struct SiteEnrollmentTests {
         try await begin(session, bank, passwordHosts: ["login.example.org"])
 
         #expect(bank.site.posts.isEmpty)
-        #expect(session.unvettedFill == AssistedSignInSession.UnvettedFill(host: "example.com", kind: .password))
+        // The user name is held to the saved password's hosts, so it is the first fill refused.
+        #expect(session.unvettedFill == AssistedSignInSession.UnvettedFill(host: "example.com", kind: .username))
         #expect(session.note == SiteEnrollment.Notes.finishYourself)
         let typed = try await session.browser.run("return document.getElementById('pass').value;")
         #expect(typed.string == "")
@@ -980,7 +981,7 @@ struct SiteEnrollmentTests {
         defer { session.cancel() }
 
         try await session.beginKeepingSession(signInAddress: "example.com/home")
-        #expect(!session.keptSessionSawSignIn)
+        #expect(!session.sawSignIn)
         let (grant, record) = try await session.finishKeepingSession(name: "Bank")
 
         #expect(grant.startURL == url("https://example.com/home"))
@@ -1032,7 +1033,7 @@ struct SiteEnrollmentTests {
         let moved = visiting(bank)
         defer { moved.cancel() }
         try await moved.beginKeepingSession(signInAddress: "example.com/login")
-        #expect(moved.keptSessionSawSignIn)
+        #expect(moved.sawSignIn)
         _ = try await moved.browser.open(url("https://example.com/members"))
         await moved.idle()
         await #expect(throws: SiteEnrollment.Failure.pageLooksPublic) {
@@ -1568,7 +1569,7 @@ struct SiteEnrollmentTests {
 
         try await session.beginKeepingSession(signInAddress: "example.com/login")
         #expect(!session.appearsSignedIn)
-        #expect(session.keptSessionSawSignIn)
+        #expect(session.sawSignIn)
 
         try await signInByHand(session, bank)
         try await waitFor { session.appearsSignedIn }
@@ -1586,7 +1587,7 @@ struct SiteEnrollmentTests {
         try await session.beginKeepingSession(signInAddress: "example.com/members")
 
         #expect(session.appearsSignedIn)
-        #expect(!session.keptSessionSawSignIn)
+        #expect(!session.sawSignIn)
     }
 
     @Test("A new begin starts with the page not looking signed in", .timeLimit(.minutes(1)))
@@ -1602,7 +1603,7 @@ struct SiteEnrollmentTests {
 
         try await session.beginKeepingSession(signInAddress: "example.com/welcome")
         #expect(!session.appearsSignedIn)
-        #expect(!session.keptSessionSawSignIn)
+        #expect(!session.sawSignIn)
 
         try await begin(session, bank)
         #expect(!session.appearsSignedIn)
@@ -1616,7 +1617,7 @@ struct SiteEnrollmentTests {
         defer { session.cancel() }
 
         try await session.beginKeepingSession(signInAddress: "example.com/account")
-        #expect(!session.keptSessionSawSignIn)
+        #expect(!session.sawSignIn)
         #expect(!session.appearsSignedIn)
 
         _ = try await session.browser.run("""
@@ -1625,7 +1626,7 @@ struct SiteEnrollmentTests {
             box.autocomplete = 'one-time-code';
             document.body.appendChild(box);
             """)
-        try await waitFor { session.keptSessionSawSignIn }
+        try await waitFor { session.sawSignIn }
         #expect(!session.appearsSignedIn)
 
         // The step goes away the way a code field does once its code is accepted.
@@ -1704,7 +1705,7 @@ struct SiteEnrollmentTests {
         #expect(!session.isRechecking)
         #expect(session.note == nil)
         #expect(!session.isWorking)
-        #expect(!session.keptSessionSawSignIn)
+        #expect(!session.sawSignIn)
         #expect(bank.site.requests.isEmpty)
     }
 

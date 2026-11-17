@@ -24,6 +24,7 @@ import Foundation
 /// | `record`, a user name after a password, on its page | replaces `username` |
 /// | `record`, a user name after a password, elsewhere | waits, and becomes `username` at the next password |
 /// | `record`, a clear | drops the password, user name, or waiting user name typed into that field on that page |
+/// | `noteFilled` | drops what was typed into that field on that page, as a clear does |
 /// | `notePage`, any page | sets `sawCodeField` when it shows a code field or single-character boxes |
 /// | `notePage`, after a password, no password field | sets `leftPasswordForm` |
 /// | `notePage`, `leftPasswordForm` set, a password field | sets `askedAgain` |
@@ -114,6 +115,12 @@ struct CredentialCapture: Equatable, Sendable {
         }
     }
 
+    /// The app filled `field` on the page at `origin` and `path`, which replaced whatever the
+    /// person had typed there.
+    mutating func noteFilled(field: FieldKey, origin: String, path: String) {
+        clear(field: field, origin: origin, path: path)
+    }
+
     /// Forgets everything.
     mutating func wipe() {
         self = CredentialCapture()
@@ -147,9 +154,14 @@ struct CredentialCapture: Equatable, Sendable {
 
     /// Drops what was typed into the field `cleared` names, on its page.
     private mutating func clear(_ cleared: TypedCredential) {
+        clear(field: cleared.field, origin: cleared.origin, path: cleared.path)
+    }
+
+    /// Drops what was typed into `field` on the page at `origin` and `path`.
+    private mutating func clear(field: FieldKey, origin: String, path: String) {
         func matches(_ record: Record?) -> Bool {
             guard let record else { return false }
-            return record.field == cleared.field && record.origin == cleared.origin && record.path == cleared.path
+            return record.field == field && record.origin == origin && record.path == path
         }
         if matches(password) { password = nil }
         if matches(username) { username = nil }

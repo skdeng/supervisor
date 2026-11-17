@@ -454,6 +454,8 @@ final class SignInBroker {
     static let standardCodeWaitLimit: Duration = .seconds(120)
 
     let browser: SiteBrowser
+    /// Whether the last unattended `signIn` filled the grant's password into a page.
+    private(set) var lastSignInFilledPassword = false
     private let codeWaitLimit: Duration
     private let now: () -> Date
 
@@ -478,6 +480,7 @@ final class SignInBroker {
     /// Signs in through `grant.signInSteps`, starting from the page that is open. At the end the
     /// start page is loaded to confirm the session holds.
     func signIn(with grant: SiteGrant, codes: SignInCodes) async -> SignInOutcome {
+        lastSignInFilledPassword = false
         guard !grant.signInSteps.isEmpty else { return .needsPerson(.noRecordedSteps) }
         do {
             return try await runSignIn(grant, codes: codes)
@@ -547,6 +550,7 @@ final class SignInBroker {
             )
             guard case .filled = status else { return .needsPerson(Self.reason(for: status)) }
             used.formUnion(chosen.map(\.step.kind))
+            if used.contains(.password) { lastSignInFilledPassword = true }
             try await browser.settleAfterAction(since: mark)
         }
         return .needsPerson(.tooManySteps)
@@ -1040,7 +1044,8 @@ final class SignInBroker {
 ///
 /// A secret saved with a site (`passwordHosts`, `authenticatorHosts`) is filled only on a page
 /// whose host is in its list, into a form that sends to one of them; anywhere else the session
-/// stops with `.unvettedHost` and fills nothing on that page.
+/// stops with `.unvettedHost` and fills nothing on that page. With a saved password the user
+/// name is held to the password's hosts too.
 @MainActor
 final class AssistedSignInSession {
     /// A fill the session refused because the page's host is not one the secret may go to.
@@ -1051,7 +1056,9 @@ final class AssistedSignInSession {
 
     private let broker: SignInBroker
     private let username: String
-    private let password: String
+    /// Nil when the password is withheld: the session fills no password field, and leaves a
+    /// form that asks for one to the person.
+    private let password: String?
     private let authenticatorKey: String?
     private let codeKind: SiteGrant.CodeKind
     private let codeSender: String?
@@ -1080,10 +1087,13 @@ final class AssistedSignInSession {
     private var requestedAt: Date
     private var fills = 0
 
+    /// Called with each step as soon as its fill is made, before the page reacts to it.
+    var onFilled: (@MainActor (SignInStep) -> Void)?
+
     init(
         broker: SignInBroker,
         username: String,
-        password: String,
+        password: String?,
         authenticatorKey: String?,
         codeKind: SiteGrant.CodeKind,
         codeSender: String?,
@@ -1141,11 +1151,18 @@ final class AssistedSignInSession {
             }
             guard SignInRules.isRecordable(page) else { return .unrecognisedPage }
 
-            let picks: [SignInRules.Pick]
+            let chosen: [SignInRules.Pick]
             switch SignInRules.decide(page: page, used: used, codeKind: codeKind) {
             case let .stop(reason): return reason
-            case let .fill(chosen): picks = chosen
+            case let .fill(picked): chosen = picked
             }
+            // A form that asks for a withheld password is the person's to fill and send: a fill
+            // submits the form, and a form sent without its password fails.
+            if password == nil, chosen.contains(where: { $0.kind == .password }) { return nil }
+            // An empty user name belongs to a site that shows the user name filled in already,
+            // which a fill would erase.
+            let picks = username.isEmpty ? chosen.filter { $0.kind != .username } : chosen
+            guard !picks.isEmpty else { return .unrecognisedPage }
             let host = String(page.origin.dropFirst("https://".count))
             var allowedHosts: [String]?
             for pick in picks {
@@ -1193,13 +1210,15 @@ final class AssistedSignInSession {
             guard case let .filled(actionHost) = status else { return Self.reason(for: status) }
 
             for pick in picks {
-                steps.append(SignInStep(
+                let step = SignInStep(
                     kind: pick.kind,
                     origin: page.origin,
                     path: page.path,
                     field: pick.field.key
-                ))
+                )
+                steps.append(step)
                 used.insert(pick.kind)
+                onFilled?(step)
             }
             if let actionHost, !submissionHosts.contains(actionHost) { submissionHosts.append(actionHost) }
             do {
@@ -1212,11 +1231,11 @@ final class AssistedSignInSession {
     }
 
     /// The hosts a saved secret behind a fill of `kind` may go to, or nil when the value was
-    /// typed during this enrollment.
+    /// typed during this enrollment. A sign-in with a saved password holds the user name to the
+    /// same hosts, so a page on another host never becomes one the refreshed grant fills on.
     private func savedSecretHosts(for kind: SignInStep.Kind) -> [String]? {
         switch kind {
-        case .username: nil
-        case .password: passwordHosts
+        case .username, .password: passwordHosts
         case .code: codeKind == .authenticator ? authenticatorHosts : nil
         }
     }

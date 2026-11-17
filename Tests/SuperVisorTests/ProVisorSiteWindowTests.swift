@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 import WebKit
 
@@ -370,6 +371,107 @@ struct ProVisorSiteWindowTests {
         #expect(enrollment.isCancelled)
         #expect(!holds.isHeld)
         #expect(center.storedGrant(for: "example.com")?.remembersPassword == false)
+    }
+
+    @Test("For a site with a saved password, the offer and its answer replace Done without resizing the window", .timeLimit(.minutes(1)))
+    func savedPasswordPanelsKeepSize() async throws {
+        _ = NSApplication.shared
+        let fixture = try SiteCenterFixture()
+        let bank = TestBank()
+        let center = fixture.center(simulatedPages: bank.site.answer, settling: .fast)
+        func key(_ name: String, _ id: String, _ autocomplete: String, _ type: String) -> FieldKey {
+            FieldKey(name: name, id: id, autocomplete: autocomplete, type: type)
+        }
+        let stored = SiteGrant(
+            username: bank.username,
+            password: "Old-" + UUID().uuidString,
+            authenticatorKey: nil,
+            signInURL: URL(string: "https://example.com/login")!,
+            startURL: URL(string: "https://example.com/account")!,
+            fillHosts: ["example.com"],
+            browseHosts: ["example.com"],
+            codeKind: .none,
+            codeSender: nil,
+            signInSteps: [
+                SignInStep(kind: .username, origin: "https://example.com", path: "/login", field: key("username", "user", "username", "text")),
+                SignInStep(kind: .password, origin: "https://example.com", path: "/login", field: key("password", "pass", "current-password", "password")),
+            ],
+            signOutControlSeen: true
+        )
+        try center.save(grant: stored, record: SiteRecord(id: "example.com", name: "My Bank", added: Date(timeIntervalSince1970: 0)))
+        let record = try #require(center.sites.first)
+        let holds = FollowUpHoldsStub()
+        let enrollment = SiteEnrollment.recordingCredentials(
+            dataStore: .nonPersistent(),
+            codes: CodeStub().codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast,
+            recheckInterval: .milliseconds(50)
+        )
+        let model = SiteSignInModel(
+            host: "example.com",
+            record: record,
+            start: .decide(host: "example.com", record: record, grant: center.storedGrant(for: "example.com")) { _ in false },
+            proposalID: nil,
+            needsPerson: true,
+            offersPasswords: true,
+            followUps: holds
+        )
+        let window = SiteEnrollmentWindow()
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        defer { window.close() }
+
+        window.show(center: center, enrollment: enrollment, signIn: model)
+        #expect((window.contentViewController as? NSHostingController<AnyView>)?.sizingOptions == [])
+        #expect(window.content == .signIn(host: "example.com"))
+        window.orderFront(nil)
+        try await settle(window)
+        let frame = window.frame
+
+        // The app fills the saved password, which the bank refuses.
+        try await waitFor {
+            bank.site.posts.contains { $0.path == "/session" }
+                && enrollment.browser.currentURL?.path == "/login"
+                && !enrollment.browser.webView.isLoading
+        }
+        await enrollment.idle()
+        #expect(!bank.signedIn)
+
+        _ = try await enrollment.browser.run("""
+            document.getElementById('user').value = username;
+            document.getElementById('pass').value = password;
+            """, arguments: ["username": bank.username, "password": bank.password])
+        enrollment.browser.noteCredential(try #require(typedCredential([
+            "kind": "username", "value": bank.username, "name": "username", "id": "user",
+            "autocomplete": "username", "type": "text",
+        ])))
+        enrollment.browser.noteCredential(try #require(typedCredential(["value": bank.password, "name": "password", "id": "pass"])))
+        _ = try await enrollment.browser.run("HTMLFormElement.prototype.requestSubmit.call(document.forms[0]);")
+        try await waitFor {
+            bank.signedIn && enrollment.browser.currentURL?.path == "/home" && !enrollment.browser.webView.isLoading
+        }
+        await enrollment.idle()
+
+        #expect(await model.done(using: enrollment, into: center) == .asking)
+        try await settle(window)
+        #expect(model.panel == .replacement(siteName: "My Bank", username: bank.username, host: "example.com"))
+        #expect(window.isVisible)
+        #expect(window.frame == frame)
+        #expect(window.contentView?.frame.size == SiteEnrollmentWindow.initialContentSize)
+        #expect(holds.isHeld)
+
+        #expect(await model.leaveAsIs(using: enrollment, into: center) == .signedInKeepingSavedPassword)
+        try await settle(window)
+        #expect(model.panel == .savedPasswordTurnedAway(nil))
+        #expect(window.isVisible)
+        #expect(window.frame == frame)
+        #expect(window.contentView?.frame.size == SiteEnrollmentWindow.initialContentSize)
+        #expect(!holds.isHeld)
+        #expect(center.storedGrant(for: "example.com") == stored)
+
+        window.close()
+        #expect(enrollment.isCancelled)
     }
 
     @Test("Showing the sign-in window ends an Add Site enrollment, and the reverse", .timeLimit(.minutes(1)))

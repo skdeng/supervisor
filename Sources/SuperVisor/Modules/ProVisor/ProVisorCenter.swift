@@ -597,7 +597,8 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         armFollowUp()
     }
 
-    /// The person saved the sign-in for `record`; `wasAwaited` says the site was waiting on them.
+    /// The person saved the sign-in for `record`, or signed in to it with its stored grant kept
+    /// (`SiteAccessCenter.personSignedIn`); `wasAwaited` says the site was waiting on them.
     /// The save answers the earliest open request for the site, which is recorded done
     /// (`SiteRequests.settle`), and owes a pass when there was such a request or the site was
     /// waiting (`SignInDemand.effectOfSaving`). Every save arrives here, from whichever window

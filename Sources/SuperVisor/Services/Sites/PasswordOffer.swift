@@ -130,6 +130,25 @@ enum OfferRefusal: Error, Equatable, Sendable, CaseIterable {
         }
     }
 
+    /// What the sign-in window says when the site's saved password was kept as it was and the
+    /// password the person typed could not be kept; nil for `nothingTyped`.
+    var sentenceBesideSavedPassword: String? {
+        switch self {
+        case .nothingTyped:
+            nil
+        case .askedAgain:
+            "The site asked for your password more than once, so SuperVisor can't tell which one worked."
+        case .newPasswordForm:
+            "This looked like a form for a new password, so SuperVisor didn't keep what you typed."
+        case .codeAsked:
+            "The site asked for a sign-in code, which SuperVisor can't answer by itself here, so it didn't keep what you typed."
+        case .fieldUnidentified:
+            "SuperVisor couldn't tell which field took the password well enough to fill it again, so it didn't keep what you typed."
+        case .severalSecrets, .signInService, .anotherCompany:
+            sentence
+        }
+    }
+
     var caseName: String {
         switch self {
         case .nothingTyped: "nothingTyped"
@@ -165,8 +184,9 @@ struct PasswordOffer: Equatable, Sendable {
     /// result would not be a valid grant. Its steps fill the user name, when one was typed, and
     /// the password, each into the field and on the page it was typed at; its fill hosts are the
     /// sign-in host, then the hosts those pages and their forms belong to, each of which must be
-    /// one of the session's browse hosts. Everything else comes from `session`.
-    func grant(upgrading session: SiteGrant) -> SiteGrant? {
+    /// one of the session's browse hosts. Its user name is the one typed, else
+    /// `usernameIfNoneTyped`. Everything else comes from `session`.
+    func grant(upgrading session: SiteGrant, usernameIfNoneTyped: String = "") -> SiteGrant? {
         guard !session.remembersPassword,
               let signInHost = session.signInURL.host(percentEncoded: false)?.lowercased()
         else { return nil }
@@ -182,7 +202,7 @@ struct PasswordOffer: Equatable, Sendable {
         guard fillHosts.allSatisfy(session.browseHosts.contains) else { return nil }
 
         let grant = SiteGrant(
-            username: username?.value ?? "",
+            username: username?.value ?? usernameIfNoneTyped,
             password: password.value,
             authenticatorKey: nil,
             signInURL: session.signInURL,
@@ -194,6 +214,32 @@ struct PasswordOffer: Equatable, Sendable {
             signInSteps: steps,
             signOutControlSeen: session.signOutControlSeen,
             signInControlAbsent: session.signInControlAbsent
+        )
+        return grant.isValid(for: signInHost) ? grant : nil
+    }
+
+    /// `stored` with its password replaced by this one and nothing else changed: its user name,
+    /// steps, hosts, start page, markers, and code settings stay. Nil unless `stored` keeps a
+    /// password and this one was typed on one of its fill hosts, or when the result would not be
+    /// a valid grant.
+    func grant(replacingPasswordOf stored: SiteGrant) -> SiteGrant? {
+        guard stored.remembersPassword,
+              stored.fillHosts.contains(password.host),
+              let signInHost = stored.signInURL.host(percentEncoded: false)?.lowercased()
+        else { return nil }
+        let grant = SiteGrant(
+            username: stored.username,
+            password: password.value,
+            authenticatorKey: stored.authenticatorKey,
+            signInURL: stored.signInURL,
+            startURL: stored.startURL,
+            fillHosts: stored.fillHosts,
+            browseHosts: stored.browseHosts,
+            codeKind: stored.codeKind,
+            codeSender: stored.codeSender,
+            signInSteps: stored.signInSteps,
+            signOutControlSeen: stored.signOutControlSeen,
+            signInControlAbsent: stored.signInControlAbsent
         )
         return grant.isValid(for: signInHost) ? grant : nil
     }
@@ -231,13 +277,36 @@ extension CredentialCapture {
     /// every host a value was typed on (`hostsTypedOn`), a cleared one included, and the hosts
     /// the forms of the password and user name send to.
     func offer(siteHost: String, browseHosts: [String]) -> Result<PasswordOffer, OfferRefusal> {
+        judge(siteHost: siteHost, browseHosts: browseHosts, checksRecording: true)
+    }
+
+    /// The offer to keep the password typed last in place of the saved password of `stored`,
+    /// the site's grant, whose user name, steps, and code settings stay as they are
+    /// (`PasswordOffer.grant(replacingPasswordOf:)`), or why there is none. It is judged as
+    /// `offer(siteHost:browseHosts:)` judges against `stored`'s browse hosts, less the two
+    /// refusals that concern a sign-in recorded afresh: `codeAsked`, since `stored` answers a
+    /// code as it did, and `fieldUnidentified`, since `stored`'s own steps find the fields.
+    func replacementOffer(siteHost: String, stored: SiteGrant) -> Result<PasswordOffer, OfferRefusal> {
+        judge(siteHost: siteHost, browseHosts: stored.browseHosts, checksRecording: false)
+    }
+
+    /// Whether the password typed last went in on one of `hosts`.
+    func passwordTyped(onOneOf hosts: [String]) -> Bool {
+        password.map { hosts.contains($0.host) } ?? false
+    }
+
+    /// The judgement `offer` and `replacementOffer` share; `checksRecording` adds the refusals
+    /// about recording a sign-in afresh (`codeAsked`, `fieldUnidentified`).
+    private func judge(siteHost: String, browseHosts: [String], checksRecording: Bool) -> Result<PasswordOffer, OfferRefusal> {
         guard let password else { return .failure(.nothingTyped) }
         if askedAgain { return .failure(.askedAgain) }
         if severalSecrets { return .failure(.severalSecrets) }
         if sawNewPasswordForm { return .failure(.newPasswordForm) }
-        if sawCodeField { return .failure(.codeAsked) }
         let typed = [password] + [username].compactMap { $0 }
-        guard typed.allSatisfy(\.isIdentifiable) else { return .failure(.fieldUnidentified) }
+        if checksRecording {
+            if sawCodeField { return .failure(.codeAsked) }
+            guard typed.allSatisfy(\.isIdentifiable) else { return .failure(.fieldUnidentified) }
+        }
         let hosts = hostsTypedOn.union(typed.map(\.host)).union(typed.compactMap(\.actionHost))
         if hosts.contains(where: SignInServices.contains) { return .failure(.signInService) }
         guard hosts.allSatisfy({ SiteFamily.sameSite($0, siteHost) && browseHosts.contains($0) }) else {

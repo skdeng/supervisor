@@ -27,6 +27,9 @@ final class SiteCenterFixture {
         defaults = UserDefaults(suiteName: defaultsName)!
         settings = SettingsStore(defaults: defaults)
         if makesDatabase {
+            // Messages keeps its database in write-ahead-log mode, where a reader and a writer
+            // do not block each other.
+            try exec("PRAGMA journal_mode = WAL")
             try exec("""
                 CREATE TABLE handle (ROWID INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL);
                 CREATE TABLE message (
@@ -55,7 +58,10 @@ final class SiteCenterFixture {
     func exec(_ sql: String) throws {
         var database: OpaquePointer?
         defer { sqlite3_close(database) }
+        // A write that meets a lock held for a moment, such as a checkpoint, waits for it
+        // instead of failing with SQLITE_BUSY.
         guard sqlite3_open_v2(databasePath, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK,
+              sqlite3_busy_timeout(database, 2_000) == SQLITE_OK,
               sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK
         else { throw FixtureError.sqlite }
     }
@@ -71,6 +77,7 @@ final class SiteCenterFixture {
         polling: SiteAccessCenter.CodePolling = .standard,
         simulatedPages: SiteBrowser.SimulatedPages? = nil,
         settling: SiteBrowser.Settling = .standard,
+        dataStore: WKWebsiteDataStore = .nonPersistent(),
         now: @escaping @Sendable () -> Date = { Date() }
     ) -> SiteAccessCenter {
         SiteAccessCenter(
@@ -78,7 +85,7 @@ final class SiteCenterFixture {
             registryURL: registry,
             messages: messages,
             settings: settings,
-            dataStore: .nonPersistent(),
+            dataStore: dataStore,
             codePolling: polling,
             simulatedPages: simulatedPages,
             settling: settling,

@@ -46,6 +46,13 @@ struct SiteRecord: Codable, Identifiable, Equatable, Sendable {
     /// Mirrors the grant's `remembersPassword == false`, so the site can be described without
     /// reading the Keychain. Nothing decides where a secret goes from it.
     var keepsSessionOnly = false
+    /// Set when the site turned away the grant's saved password: an unattended sign-in filled it
+    /// and the site still showed the person signed out, or the person signed in by hand after
+    /// the app's fill of it was refused or withheld. While it is set the app never submits the
+    /// saved password by itself (`SiteAccess`), and the sign-in window leaves the password field
+    /// to the person. Cleared when a grant is saved, or when the app's fill of the saved
+    /// password is seen to work.
+    var passwordRejected = false
 
     /// The id is a valid host and the name holds 1 to 60 characters once cleaned.
     var isValid: Bool {
@@ -74,8 +81,9 @@ struct SiteRecord: Codable, Identifiable, Equatable, Sendable {
 }
 
 extension SiteRecord {
-    /// A stored record without the attempt keys reads as one with no attempts, and one without
-    /// `keepsSessionOnly` as a site that signs in by itself.
+    /// A stored record without the attempt keys reads as one with no attempts, one without
+    /// `keepsSessionOnly` as a site that signs in by itself, and one without `passwordRejected`
+    /// as one whose saved password was not turned away.
     init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(String.self, forKey: .id)
@@ -86,6 +94,7 @@ extension SiteRecord {
         attemptCount = try values.decodeIfPresent(Int.self, forKey: .attemptCount) ?? 0
         needsPerson = try values.decodeIfPresent(Bool.self, forKey: .needsPerson) ?? false
         keepsSessionOnly = try values.decodeIfPresent(Bool.self, forKey: .keepsSessionOnly) ?? false
+        passwordRejected = try values.decodeIfPresent(Bool.self, forKey: .passwordRejected) ?? false
     }
 }
 
@@ -164,12 +173,16 @@ enum SignInAttempts {
     }
 
     /// The record after the person signed in themselves: attempts start over.
-    static func recordingPersonSignedIn(_ record: SiteRecord, now: Date) -> SiteRecord {
+    /// `storedPasswordWorked` says the site's stored password is believed good, which clears
+    /// `passwordRejected`; otherwise it is set, so the app asks the person again instead of
+    /// submitting that password.
+    static func recordingPersonSignedIn(_ record: SiteRecord, now: Date, storedPasswordWorked: Bool) -> SiteRecord {
         var updated = record
         updated.needsPerson = false
         updated.attemptCount = 0
         updated.attemptsDay = nil
         updated.lastSignedIn = now
+        updated.passwordRejected = !storedPasswordWorked
         return updated
     }
 

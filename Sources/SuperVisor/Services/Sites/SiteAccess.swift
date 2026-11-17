@@ -111,7 +111,7 @@ final class SiteAccess {
         guard record.isValid, grant.isValid(for: record.id) else {
             throw SiteVault.Failure.invalidGrant
         }
-        var stored = SignInAttempts.recordingPersonSignedIn(record, now: now())
+        var stored = SignInAttempts.recordingPersonSignedIn(record, now: now(), storedPasswordWorked: true)
         stored.keepsSessionOnly = !grant.remembersPassword
         let earlier = try? vault.grant(for: record.id)
         try vault.save(grant, for: record.id)
@@ -128,6 +128,51 @@ final class SiteAccess {
         }
         recordEpochs[record.id, default: 0] += 1
         closeVisits(of: record.id)
+    }
+
+    /// Records that the person signed in to the site themselves and its grant stays as stored:
+    /// the record's flag and the day's attempts are cleared and `lastSignedIn` set, and
+    /// `storedPasswordWorked` decides `passwordRejected`
+    /// (`SignInAttempts.recordingPersonSignedIn`). The visits open on the site stay open, since
+    /// the grant they read with is unchanged. Returns the record as stored, or nil when nothing
+    /// was recorded.
+    ///
+    /// It records only what a hidden read of the grant's start page confirms: the session in
+    /// the browser's data store shows the stored grant signed in (`SignInRules.isSignedIn`).
+    /// A site whose grant or record was replaced or removed while the read ran is left alone.
+    func personSignedIn(siteID: String, storedPasswordWorked: Bool) async -> SiteRecord? {
+        let epoch = recordEpochs[siteID, default: 0]
+        guard case let .found(grant, _) = lookup(siteID) else { return nil }
+        let signedIn = await HiddenRead.withBrowser(
+            browseHosts: Set(grant.browseHosts),
+            dataStore: dataStore,
+            pages: simulatedPages,
+            settling: settling,
+            timeout: HiddenRead.standardTimeout
+        ) { browser in
+            guard case let .page(probe) = await HiddenRead.read(grant.startURL, in: browser) else { return false }
+            return SignInRules.isSignedIn(page: probe, grant: grant)
+        }
+        guard signedIn else {
+            AppLog.notice(.sites, "sign-in by the person for \(siteID) not confirmed")
+            return nil
+        }
+        guard recordEpochs[siteID, default: 0] == epoch,
+              case let .found(current, record) = lookup(siteID),
+              current == grant
+        else { return nil }
+        let updated = SignInAttempts.recordingPersonSignedIn(
+            record,
+            now: now(),
+            storedPasswordWorked: storedPasswordWorked
+        )
+        guard store(updated) else {
+            AppLog.error(.sites, "the sign-in by the person for \(siteID) could not be recorded")
+            return nil
+        }
+        recordEpochs[siteID, default: 0] += 1
+        AppLog.notice(.sites, "sign-in by the person for \(siteID) recorded; its grant kept")
+        return updated
     }
 
     /// Removes the site's Keychain item and registry entry, then the cookies and site data its
@@ -154,7 +199,9 @@ final class SiteAccess {
     /// visit.
     ///
     /// A grant that remembers no password is never signed in to here: once its session has
-    /// ended the site needs the person, and no attempt is counted.
+    /// ended the site needs the person, and no attempt is counted. Neither is one whose saved
+    /// password the site turned away (`SiteRecord.passwordRejected`): the app does not submit a
+    /// password the site has refused.
     func open(siteID: String, visit visitID: String) async -> Result<PageSnapshot, Failure> {
         guard !visitID.isEmpty, visitID.count <= Self.maximumVisitIDLength else {
             return .failure(.unavailable)
@@ -288,7 +335,7 @@ final class SiteAccess {
             return .failure(Self.failure(for: error, refused: .needsPerson))
         }
 
-        guard grant.remembersPassword else {
+        guard grant.remembersPassword, !site.passwordRejected else {
             markNeedsPerson(siteID: siteID, epoch: epoch)
             return .failure(.needsPerson)
         }
@@ -352,7 +399,13 @@ final class SiteAccess {
 
             let outcome = await broker.signIn(with: grant, codes: codes)
             signInsFinished[siteID, default: 0] += 1
-            settleAttempt(siteID: siteID, epoch: epoch, before: before, outcome: outcome)
+            settleAttempt(
+                siteID: siteID,
+                epoch: epoch,
+                before: before,
+                outcome: outcome,
+                passwordFilled: broker.lastSignInFilledPassword
+            )
 
             switch outcome {
             case .signedIn:
@@ -369,14 +422,25 @@ final class SiteAccess {
     }
 
     /// Writes how an attempt ended, unless the site's grant and record were replaced or removed
-    /// while it ran, in which case the new ones are left as they are.
-    private func settleAttempt(siteID: String, epoch: Int, before: SiteRecord, outcome: SignInOutcome) {
+    /// while it ran, in which case the new ones are left as they are. A sign-in still signed out
+    /// after `passwordFilled` marks the saved password as turned away.
+    private func settleAttempt(
+        siteID: String,
+        epoch: Int,
+        before: SiteRecord,
+        outcome: SignInOutcome,
+        passwordFilled: Bool
+    ) {
         guard recordEpochs[siteID, default: 0] == epoch, let current = record(siteID) else { return }
-        let updated: SiteRecord
+        var updated: SiteRecord
         if let attemptOutcome = outcome.attemptOutcome {
             updated = SignInAttempts.settling(current, outcome: attemptOutcome, now: now())
         } else {
             updated = SignInAttempts.abandoning(current, restoring: before)
+        }
+        if outcome == .needsPerson(.stillSignedOut), passwordFilled {
+            updated.passwordRejected = true
+            AppLog.notice(.sites, "saved password for \(siteID) turned away")
         }
         if !store(updated) {
             AppLog.error(.sites, "the outcome of an attempt for \(siteID) could not be recorded")

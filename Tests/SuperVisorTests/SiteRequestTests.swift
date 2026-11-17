@@ -410,12 +410,12 @@ struct SiteRequestTests {
             == .signingIn(host: "example.com", requestedBy: nil))
     }
 
-    @Test("A site with a saved password signs in again in the form, carrying the request that asked for it")
+    @Test("A site with a saved password opens the sign-in window too, carrying the request that asked for it")
     func routeForPasswordSite() {
         #expect(ProVisorSiteWindow.route(for: item(.signedOut(keepsSession: false), proposalID: "check"))
-            == .signingInAgain(siteID: "example.com", requestedBy: "check"))
+            == .signingIn(host: "example.com", requestedBy: "check"))
         #expect(ProVisorSiteWindow.route(for: item(.signedOut(keepsSession: false)))
-            == .signingInAgain(siteID: "example.com", requestedBy: nil))
+            == .signingIn(host: "example.com", requestedBy: nil))
     }
 
     @Test("A requested host opens the sign-in window for its request, and one with no proposal opens nothing")
@@ -427,7 +427,7 @@ struct SiteRequestTests {
         #expect(ProVisorSiteWindow.route(for: item(.requested(recognised: true))) == nil)
     }
 
-    @Test("Settings and the review window route a granted site by the way it is kept, and a new host to the sign-in window")
+    @Test("Settings and the review window route a granted site, however it is kept, and a new host to the sign-in window")
     func routeFromSettingsAndReview() {
         var session = SiteRecord(id: "example.com", name: "Bank", added: Date(timeIntervalSince1970: 0))
         session.keepsSessionOnly = true
@@ -436,13 +436,13 @@ struct SiteRequestTests {
         #expect(ProVisorSiteWindow.route(forSite: session, requestedBy: nil)
             == .signingIn(host: "example.com", requestedBy: nil))
         #expect(ProVisorSiteWindow.route(forSite: password, requestedBy: nil)
-            == .signingInAgain(siteID: "club.example", requestedBy: nil))
+            == .signingIn(host: "club.example", requestedBy: nil))
 
         let granted = [session, password]
         #expect(ProVisorSiteWindow.route(forRequestedHost: "example.com", proposalID: "p", grantedSites: granted)
             == .signingIn(host: "example.com", requestedBy: "p"))
         #expect(ProVisorSiteWindow.route(forRequestedHost: "club.example", proposalID: "p", grantedSites: granted)
-            == .signingInAgain(siteID: "club.example", requestedBy: "p"))
+            == .signingIn(host: "club.example", requestedBy: "p"))
         #expect(ProVisorSiteWindow.route(forRequestedHost: "new.example", proposalID: "p", grantedSites: granted)
             == .signingIn(host: "new.example", requestedBy: "p"))
     }
@@ -462,7 +462,7 @@ struct SiteRequestTests {
         )
     }
 
-    @Test("The stored grant decides the window, so a saved password never opens the sign-in window")
+    @Test("A readable grant opens the sign-in window, whether it keeps a saved password or a session")
     func openingFollowsTheGrant() {
         let record = SiteRecord(id: "example.com", name: "Bank", added: Date(timeIntervalSince1970: 0))
         let password = grant(remembersPassword: true)
@@ -471,10 +471,10 @@ struct SiteRequestTests {
 
         for route in [Window.SignInRoute.signingIn(host: "example.com", requestedBy: "p"),
                       .signingInAgain(siteID: "example.com", requestedBy: "p")] {
-            #expect(Window.opening(for: route, record: record, grant: password)
-                == .signingInAgain(grant: password, record: record, requestedBy: "p"))
-            #expect(Window.opening(for: route, record: record, grant: session)
-                == .signIn(host: "example.com", requestedBy: "p"))
+            for stored in [password, session] {
+                #expect(Window.opening(for: route, record: record, grant: stored)
+                    == .signIn(host: "example.com", requestedBy: "p"))
+            }
         }
     }
 

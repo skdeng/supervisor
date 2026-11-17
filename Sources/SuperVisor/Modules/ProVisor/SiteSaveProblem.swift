@@ -16,6 +16,9 @@ enum SiteSaveProblem: Equatable {
     case notSaved
     /// The site a session would be saved as keeps a saved password, which the save would discard.
     case hasSavedPassword
+    /// A hidden read of the start page does not show the site's stored sign-in signed in, so
+    /// the person's sign-in is not recorded.
+    case signInNotConfirmed
 
     var message: String {
         switch self {
@@ -39,6 +42,8 @@ enum SiteSaveProblem: Equatable {
             "The site could not be saved to the Keychain."
         case .hasSavedPassword:
             "This site has a saved password. Use Sign In Again in Settings to sign in to it."
+        case .signInNotConfirmed:
+            "SuperVisor couldn't confirm you're signed in. Finish signing in on the page, then press Done."
         }
     }
 
@@ -55,7 +60,7 @@ enum SiteSaveProblem: Equatable {
         case .pageDidNotLoad:
             "The page did not finish loading."
         case .invalidAddress, .invalidGrant, .passwordNotConfirmed, .passwordNotFilled, .notSaved,
-             .hasSavedPassword:
+             .hasSavedPassword, .signInNotConfirmed:
             message
         }
     }

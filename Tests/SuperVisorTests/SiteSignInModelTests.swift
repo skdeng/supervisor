@@ -46,7 +46,7 @@ struct SiteSignInModelTests {
         #expect(asked == 0)
     }
 
-    @Test("A granted site with no readable grant, or one with a saved password, never opens a page by itself")
+    @Test("A granted site with no readable grant never opens a page by itself, and one with a saved password fills it")
     func startUntrustedGrant() {
         var asked = 0
         let visited: (String) -> Bool = { _ in
@@ -68,6 +68,9 @@ struct SiteSignInModelTests {
             codeSender: nil
         )
         #expect(Start.decide(host: "example.com", record: record(), grant: password, hasVisited: visited)
+            == .fillsSavedPassword(password))
+        // The grant alone decides: a request for a host that is not granted never fills.
+        #expect(Start.decide(host: "example.com", record: nil, grant: password) { _ in false }
             == .asksForAddress(host: "example.com"))
         #expect(asked == 0)
     }
@@ -608,6 +611,15 @@ struct SiteSignInModelTests {
         #expect(destination([password]) == .keptSession(password))
         grants["example.com"] = passwordGrant()
         #expect(destination([session]) == .savedPassword)
+
+        // Only the window opened for that same site with a saved password may land on it.
+        #expect(Destination.of("example.com", sites: [password], grant: { grants[$0] }, savedPasswordSite: "example.com")
+            == .ownSavedPassword(password))
+        #expect(Destination.of("example.com", sites: [password], grant: { grants[$0] }, savedPasswordSite: "other.example")
+            == .savedPassword)
+        grants["example.com"] = nil
+        #expect(Destination.of("example.com", sites: [password], grant: { grants[$0] }, savedPasswordSite: "example.com")
+            == .savedPassword)
     }
 
     @Test("Typing the address of a saved-password site and pressing Done stores nothing and keeps the password", .timeLimit(.minutes(1)))

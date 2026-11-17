@@ -66,9 +66,10 @@ final class SiteAccessCenter: ObservableObject {
 
     let access: SiteAccess
 
-    /// Called after each save, once the site is stored and the list refreshed, with the saved
-    /// record and whether the site was waiting on the person: flagged as needing them, or
-    /// turned away from a run since they last signed in.
+    /// Called after each save, and after each sign-in by the person recorded with the stored
+    /// grant kept (`personSignedIn`), once the list is refreshed, with the record and whether
+    /// the site was waiting on the person: flagged as needing them, or turned away from a run
+    /// since they last signed in.
     var onSiteSaved: (@MainActor (_ record: SiteRecord, _ wasAwaited: Bool) -> Void)?
 
     /// Called with the site's id each time a run is turned away from it for want of the
@@ -158,10 +159,15 @@ final class SiteAccessCenter: ObservableObject {
     }
 
     /// An enrollment for the sign-in window that records the user name and password the person
-    /// types, so that a saved session can be offered a password
-    /// (`SiteEnrollment.recordingCredentials`).
+    /// types, so that a sign-in can be offered a password (`SiteEnrollment.recordingCredentials`).
     func makeRecordingEnrollment() -> SiteEnrollment {
         SiteEnrollment.recordingCredentials(dataStore: dataStore, codes: codes)
+    }
+
+    /// An enrollment for the sign-in window that records nothing the person types and probes
+    /// the page of any sign-in (`SiteEnrollment.watchingSignIn`).
+    func makeWatchingEnrollment() -> SiteEnrollment {
+        SiteEnrollment.watchingSignIn(dataStore: dataStore, codes: codes)
     }
 
     /// Whether the sign-in window may offer to keep a password the person typed.
@@ -186,6 +192,23 @@ final class SiteAccessCenter: ObservableObject {
         forgetAwaiting(record.id)
         refresh()
         onSiteSaved?(record, wasAwaited)
+    }
+
+    /// Records that the person signed in to the site themselves while its stored grant stays as
+    /// it is (`SiteAccess.personSignedIn`), and returns the record, or nil when the sign-in
+    /// could not be confirmed or recorded. `storedPasswordWorked` says the app's own fill of
+    /// the saved password was accepted. The site stops awaiting the person, and `onSiteSaved`
+    /// hears of it as of a save.
+    func personSignedIn(siteID: String, storedPasswordWorked: Bool) async -> SiteRecord? {
+        let wasAwaited = isAwaited(siteID)
+        guard let record = await access.personSignedIn(siteID: siteID, storedPasswordWorked: storedPasswordWorked) else {
+            refresh()
+            return nil
+        }
+        forgetAwaiting(siteID)
+        refresh()
+        onSiteSaved?(record, wasAwaited)
+        return record
     }
 
     /// Removes the site's sign-in, registry entry, and cookies, and throws when that could not
