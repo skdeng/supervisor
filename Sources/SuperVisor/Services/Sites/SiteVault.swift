@@ -128,6 +128,31 @@ struct KeychainSecretStore: SecretStore {
     }
 }
 
+/// A form field, identified the way it was when the user granted the site.
+struct FieldKey: Codable, Equatable, Sendable {
+    /// Empty when the field has none.
+    let name: String
+    let id: String
+    let autocomplete: String
+    /// The input's `type` attribute, lowercased.
+    let type: String
+}
+
+/// One fill the app performed while the user watched it sign in: which value, on exactly which
+/// page, into exactly which field.
+struct SignInStep: Codable, Equatable, Sendable {
+    enum Kind: String, Codable, Sendable {
+        case username, password, code
+    }
+
+    let kind: Kind
+    /// `https://host`, with no port.
+    let origin: String
+    /// `location.pathname` at the time of the fill.
+    let path: String
+    let field: FieldKey
+}
+
 /// What the user granted for one site: the secrets, and everything that decides where they
 /// may be used. It lives in the Keychain as one item because a plain file can be edited by
 /// anything running as the user, and an edited sign-in address would send the password there.
@@ -139,6 +164,9 @@ struct SiteGrant: Codable, Equatable, Sendable {
     static let maximumHosts = 12
     static let maximumUsernameLength = 256
     static let maximumPasswordLength = 1024
+    static let maximumSteps = 6
+    static let maximumStepPathLength = 512
+    static let maximumFieldKeyLength = 128
 
     let username: String
     let password: String
@@ -155,12 +183,64 @@ struct SiteGrant: Codable, Equatable, Sendable {
     let codeKind: CodeKind
     /// The handle (phone number, short code, or address) the site's codes come from.
     let codeSender: String?
+    /// The fills the app performed while the user watched it sign in, in the order made. The
+    /// app signs in by itself only through these, each on the exact page and into the exact
+    /// field it was recorded for. An empty list means the app cannot sign in by itself.
+    let signInSteps: [SignInStep]
+    /// Whether the page the user ended the enrollment on showed a link or button that signs out.
+    /// A start page that shows none is then not a signed-in page.
+    let signOutControlSeen: Bool
+
+    init(
+        username: String,
+        password: String,
+        authenticatorKey: String?,
+        signInURL: URL,
+        startURL: URL,
+        fillHosts: [String],
+        browseHosts: [String],
+        codeKind: CodeKind,
+        codeSender: String?,
+        signInSteps: [SignInStep] = [],
+        signOutControlSeen: Bool = false
+    ) {
+        self.username = username
+        self.password = password
+        self.authenticatorKey = authenticatorKey
+        self.signInURL = signInURL
+        self.startURL = startURL
+        self.fillHosts = fillHosts
+        self.browseHosts = browseHosts
+        self.codeKind = codeKind
+        self.codeSender = codeSender
+        self.signInSteps = signInSteps
+        self.signOutControlSeen = signOutControlSeen
+    }
+
+    /// A stored grant without the `signInSteps` or `signOutControlSeen` key reads as one with
+    /// no steps and no sign-out control seen.
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        username = try values.decode(String.self, forKey: .username)
+        password = try values.decode(String.self, forKey: .password)
+        authenticatorKey = try values.decodeIfPresent(String.self, forKey: .authenticatorKey)
+        signInURL = try values.decode(URL.self, forKey: .signInURL)
+        startURL = try values.decode(URL.self, forKey: .startURL)
+        fillHosts = try values.decode([String].self, forKey: .fillHosts)
+        browseHosts = try values.decode([String].self, forKey: .browseHosts)
+        codeKind = try values.decode(CodeKind.self, forKey: .codeKind)
+        codeSender = try values.decodeIfPresent(String.self, forKey: .codeSender)
+        signInSteps = try values.decodeIfPresent([SignInStep].self, forKey: .signInSteps) ?? []
+        signOutControlSeen = try values.decodeIfPresent(Bool.self, forKey: .signOutControlSeen) ?? false
+    }
 
     /// Whether this grant may be stored for, and used at, `siteID`.
     ///
     /// The site id is the sign-in host. Both URLs are `https` with no credentials and no
     /// explicit port, and each host is in the browse list; the sign-in host is in the fill
-    /// list, which lies within the browse list. A grant that fails any rule is never used.
+    /// list, which lies within the browse list. Each recorded step names a fill host's origin,
+    /// an absolute path, and bounded field attributes, and the steps use each kind once. A
+    /// grant that fails any rule is never used.
     func isValid(for siteID: String) -> Bool {
         guard SiteHost.isValid(siteID),
               let signInHost = Self.secureHost(of: signInURL),
@@ -173,7 +253,8 @@ struct SiteGrant: Codable, Equatable, Sendable {
               fillHosts.contains(signInHost),
               fillHosts.allSatisfy(browseHosts.contains),
               (1...Self.maximumUsernameLength).contains(username.count),
-              (1...Self.maximumPasswordLength).contains(password.count)
+              (1...Self.maximumPasswordLength).contains(password.count),
+              areValidSteps
         else { return false }
 
         if let authenticatorKey, TOTPKey.parse(authenticatorKey) == nil { return false }
@@ -188,6 +269,22 @@ struct SiteGrant: Codable, Equatable, Sendable {
                 of: #"\A[A-Za-z0-9+@._-]{2,80}\z"#,
                 options: .regularExpression
             ) != nil
+        }
+    }
+
+    private var areValidSteps: Bool {
+        guard signInSteps.count <= Self.maximumSteps,
+              Set(signInSteps.map(\.kind)).count == signInSteps.count
+        else { return false }
+        return signInSteps.allSatisfy { step in
+            guard step.origin.hasPrefix("https://"),
+                  fillHosts.contains(String(step.origin.dropFirst("https://".count))),
+                  step.path.hasPrefix("/"),
+                  step.path.count <= Self.maximumStepPathLength,
+                  [step.field.name, step.field.id, step.field.autocomplete, step.field.type]
+                      .allSatisfy({ $0.count <= Self.maximumFieldKeyLength })
+            else { return false }
+            return step.kind != .code || codeKind != .none
         }
     }
 

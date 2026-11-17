@@ -396,6 +396,29 @@ struct MessagesStore: Sendable {
         return found
     }
 
+    /// The oldest incoming code message that arrived after `afterRowID`, from any sender that
+    /// has a handle, with that message's row id.
+    ///
+    /// This is for enrollment, while the user watches the app sign in: it learns which handle
+    /// the site's codes come from. Every later read names that recorded sender (`latestCode`),
+    /// so no sign-in takes a code from a sender the user did not see.
+    func firstCode(afterRowID: Int64) throws -> (code: String, sender: String, rowID: Int64)? {
+        var found: (code: String, sender: String, rowID: Int64)?
+        try read(Self.firstIncomingQuery, bind: { statement in
+            sqlite3_bind_int64(statement, 1, afterRowID)
+            sqlite3_bind_int(statement, 2, Int32(Self.maximumScannedRows))
+        }) { statement in
+            guard let message = Self.message(from: statement),
+                  !message.sender.isEmpty,
+                  SignInCode.isCodeMessage(message.text),
+                  let code = SignInCode.code(in: message.text)
+            else { return true }
+            found = (code, message.sender, message.rowID)
+            return false
+        }
+        return found
+    }
+
     // MARK: Connection
 
     /// The connection every read uses, opened read-only. The caller closes it.
@@ -447,6 +470,16 @@ struct MessagesStore: Sendable {
         WHERE message.ROWID > ?1 AND handle.id = ?2 AND message.is_from_me = 0
         ORDER BY message.ROWID DESC
         LIMIT ?3
+        """
+
+    private static let firstIncomingQuery = """
+        SELECT message.ROWID, message.text, message.attributedBody, message.date,
+               message.is_from_me, handle.id
+        FROM message
+        JOIN handle ON handle.ROWID = message.handle_id
+        WHERE message.ROWID > ?1 AND message.is_from_me = 0
+        ORDER BY message.ROWID ASC
+        LIMIT ?2
         """
 
     private static let nanosecondThreshold: Int64 = 100_000_000_000

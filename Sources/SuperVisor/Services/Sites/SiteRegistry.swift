@@ -37,6 +37,12 @@ struct SiteRecord: Codable, Identifiable, Equatable, Sendable {
     var name: String
     var added: Date
     var lastSignedIn: Date?
+    /// The local calendar day (`yyyy-MM-dd`) that `attemptCount` counts unattended sign-in
+    /// attempts for.
+    var attemptsDay: String?
+    var attemptCount = 0
+    /// Set when an unattended sign-in failed; cleared when the person signs in again.
+    var needsPerson = false
 
     /// The id is a valid host and the name holds 1 to 60 characters once cleaned.
     var isValid: Bool {
@@ -44,14 +50,127 @@ struct SiteRecord: Codable, Identifiable, Equatable, Sendable {
             && Proposal.displayText(name, limit: Self.nameLimit, truncates: false) != nil
     }
 
-    /// The record with its name cleaned the way `isValid` measures it; nil when invalid.
+    /// The record with its name cleaned the way `isValid` measures it, and its attempt
+    /// bookkeeping brought within range; nil when invalid.
     fileprivate var cleaned: SiteRecord? {
         guard SiteHost.isValid(id),
               let name = Proposal.displayText(name, limit: Self.nameLimit, truncates: false)
         else { return nil }
         var record = self
         record.name = name
+        if let day = record.attemptsDay,
+           day.range(of: #"\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z"#, options: .regularExpression) == nil {
+            record.attemptsDay = nil
+        }
+        record.attemptCount = min(max(record.attemptCount, 0), Self.attemptCountLimit)
         return record
+    }
+
+    /// The attempt count a stored record is held to; far above `SignInAttempts.perDay`.
+    private static let attemptCountLimit = 1_000
+}
+
+extension SiteRecord {
+    /// A stored record without the attempt keys reads as one with no attempts.
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        added = try values.decode(Date.self, forKey: .added)
+        lastSignedIn = try values.decodeIfPresent(Date.self, forKey: .lastSignedIn)
+        attemptsDay = try values.decodeIfPresent(String.self, forKey: .attemptsDay)
+        attemptCount = try values.decodeIfPresent(Int.self, forKey: .attemptCount) ?? 0
+        needsPerson = try values.decodeIfPresent(Bool.self, forKey: .needsPerson) ?? false
+    }
+}
+
+/// How many times a day the app may try to sign in by itself, and when it must stop.
+///
+/// A site that challenges or locks an account after a few failed sign-ins is spared further
+/// attempts. A failure that says the person is needed stops the app until the person signs in
+/// again; one that may pass on its own (a code that did not arrive, a page that did not load)
+/// uses up an attempt and nothing more.
+enum SignInAttempts {
+    static let perDay = 3
+
+    /// How an attempt ended, as far as the bookkeeping is concerned.
+    enum AttemptOutcome: Equatable, Sendable {
+        case succeeded
+        /// The attempt failed in a way that may not repeat.
+        case transientFailure
+        /// The attempt failed in a way that only the person can put right.
+        case needsPerson
+    }
+
+    /// False once the person is needed, or once `perDay` attempts have been made today.
+    static func mayAttempt(_ record: SiteRecord, now: Date, timeZone: TimeZone) -> Bool {
+        if record.needsPerson { return false }
+        guard record.attemptsDay == day(of: now, in: timeZone) else { return true }
+        return record.attemptCount < perDay
+    }
+
+    /// The record with one more attempt counted, before the attempt's outcome is known. The
+    /// first attempt of a new day restarts the count.
+    static func beginning(attemptOn record: SiteRecord, now: Date, timeZone: TimeZone) -> SiteRecord {
+        var updated = record
+        let today = day(of: now, in: timeZone)
+        if updated.attemptsDay != today {
+            updated.attemptsDay = today
+            updated.attemptCount = 0
+        }
+        updated.attemptCount += 1
+        return updated
+    }
+
+    /// The record after the outcome of an attempt that was already counted. A success stamps
+    /// `lastSignedIn` and clears `needsPerson`, a failure that needs the person sets it, and a
+    /// transient failure leaves it as it was.
+    static func settling(_ record: SiteRecord, outcome: AttemptOutcome, now: Date) -> SiteRecord {
+        var updated = record
+        switch outcome {
+        case .succeeded:
+            updated.lastSignedIn = now
+            updated.needsPerson = false
+        case .transientFailure:
+            break
+        case .needsPerson:
+            updated.needsPerson = true
+        }
+        return updated
+    }
+
+    /// The record after one attempt and its outcome.
+    static func recording(
+        attemptOn record: SiteRecord,
+        outcome: AttemptOutcome,
+        now: Date,
+        timeZone: TimeZone
+    ) -> SiteRecord {
+        settling(beginning(attemptOn: record, now: now, timeZone: timeZone), outcome: outcome, now: now)
+    }
+
+    /// The record with an attempt that was cut short taken back: its count and day are those of
+    /// `earlier`, the record as it was before the attempt was counted.
+    static func abandoning(_ record: SiteRecord, restoring earlier: SiteRecord) -> SiteRecord {
+        var updated = record
+        updated.attemptsDay = earlier.attemptsDay
+        updated.attemptCount = earlier.attemptCount
+        return updated
+    }
+
+    /// The record after the person signed in themselves: attempts start over.
+    static func recordingPersonSignedIn(_ record: SiteRecord, now: Date) -> SiteRecord {
+        var updated = record
+        updated.needsPerson = false
+        updated.attemptCount = 0
+        updated.attemptsDay = nil
+        updated.lastSignedIn = now
+        return updated
+    }
+
+    /// `yyyy-MM-dd` for the calendar day `date` falls on in `timeZone`.
+    static func day(of date: Date, in timeZone: TimeZone) -> String {
+        date.formatted(Date.ISO8601FormatStyle(timeZone: timeZone).year().month().day())
     }
 }
 

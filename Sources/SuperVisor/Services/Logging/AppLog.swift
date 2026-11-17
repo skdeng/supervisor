@@ -12,6 +12,20 @@ enum AppLogCategory: String, CaseIterable, Sendable {
     case fileShelf
     case flow
     case provisor
+    case sites
+}
+
+/// Lines that were logged while the capture was installed, kept for a test that checks what the
+/// code emits.
+final class AppLogCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var collected: [String] = []
+
+    var lines: [String] { lock.withLock { collected } }
+
+    fileprivate func append(_ line: String) {
+        lock.withLock { collected.append(line) }
+    }
 }
 
 enum AppLog {
@@ -19,18 +33,37 @@ enum AppLog {
 
     private static let loggers = LoggerStore()
     private static let fileMirror = FileLogMirror()
+    private static let captureLock = NSLock()
+    nonisolated(unsafe) private static var capture: AppLogCapture?
+
+    /// Installs `capture`, or removes the installed one when nil. While one is installed every
+    /// line is collected there and none reaches the system log or the log file.
+    static func install(_ capture: AppLogCapture?) {
+        captureLock.withLock { Self.capture = capture }
+    }
+
+    private static func diverted(_ level: String, _ category: AppLogCategory, _ message: String) -> Bool {
+        captureLock.withLock {
+            guard let capture else { return false }
+            capture.append("\(level) [\(category.rawValue)] \(message)")
+            return true
+        }
+    }
 
     static func notice(_ category: AppLogCategory, _ message: String) {
+        guard !diverted("NOTICE", category, message) else { return }
         loggers[category].notice("\(message, privacy: .public)")
         fileMirror.append(level: "NOTICE", category: category, message: message)
     }
 
     static func error(_ category: AppLogCategory, _ message: String) {
+        guard !diverted("ERROR", category, message) else { return }
         loggers[category].error("\(message, privacy: .public)")
         fileMirror.append(level: "ERROR", category: category, message: message)
     }
 
     static func debug(_ category: AppLogCategory, _ message: String) {
+        guard !diverted("DEBUG", category, message) else { return }
         loggers[category].debug("\(message, privacy: .public)")
     }
 }
@@ -55,6 +88,7 @@ private struct LoggerStore: Sendable {
         subsystem: AppLog.subsystem,
         category: AppLogCategory.provisor.rawValue
     )
+    private let sites = Logger(subsystem: AppLog.subsystem, category: AppLogCategory.sites.rawValue)
 
     subscript(category: AppLogCategory) -> Logger {
         switch category {
@@ -68,6 +102,7 @@ private struct LoggerStore: Sendable {
         case .fileShelf: fileShelf
         case .flow: flow
         case .provisor: provisor
+        case .sites: sites
         }
     }
 }

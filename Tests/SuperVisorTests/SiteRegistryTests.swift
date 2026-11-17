@@ -160,7 +160,7 @@ struct SiteRegistryTests {
         }
     }
 
-    @Test("The file holds nothing but the display fields")
+    @Test("The file holds nothing but the display fields and the attempt bookkeeping")
     func fileHoldsNoDestinations() throws {
         try withTemporaryDirectory { directory in
             let file = directory.appendingPathComponent("sites.json")
@@ -169,7 +169,64 @@ struct SiteRegistryTests {
                 JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [[String: Any]]
             )
 
-            #expect(Set(object[0].keys) == ["id", "name", "added"])
+            #expect(Set(object[0].keys) == ["id", "name", "added", "attemptCount", "needsPerson"])
+        }
+    }
+
+    @Test("A file written before the attempt keys existed loads with no attempts")
+    func fileWithoutAttemptKeys() throws {
+        try withTemporaryDirectory { directory in
+            let file = directory.appendingPathComponent("sites.json")
+            let entry: [String: Any] = [
+                "id": "example.com",
+                "name": "Example",
+                "added": "2023-11-14T22:13:20Z",
+                "lastSignedIn": "2023-11-14T23:13:20Z",
+            ]
+            try JSONSerialization.data(withJSONObject: [entry]).write(to: file)
+
+            let loaded = try #require(SiteRegistry.load(from: file).first)
+
+            #expect(loaded.attemptsDay == nil)
+            #expect(loaded.attemptCount == 0)
+            #expect(!loaded.needsPerson)
+            #expect(loaded.lastSignedIn == Date(timeIntervalSince1970: 1_700_003_600))
+        }
+    }
+
+    @Test("Attempt bookkeeping round-trips through the file")
+    func attemptKeysRoundTrip() throws {
+        try withTemporaryDirectory { directory in
+            let file = directory.appendingPathComponent("sites.json")
+            var marked = record()
+            marked.attemptsDay = "2026-11-16"
+            marked.attemptCount = 2
+            marked.needsPerson = true
+
+            try SiteRegistry.save([marked], to: file)
+
+            #expect(SiteRegistry.load(from: file) == [marked])
+        }
+    }
+
+    @Test("A stored attempt day that is not a date, and a count out of range, are brought back in range")
+    func attemptKeysAreBounded() throws {
+        try withTemporaryDirectory { directory in
+            let file = directory.appendingPathComponent("sites.json")
+            var tampered = record()
+            tampered.attemptsDay = "tomorrow\n"
+            tampered.attemptCount = -4
+            try write([tampered], to: file)
+            var loaded = try #require(SiteRegistry.load(from: file).first)
+            #expect(loaded.attemptsDay == nil)
+            #expect(loaded.attemptCount == 0)
+
+            tampered.attemptsDay = "2026-11-16"
+            tampered.attemptCount = Int.max
+            try write([tampered], to: file)
+            loaded = try #require(SiteRegistry.load(from: file).first)
+            #expect(loaded.attemptsDay == "2026-11-16")
+            #expect(loaded.attemptCount == 1_000)
         }
     }
 
@@ -412,6 +469,225 @@ struct SiteRegistryTests {
             try write([record(id: "hand.example.org", name: "  Hand \n Written\u{1B}[0m ")], to: file)
             #expect(SiteRegistry.load(from: file).first?.name == "Hand Written[0m")
         }
+    }
+
+    // MARK: Attempts
+
+    private func zone(_ identifier: String) -> TimeZone { TimeZone(identifier: identifier)! }
+
+    /// 2026-11-16 at the given hour, UTC.
+    private func utc(hour: Int, day: Int = 16) -> Date {
+        var components = DateComponents()
+        components.calendar = Calendar(identifier: .gregorian)
+        components.timeZone = TimeZone(identifier: "UTC")
+        components.year = 2026
+        components.month = 11
+        components.day = day
+        components.hour = hour
+        return components.date!
+    }
+
+    @Test("The day is the calendar day in the given time zone")
+    func attemptDay() {
+        // 23:30 in Los Angeles on the 15th is 07:30 UTC on the 16th.
+        let instant = utc(hour: 7).addingTimeInterval(1_800)
+        #expect(SignInAttempts.day(of: instant, in: zone("UTC")) == "2026-11-16")
+        #expect(SignInAttempts.day(of: instant, in: zone("America/Los_Angeles")) == "2026-11-15")
+        #expect(SignInAttempts.day(of: instant, in: zone("Pacific/Auckland")) == "2026-11-16")
+    }
+
+    @Test("A site with no attempts may be tried, and a failure or a success is counted")
+    func attemptRecording() {
+        let utcZone = zone("UTC")
+        let fresh = record()
+        #expect(SignInAttempts.mayAttempt(fresh, now: utc(hour: 9), timeZone: utcZone))
+
+        let succeeded = SignInAttempts.recording(
+            attemptOn: fresh,
+            outcome: .succeeded,
+            now: utc(hour: 9),
+            timeZone: utcZone
+        )
+        #expect(succeeded.attemptsDay == "2026-11-16")
+        #expect(succeeded.attemptCount == 1)
+        #expect(succeeded.lastSignedIn == utc(hour: 9))
+        #expect(!succeeded.needsPerson)
+
+        let failed = SignInAttempts.recording(
+            attemptOn: fresh,
+            outcome: .needsPerson,
+            now: utc(hour: 9),
+            timeZone: utcZone
+        )
+        #expect(failed.attemptCount == 1)
+        #expect(failed.needsPerson)
+        #expect(failed.lastSignedIn == nil)
+        #expect(!SignInAttempts.mayAttempt(failed, now: utc(hour: 9), timeZone: utcZone))
+    }
+
+    @Test("Three attempts are allowed a day and the fourth is refused")
+    func attemptsPerDay() {
+        let utcZone = zone("UTC")
+        var site = record()
+        for hour in [8, 9, 10] {
+            #expect(SignInAttempts.mayAttempt(site, now: utc(hour: hour), timeZone: utcZone))
+            site = SignInAttempts.recording(
+                attemptOn: site,
+                outcome: .succeeded,
+                now: utc(hour: hour),
+                timeZone: utcZone
+            )
+        }
+        #expect(site.attemptCount == SignInAttempts.perDay)
+        #expect(!SignInAttempts.mayAttempt(site, now: utc(hour: 11), timeZone: utcZone))
+    }
+
+    @Test("A new day starts the count again, by the calendar of the time zone")
+    func attemptsResetOnANewDay() {
+        let utcZone = zone("UTC")
+        var site = record()
+        for hour in [8, 9, 10] {
+            site = SignInAttempts.recording(attemptOn: site, outcome: .succeeded, now: utc(hour: hour), timeZone: utcZone)
+        }
+        #expect(!SignInAttempts.mayAttempt(site, now: utc(hour: 23), timeZone: utcZone))
+        #expect(SignInAttempts.mayAttempt(site, now: utc(hour: 0, day: 17), timeZone: utcZone))
+
+        let next = SignInAttempts.recording(
+            attemptOn: site,
+            outcome: .succeeded,
+            now: utc(hour: 0, day: 17),
+            timeZone: utcZone
+        )
+        #expect(next.attemptsDay == "2026-11-17")
+        #expect(next.attemptCount == 1)
+
+        // Attempts at 05:00 to 07:00 UTC fall on the 15th in Los Angeles (21:00 to 23:00), so the
+        // local day turns at 08:00 UTC, while the UTC day has hours to run.
+        let losAngeles = zone("America/Los_Angeles")
+        var local = record()
+        var universal = record()
+        for hour in [5, 6, 7] {
+            local = SignInAttempts.recording(attemptOn: local, outcome: .succeeded, now: utc(hour: hour), timeZone: losAngeles)
+            universal = SignInAttempts.recording(attemptOn: universal, outcome: .succeeded, now: utc(hour: hour), timeZone: utcZone)
+        }
+        let afterMidnightInLosAngeles = utc(hour: 8).addingTimeInterval(1_800)
+        #expect(!SignInAttempts.mayAttempt(local, now: utc(hour: 7).addingTimeInterval(1_800), timeZone: losAngeles))
+        #expect(SignInAttempts.mayAttempt(local, now: afterMidnightInLosAngeles, timeZone: losAngeles))
+        #expect(!SignInAttempts.mayAttempt(universal, now: afterMidnightInLosAngeles, timeZone: utcZone))
+    }
+
+    @Test("A failure stops attempts on the same day and the next, until a person signs in")
+    func failureStopsAttempts() {
+        let utcZone = zone("UTC")
+        let failed = SignInAttempts.recording(
+            attemptOn: record(),
+            outcome: .needsPerson,
+            now: utc(hour: 9),
+            timeZone: utcZone
+        )
+
+        #expect(!SignInAttempts.mayAttempt(failed, now: utc(hour: 9), timeZone: utcZone))
+        #expect(!SignInAttempts.mayAttempt(failed, now: utc(hour: 9, day: 20), timeZone: utcZone))
+
+        let signedIn = SignInAttempts.recordingPersonSignedIn(failed, now: utc(hour: 12))
+        #expect(!signedIn.needsPerson)
+        #expect(signedIn.attemptCount == 0)
+        #expect(signedIn.lastSignedIn == utc(hour: 12))
+        #expect(SignInAttempts.mayAttempt(signedIn, now: utc(hour: 12), timeZone: utcZone))
+    }
+
+    @Test("A failure that may not repeat uses up an attempt and does not set the flag")
+    func transientFailure() {
+        let utcZone = zone("UTC")
+        var site = record()
+        for hour in [8, 9, 10] {
+            #expect(SignInAttempts.mayAttempt(site, now: utc(hour: hour), timeZone: utcZone))
+            site = SignInAttempts.recording(
+                attemptOn: site,
+                outcome: .transientFailure,
+                now: utc(hour: hour),
+                timeZone: utcZone
+            )
+            #expect(!site.needsPerson)
+            #expect(site.lastSignedIn == nil)
+        }
+        #expect(site.attemptCount == 3)
+        #expect(!SignInAttempts.mayAttempt(site, now: utc(hour: 11), timeZone: utcZone))
+        #expect(SignInAttempts.mayAttempt(site, now: utc(hour: 0, day: 17), timeZone: utcZone))
+    }
+
+    @Test("A transient failure leaves a flag that was already set, and a success clears it")
+    func transientFailureKeepsTheFlag() {
+        let utcZone = zone("UTC")
+        var flagged = record()
+        flagged.needsPerson = true
+
+        let transient = SignInAttempts.recording(attemptOn: flagged, outcome: .transientFailure, now: utc(hour: 9), timeZone: utcZone)
+        #expect(transient.needsPerson)
+
+        let succeeded = SignInAttempts.recording(attemptOn: flagged, outcome: .succeeded, now: utc(hour: 9), timeZone: utcZone)
+        #expect(!succeeded.needsPerson)
+    }
+
+    @Test("An attempt is counted before its outcome, settled after, and one cut short is taken back")
+    func countedThenSettled() {
+        let utcZone = zone("UTC")
+        let before = record()
+
+        let counted = SignInAttempts.beginning(attemptOn: before, now: utc(hour: 9), timeZone: utcZone)
+        #expect(counted.attemptCount == 1)
+        #expect(counted.attemptsDay == "2026-11-16")
+        #expect(!counted.needsPerson)
+        #expect(counted.lastSignedIn == nil)
+
+        let failed = SignInAttempts.settling(counted, outcome: .needsPerson, now: utc(hour: 9))
+        #expect(failed.attemptCount == 1)
+        #expect(failed.needsPerson)
+        let signedIn = SignInAttempts.settling(counted, outcome: .succeeded, now: utc(hour: 9))
+        #expect(signedIn.attemptCount == 1)
+        #expect(signedIn.lastSignedIn == utc(hour: 9))
+        #expect(SignInAttempts.settling(counted, outcome: .transientFailure, now: utc(hour: 9)) == counted)
+        // Counting then settling is recording.
+        #expect(
+            SignInAttempts.recording(attemptOn: before, outcome: .needsPerson, now: utc(hour: 9), timeZone: utcZone)
+                == failed
+        )
+
+        let abandoned = SignInAttempts.abandoning(counted, restoring: before)
+        #expect(abandoned == before)
+
+        // An earlier attempt of the same day is kept when only the later one is taken back.
+        let second = SignInAttempts.beginning(attemptOn: counted, now: utc(hour: 10), timeZone: utcZone)
+        #expect(second.attemptCount == 2)
+        #expect(SignInAttempts.abandoning(second, restoring: counted).attemptCount == 1)
+        // The flag and sign-in time as they are now are not those of the record restored from.
+        var flagged = second
+        flagged.needsPerson = true
+        let kept = SignInAttempts.abandoning(flagged, restoring: counted)
+        #expect(kept.needsPerson)
+        #expect(kept.attemptCount == 1)
+    }
+
+    @Test("A success after earlier failures clears the flag, and a person's sign-in clears the count")
+    func successAndPersonClear() {
+        let utcZone = zone("UTC")
+        var flagged = record()
+        flagged.needsPerson = true
+        flagged.attemptsDay = "2026-11-16"
+        flagged.attemptCount = 3
+
+        let succeeded = SignInAttempts.recording(
+            attemptOn: flagged,
+            outcome: .succeeded,
+            now: utc(hour: 9),
+            timeZone: utcZone
+        )
+        #expect(!succeeded.needsPerson)
+
+        let person = SignInAttempts.recordingPersonSignedIn(flagged, now: utc(hour: 9))
+        #expect(!person.needsPerson)
+        #expect(person.attemptCount == 0)
+        #expect(SignInAttempts.mayAttempt(person, now: utc(hour: 9), timeZone: utcZone))
     }
 
     // MARK: Helpers

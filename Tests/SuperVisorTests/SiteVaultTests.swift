@@ -39,7 +39,9 @@ private func makeGrant(
     fill: [String] = ["example.com"],
     browse: [String] = ["example.com", "www.example.com"],
     kind: SiteGrant.CodeKind = .none,
-    sender: String? = nil
+    sender: String? = nil,
+    steps: [SignInStep] = [],
+    signOutControlSeen: Bool = false
 ) -> SiteGrant {
     SiteGrant(
         username: username,
@@ -50,7 +52,27 @@ private func makeGrant(
         fillHosts: fill,
         browseHosts: browse,
         codeKind: kind,
-        codeSender: sender
+        codeSender: sender,
+        signInSteps: steps,
+        signOutControlSeen: signOutControlSeen
+    )
+}
+
+/// A recorded fill on `https://example.com/login`.
+private func makeStep(
+    _ kind: SignInStep.Kind = .username,
+    origin: String = "https://example.com",
+    path: String = "/login",
+    name: String = "username",
+    id: String = "user",
+    autocomplete: String = "username",
+    type: String = "text"
+) -> SignInStep {
+    SignInStep(
+        kind: kind,
+        origin: origin,
+        path: path,
+        field: FieldKey(name: name, id: id, autocomplete: autocomplete, type: type)
     )
 }
 
@@ -74,6 +96,59 @@ struct SiteVaultTests {
         try vault.save(grant, for: "example.com")
 
         #expect(try vault.grant(for: "example.com") == grant)
+    }
+
+    @Test("A grant's recorded sign-in steps read back whole")
+    func stepsRoundTrip() throws {
+        let vault = SiteVault(store: InMemorySecretStore())
+        let grant = makeGrant(
+            kind: .text,
+            sender: "24273",
+            steps: [
+                makeStep(.username),
+                makeStep(.password, name: "password", id: "pass", autocomplete: "current-password", type: "password"),
+                makeStep(.code, path: "/verify", name: "otp", id: "", autocomplete: "one-time-code"),
+            ]
+        )
+
+        try vault.save(grant, for: "example.com")
+
+        #expect(try vault.grant(for: "example.com") == grant)
+        #expect(try vault.grant(for: "example.com")?.signInSteps.count == 3)
+    }
+
+    @Test("A stored grant from before steps were recorded reads back with none")
+    func grantWithoutStepsKey() throws {
+        let store = InMemorySecretStore()
+        let vault = SiteVault(store: store)
+        try vault.save(makeGrant(), for: "example.com")
+        let stored = try #require(try store.read(account: "example.com"))
+        var object = try #require(JSONSerialization.jsonObject(with: stored) as? [String: Any])
+        #expect(object["signInSteps"] as? [Any] != nil)
+        object["signInSteps"] = nil
+        try store.write(try JSONSerialization.data(withJSONObject: object), account: "example.com")
+
+        let read = try #require(try vault.grant(for: "example.com"))
+
+        #expect(read.signInSteps.isEmpty)
+        #expect(read == makeGrant())
+    }
+
+    @Test("Whether a sign-out control was seen reads back, and a grant stored without it reads as none seen")
+    func signOutControlSeen() throws {
+        let store = InMemorySecretStore()
+        let vault = SiteVault(store: store)
+        try vault.save(makeGrant(signOutControlSeen: true), for: "example.com")
+        #expect(try vault.grant(for: "example.com")?.signOutControlSeen == true)
+
+        let stored = try #require(try store.read(account: "example.com"))
+        var object = try #require(JSONSerialization.jsonObject(with: stored) as? [String: Any])
+        #expect(object["signOutControlSeen"] as? Bool == true)
+        object["signOutControlSeen"] = nil
+        try store.write(try JSONSerialization.data(withJSONObject: object), account: "example.com")
+
+        #expect(try vault.grant(for: "example.com")?.signOutControlSeen == false)
+        #expect(!makeGrant().signOutControlSeen)
     }
 
     @Test("Each site has its own grant")
@@ -222,6 +297,18 @@ struct SiteVaultTests {
             ("explicit port added", { $0["signInURL"] = "https://example.com:8443/login" }),
             ("downgraded to http", { $0["signInURL"] = "http://example.com/login" }),
             ("sender on a kind that has none", { $0["codeSender"] = "24273" }),
+            ("step moved to a host that is not a fill host", {
+                $0["signInSteps"] = [[
+                    "kind": "username", "origin": "https://evil.example.net", "path": "/login",
+                    "field": ["name": "u", "id": "", "autocomplete": "", "type": "text"],
+                ]]
+            }),
+            ("step with a relative path", {
+                $0["signInSteps"] = [[
+                    "kind": "username", "origin": "https://example.com", "path": "login",
+                    "field": ["name": "u", "id": "", "autocomplete": "", "type": "text"],
+                ]]
+            }),
         ]
         for (name, edit) in edits {
             try store.write(try tampered(edit), account: "example.com")
@@ -597,6 +684,114 @@ struct SiteGrantTests {
     func invalidSenders(_ sender: String) {
         #expect(!makeGrant(kind: .text, sender: sender).isValid(for: "example.com"))
         #expect(!makeGrant(kind: .email, sender: sender).isValid(for: "example.com"))
+    }
+}
+
+@Suite("Site grant sign-in steps")
+struct SiteGrantStepTests {
+    private static let passwordStep = makeStep(
+        .password,
+        name: "password",
+        id: "pass",
+        autocomplete: "current-password",
+        type: "password"
+    )
+
+    @Test("No steps is valid and means the app cannot sign in by itself")
+    func emptyIsValid() {
+        #expect(makeGrant(steps: []).isValid(for: "example.com"))
+        #expect(makeGrant().signInSteps.isEmpty)
+    }
+
+    @Test("A username and password step on a fill host are valid")
+    func wellFormedSteps() {
+        #expect(makeGrant(steps: [makeStep(.username), Self.passwordStep]).isValid(for: "example.com"))
+        #expect(makeGrant(steps: [makeStep(.username)]).isValid(for: "example.com"))
+        #expect(
+            makeGrant(
+                fill: ["example.com", "www.example.com"],
+                steps: [makeStep(.username), makeStep(.password, origin: "https://www.example.com")]
+            ).isValid(for: "example.com")
+        )
+    }
+
+    @Test("A kind may be recorded once")
+    func eachKindOnce() {
+        #expect(!makeGrant(steps: [makeStep(.username), makeStep(.username, path: "/again")]).isValid(for: "example.com"))
+        #expect(
+            !makeGrant(steps: [Self.passwordStep, Self.passwordStep]).isValid(for: "example.com")
+        )
+    }
+
+    @Test("More than six steps are refused")
+    func atMostSixSteps() {
+        // Three kinds exist, so any seventh step also repeats a kind; both rules refuse it.
+        let seven = (0..<7).map { makeStep(.username, path: "/p\($0)") }
+        #expect(!makeGrant(steps: seven).isValid(for: "example.com"))
+        #expect(SiteGrant.maximumSteps == 6)
+    }
+
+    @Test(
+        "A step's origin is https and a fill host, exactly",
+        arguments: [
+            "http://example.com",
+            "https://other.example.org",
+            "https://www.example.com",
+            "https://example.com:8443",
+            "https://example.com:443",
+            "https://example.com/",
+            "https://example.com.evil.net",
+            "https://EXAMPLE.com",
+            "https://",
+            "example.com",
+            "",
+        ]
+    )
+    func originMustBeAFillHost(_ origin: String) {
+        #expect(!makeGrant(steps: [makeStep(origin: origin)]).isValid(for: "example.com"))
+    }
+
+    @Test("A step's path begins with a slash and holds at most 512 characters")
+    func pathRules() {
+        #expect(makeGrant(steps: [makeStep(path: "/")]).isValid(for: "example.com"))
+        #expect(makeGrant(steps: [makeStep(path: "/" + String(repeating: "p", count: 511))]).isValid(for: "example.com"))
+        #expect(!makeGrant(steps: [makeStep(path: "/" + String(repeating: "p", count: 512))]).isValid(for: "example.com"))
+        #expect(!makeGrant(steps: [makeStep(path: "login")]).isValid(for: "example.com"))
+        #expect(!makeGrant(steps: [makeStep(path: "")]).isValid(for: "example.com"))
+    }
+
+    @Test("Each field attribute holds at most 128 characters")
+    func fieldKeyLengths() {
+        let long = String(repeating: "f", count: 128)
+        let tooLong = String(repeating: "f", count: 129)
+        #expect(makeGrant(steps: [makeStep(name: long, id: long, autocomplete: long, type: long)]).isValid(for: "example.com"))
+        #expect(!makeGrant(steps: [makeStep(name: tooLong)]).isValid(for: "example.com"))
+        #expect(!makeGrant(steps: [makeStep(id: tooLong)]).isValid(for: "example.com"))
+        #expect(!makeGrant(steps: [makeStep(autocomplete: tooLong)]).isValid(for: "example.com"))
+        #expect(!makeGrant(steps: [makeStep(type: tooLong)]).isValid(for: "example.com"))
+        // A field with no attributes at all is describable, though matching it is weak.
+        #expect(makeGrant(steps: [makeStep(name: "", id: "", autocomplete: "", type: "")]).isValid(for: "example.com"))
+    }
+
+    @Test("A code step needs a code kind")
+    func codeStepNeedsACodeKind() {
+        let code = makeStep(.code, path: "/verify", name: "otp", id: "", autocomplete: "one-time-code")
+        #expect(!makeGrant(steps: [code]).isValid(for: "example.com"))
+        #expect(makeGrant(key: sampleKey, kind: .authenticator, steps: [code]).isValid(for: "example.com"))
+        #expect(makeGrant(kind: .text, sender: "24273", steps: [code]).isValid(for: "example.com"))
+        #expect(makeGrant(kind: .email, sender: "no-reply@example.com", steps: [code]).isValid(for: "example.com"))
+    }
+
+    @Test("A grant with steps still prints as a fixed placeholder")
+    func redactionWithSteps() {
+        let grant = makeGrant(steps: [makeStep(.username, name: "member-number-field")])
+        var dumped = ""
+        dump(grant, to: &dumped)
+
+        for rendering in [grant.description, String(reflecting: grant), dumped] {
+            #expect(!rendering.contains("member-number-field"))
+            #expect(!rendering.contains("/login"))
+        }
     }
 }
 

@@ -612,6 +612,69 @@ struct MessagesStoreTests {
         }
     }
 
+    // MARK: First code
+
+    @Test("The first code is the oldest code message after the baseline, whoever sent it")
+    func firstCodeFromAnySender() throws {
+        try withMessages { fixture, store in
+            let bank = try fixture.addHandle("24273")
+            let shop = try fixture.addHandle("+14155550123")
+            try fixture.addMessage(text: "Your code is 111111", date: nanoseconds(10), handle: bank)
+            let baseline = try store.latestRowID()
+            let first = try fixture.addMessage(text: "Your verification code is 222222", date: nanoseconds(20), handle: shop)
+            try fixture.addMessage(text: "Your code is 333333", date: nanoseconds(30), handle: bank)
+
+            let found = try #require(try store.firstCode(afterRowID: baseline))
+
+            #expect(found.code == "222222")
+            #expect(found.sender == "+14155550123")
+            #expect(found.rowID == first)
+            // The oldest is the one to take, even when a newer one carries a later date.
+            #expect(try store.firstCode(afterRowID: first)?.code == "333333")
+            #expect(try store.firstCode(afterRowID: first)?.sender == "24273")
+        }
+    }
+
+    @Test("The first code skips what is not an incoming code message")
+    func firstCodeSkips() throws {
+        try withMessages { fixture, store in
+            let bank = try fixture.addHandle("24273")
+            try fixture.addMessage(text: "Your code is 111111", date: nanoseconds(5), handle: bank)
+            let baseline = try store.latestRowID()
+            try fixture.addMessage(text: "My code is 999999", date: nanoseconds(10), fromMe: true, handle: bank)
+            try fixture.addMessage(text: "Your code is 888888", date: nanoseconds(15), handle: nil)
+            try fixture.addMessage(text: "Your balance is $1234.56", date: nanoseconds(20), handle: bank)
+            try fixture.addMessage(text: "Meeting room 4821", date: nanoseconds(25), handle: bank)
+            #expect(try store.firstCode(afterRowID: baseline) == nil)
+
+            // A code at or before the baseline is never returned.
+            #expect(try store.firstCode(afterRowID: baseline - 1)?.code == "111111")
+            #expect(try store.firstCode(afterRowID: baseline) == nil)
+
+            let arrived = try fixture.addMessage(body: archived("Use 482910 to sign in"), date: nanoseconds(30), handle: bank)
+            let found = try #require(try store.firstCode(afterRowID: baseline))
+            #expect(found.code == "482910")
+            #expect(found.rowID == arrived)
+        }
+    }
+
+    @Test("With no messages after the baseline there is no first code")
+    func firstCodeNone() throws {
+        try withMessages { fixture, store in
+            #expect(try store.firstCode(afterRowID: 0) == nil)
+            let bank = try fixture.addHandle("24273")
+            let row = try fixture.addMessage(text: "Your code is 111111", date: nanoseconds(10), handle: bank)
+            #expect(try store.firstCode(afterRowID: row) == nil)
+            #expect(try store.firstCode(afterRowID: Int64.max) == nil)
+        }
+    }
+
+    @Test("An unreadable database throws rather than reporting no code")
+    func firstCodeUnreadable() throws {
+        let store = MessagesStore(path: "/nonexistent/chat.db")
+        #expect(throws: MessagesStore.Failure.self) { try store.firstCode(afterRowID: 0) }
+    }
+
     // MARK: For a model
 
     @Test(

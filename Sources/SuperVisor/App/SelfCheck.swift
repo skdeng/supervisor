@@ -45,6 +45,15 @@ enum SelfCheck {
             }
             application.run()
             exit(0)
+        case "site-read":
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            let check = SiteReadCheck()
+            check.start { result in
+                finish(result, report: report)
+            }
+            application.run()
+            exit(0)
         case "agent":
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
@@ -236,7 +245,7 @@ enum SelfCheck {
 @MainActor
 private final class WebKitCheck: NSObject, WKNavigationDelegate {
     /// A data store used by this check alone.
-    private static let storeIdentifier = UUID(uuidString: "5B0B1F2E-6C1D-4E57-9A53-3B1D6B7A0C11")!
+    fileprivate static let storeIdentifier = UUID(uuidString: "5B0B1F2E-6C1D-4E57-9A53-3B1D6B7A0C11")!
     private static let cookieName = "supervisor-self-check"
 
     private var window: NSWindow?
@@ -330,6 +339,41 @@ private final class WebKitCheck: NSObject, WKNavigationDelegate {
         }
         result["seconds"] = Date().timeIntervalSince(started)
         completion(result)
+    }
+}
+
+/// Whether a site browser reads a real page: it opens `https://example.com/` with a policy that
+/// admits only that site's hosts, and reports what it read as counts. The page's text and links
+/// are never reported. Run it with a network connection; it uses the `webkit` check's data store,
+/// so it leaves the feature's own sessions alone.
+@MainActor
+private final class SiteReadCheck {
+    func start(completion: @escaping ([String: Any]) -> Void) {
+        let started = Date()
+        let browser = SiteBrowser(
+            policy: SiteNavigationPolicy(browseHosts: ["example.com", "www.example.com"]),
+            dataStore: WKWebsiteDataStore(forIdentifier: WebKitCheck.storeIdentifier)
+        )
+
+        Task { @MainActor in
+            var result: [String: Any] = ["check": "site-read"]
+            do {
+                let page = try await browser.open(URL(string: "https://example.com/")!)
+                result["loaded"] = true
+                result["titleLength"] = page.title.count
+                result["textLength"] = page.text.count
+                result["offeredLinks"] = page.links.count
+            } catch {
+                result["loaded"] = false
+                result["titleLength"] = 0
+                result["textLength"] = 0
+                result["offeredLinks"] = 0
+                result["failure"] = (error as? SiteBrowser.Failure)?.caseName ?? "unexpected"
+            }
+            result["seconds"] = Date().timeIntervalSince(started)
+            browser.close()
+            completion(result)
+        }
     }
 }
 
