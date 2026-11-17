@@ -989,7 +989,12 @@ names below are the code paths.
   just to list names) starts a headless Claude Code run through
   `AgentTaskService.run(arguments:workingDirectory:timeout:)`, shows the proposal files that
   run writes, and on the user's tap starts a second run to carry one out. There are no
-  collectors, no typed action catalog, and no domain logic in Swift.
+  collectors, no typed action catalog, and no domain logic in Swift. **Keep things flexible
+  and let the agent manage things in markdown files.** New state ProVisor needs (a tally, a
+  list, a schedule, a preference) is a note the agent keeps under `memory/` or `followups/`,
+  described in the protocol or the charter. Swift is for what the agent cannot do itself or
+  must not be trusted with: confinement, secrets and sign-in, validating what it writes, and
+  telling it about things outside its view.
   - **The agent's home** is `~/Library/Application Support/SuperVisor/ProVisor/`: `CHARTER.md`
     (its standing brief, seeded once from `Resources/provisor-charter.md` and then the user's to
     edit), `access.json` (which connector tools each kind of run may call), `standing.json`
