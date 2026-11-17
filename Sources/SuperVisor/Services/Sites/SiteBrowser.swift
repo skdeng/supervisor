@@ -207,6 +207,29 @@ final class SiteBrowser: NSObject {
     let webView: WKWebView
     var policy: SiteNavigationPolicy
     /// Hosts of main-frame pages that finished loading.
+    /// What follows the engine's own agent string: the tokens Safari adds, with the version of
+    /// the Safari installed on this Mac. The web view runs that same WebKit, so a version from
+    /// another release would describe an engine the page is not running on.
+    static let agentSuffix = "Version/\(safariVersion(installed: installedSafariVersion)) Safari/605.1.15"
+
+    private static var installedSafariVersion: String? {
+        Bundle(path: "/Applications/Safari.app")?
+            .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    }
+
+    /// The installed Safari's version when it reads as one, else the system's own version,
+    /// which Safari's follows.
+    static func safariVersion(
+        installed: String?,
+        system: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion
+    ) -> String {
+        if let installed,
+           installed.range(of: #"\A[0-9]{1,3}(\.[0-9]{1,3}){0,2}\z"#, options: .regularExpression) != nil {
+            return installed
+        }
+        return "\(system.majorVersion).\(system.minorVersion)"
+    }
+
     private(set) var visitedHosts: Set<String> = []
     /// Hosts of every main-frame navigation the policy allowed, redirect hops included.
     private(set) var traversedHosts: Set<String> = []
@@ -266,7 +289,7 @@ final class SiteBrowser: NSObject {
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.mediaTypesRequiringUserActionForPlayback = .all
         // Sites refuse the bare WebKit agent string as an unsupported browser.
-        configuration.applicationNameForUserAgent = "Version/26.0 Safari/605.1.15"
+        configuration.applicationNameForUserAgent = Self.agentSuffix
         if observesPasswordTyping {
             let relay = PasswordTypingRelay()
             configuration.userContentController.addUserScript(WKUserScript(

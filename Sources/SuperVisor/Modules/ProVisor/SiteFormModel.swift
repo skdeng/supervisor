@@ -391,6 +391,29 @@ final class SiteFormModel: ObservableObject {
         return Problem.invalidAddress.message
     }
 
+    /// A note beside a valid address that leads into the middle of a sign-in: one that carries
+    /// a query, or whose host is a sign-in service's. Such a page belongs to a sign-in another
+    /// browser started, and a site answers it with an error that reads like a wrong user name.
+    /// The address a person normally starts from makes the site begin a sign-in of its own.
+    var addressAdvice: String? {
+        let typed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isSigningInAgain,
+              let url = SiteEnrollment.normalisedAddress(typed),
+              let host = url.host?.lowercased()
+        else { return nil }
+        let firstLabel = host.split(separator: ".").first.map(String.init) ?? ""
+        let leadsIntoSignIn = !(url.query ?? "").isEmpty
+            || Self.signInServiceLabels.contains(firstLabel)
+        guard leadsIntoSignIn else { return nil }
+        return "This looks like a page from the middle of a sign-in. If the site refuses it, "
+            + "use the address you normally start from, such as the site's home or account page."
+    }
+
+    private static let signInServiceLabels: Set<String> = [
+        "auth", "authentication", "authenticate", "login", "signin", "sso", "accounts",
+        "account", "id", "identity", "idp", "secure", "oauth",
+    ]
+
     /// The sentence beside the key field, once something that is not a key is typed.
     var authenticatorKeyProblem: String? {
         guard codeKind == .authenticator, !authenticatorKey.isEmpty, typedAuthenticatorKey == nil else {

@@ -73,6 +73,37 @@ struct SiteFormModelTests {
         #expect(withoutKey.requiredFields == [.address, .username, .authenticatorKey])
     }
 
+    @Test("An address from the middle of a sign-in draws advice; a starting address draws none")
+    func addressAdvice() {
+        let model = SiteFormModel()
+
+        for starting in ["my.example.com", "example.com/account", "www.example.com/login", ""] {
+            model.address = starting
+            #expect(model.addressAdvice == nil, "\(starting)")
+        }
+        for midway in [
+            "authentication.example.com/enroll/collect",
+            "example.com/login?state=abc123",
+            "LOGIN.example.com",
+            "sso.example.com/start",
+        ] {
+            model.address = midway
+            #expect(model.addressAdvice != nil, "\(midway)")
+        }
+
+        // An address that is refused outright shows its problem, never both.
+        model.address = "http://login.example.com"
+        #expect(model.addressProblem != nil)
+        #expect(model.addressAdvice == nil)
+    }
+
+    @Test("A saved site's address is fixed, so it draws no advice")
+    func addressAdviceSigningInAgain() {
+        let model = SiteFormModel(signingInAgain: savedGrant(), record: savedRecord())
+        model.address = "login.example.com/start?state=abc"
+        #expect(model.addressAdvice == nil)
+    }
+
     // MARK: Sign In and Save
 
     @Test("Sign In opens up once the address, user name, and password are in")

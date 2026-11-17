@@ -342,12 +342,16 @@ struct ProVisorSiteView: View {
 
     @ViewBuilder
     private var fields: some View {
-        labelled("Sign-in page address", problem: model.addressProblem) {
-            TextField("my.example.com/login", text: Binding(get: { model.address }, set: { model.address = $0 }))
+        labelled("Site address", problem: model.addressProblem, advice: model.addressAdvice) {
+            TextField("my.example.com", text: Binding(get: { model.address }, set: { model.address = $0 }))
                 .siteFieldChrome(isFocused: focus == .address)
                 .focused($focus, equals: .address)
                 .disabled(model.isSigningInAgain)
-                .help(model.isSigningInAgain ? "A saved site keeps its address" : "The address of the page you sign in on")
+                .help(
+                    model.isSigningInAgain
+                        ? "A saved site keeps its address"
+                        : "The address you normally type to reach the site; it leads to the sign-in page"
+                )
         }
 
         labelled("Name") {
@@ -528,6 +532,7 @@ struct ProVisorSiteView: View {
     private func labelled<Content: View>(
         _ label: String,
         problem: String? = nil,
+        advice: String? = nil,
         @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -539,6 +544,11 @@ struct ProVisorSiteView: View {
                 Text(problem)
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let advice {
+                Text(advice)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }

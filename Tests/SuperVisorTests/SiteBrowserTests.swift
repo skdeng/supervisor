@@ -200,7 +200,23 @@ struct SiteBrowserTests {
 
         let agent = try await browser.run("return navigator.userAgent;")
 
-        #expect(agent.string?.contains("Version/26.0 Safari/605.1.15") == true)
+        #expect(agent.string?.hasSuffix(SiteBrowser.agentSuffix) == true)
+        #expect(SiteBrowser.agentSuffix.range(
+            of: #"\AVersion/[0-9]{1,3}(\.[0-9]{1,3}){0,2} Safari/605\.1\.15\z"#,
+            options: .regularExpression
+        ) != nil)
+    }
+
+    @Test("The agent string carries the installed Safari's version, else the system's")
+    func agentVersion() {
+        let system = OperatingSystemVersion(majorVersion: 27, minorVersion: 1, patchVersion: 0)
+
+        #expect(SiteBrowser.safariVersion(installed: "27.0.1", system: system) == "27.0.1")
+        #expect(SiteBrowser.safariVersion(installed: "18", system: system) == "18")
+        #expect(SiteBrowser.safariVersion(installed: nil, system: system) == "27.1")
+        // A value that is not a version never reaches a header.
+        #expect(SiteBrowser.safariVersion(installed: "27.0\r\nX-Injected: 1", system: system) == "27.1")
+        #expect(SiteBrowser.safariVersion(installed: "", system: system) == "27.1")
     }
 
     @Test("A closed browser loads, reads, and runs nothing", .timeLimit(.minutes(1)))
