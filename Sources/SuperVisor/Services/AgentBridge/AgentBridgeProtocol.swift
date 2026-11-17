@@ -23,6 +23,14 @@ struct AgentBridgeProtocol {
         forInfoDictionaryKey: "CFBundleShortVersionString"
     ) as? String ?? "0"
 
+    /// Seconds to wait before answering the first `initialize` request. A client does not
+    /// start its first turn until every server it configured has connected, so the wait holds
+    /// that turn back.
+    var initializeHold: TimeInterval = 0
+    /// Performs the wait; replaced in tests.
+    var pause: (TimeInterval) -> Void = { usleep(UInt32(max(0, $0) * 1_000_000)) }
+    private var hasHeldInitialize = false
+
     /// The reply to a request line the reader refused for its length.
     static func oversizedRequestReply() -> Data {
         encode(.failure(id: nil, code: ErrorCode.invalidRequest, message: "Request too large"))
@@ -61,6 +69,7 @@ struct AgentBridgeProtocol {
 
         switch method {
         case "initialize":
+            holdFirstInitialize()
             return Self.encode(.success(id: id, result: initializeResult(message.params)))
         case "ping":
             return Self.encode(.success(id: id, result: .object([:])))
@@ -78,6 +87,12 @@ struct AgentBridgeProtocol {
     }
 
     // MARK: Methods
+
+    private mutating func holdFirstInitialize() {
+        guard !hasHeldInitialize else { return }
+        hasHeldInitialize = true
+        if initializeHold > 0 { pause(initializeHold) }
+    }
 
     private func initializeResult(_ params: JSONValue?) -> JSONValue {
         let requested = params?["protocolVersion"]?.stringValue

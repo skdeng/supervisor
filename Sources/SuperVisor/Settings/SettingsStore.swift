@@ -37,7 +37,7 @@ public final class SettingsStore: ObservableObject {
     private static let optInModules: Set<String> = ["provisor"]
 
     /// The scouting cadences Settings offers, in hours; 0 means only when asked.
-    public static let provisorScoutHourChoices = [0, 3, 6, 24]
+    public static let provisorScoutHourChoices = [0, 1, 3, 6, 24]
 
     /// Hover sensitivity in the range 0...1. Higher means a larger activation rect and a
     /// shorter dwell before expanding.

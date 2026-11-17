@@ -168,7 +168,9 @@ final class SiteAccess {
                 return .failure(.nothingOpen)
             }
             guard visit.followed < Self.linksPerVisit else { return .failure(.tooManyLinks) }
-            guard page.links.indices.contains(index - 1) else { return .failure(.noSuchLink) }
+            guard index >= 1, page.links.indices.contains(index - 1) else {
+                return .failure(.noSuchLink)
+            }
             visit.followed += 1
             do {
                 let next = try await browser.open(page.links[index - 1].url)
@@ -183,6 +185,12 @@ final class SiteAccess {
     /// The page the visit last read.
     func currentPage(visit visitID: String) -> PageSnapshot? {
         visits[visitID]?.page
+    }
+
+    /// The id of the site the visit last opened; nil for a visit that has opened none or whose
+    /// site was replaced or removed.
+    func siteID(visit visitID: String) -> String? {
+        visits[visitID]?.siteID
     }
 
     /// Releases the visit's browser, which ends a sign-in the visit has under way.

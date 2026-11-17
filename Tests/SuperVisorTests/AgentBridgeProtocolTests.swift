@@ -44,6 +44,57 @@ struct AgentBridgeProtocolTests {
         return data.map { String(decoding: $0, as: UTF8.self) } ?? ""
     }
 
+    // MARK: Holding the first initialize
+
+    @Test("The first initialize request waits for the hold, once; nothing else waits")
+    func initializeHold() {
+        var session = AgentBridgeProtocol()
+        let pauses = Recorder<TimeInterval>()
+        session.initializeHold = 6
+        session.pause = { pauses.record($0) }
+        let initialize = Data(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#.utf8)
+
+        // A notification is not a request, so it neither waits nor uses up the hold.
+        _ = session.respond(
+            to: Data(#"{"jsonrpc":"2.0","method":"initialize"}"#.utf8),
+            listTools: { BridgeReply(tools: []) },
+            callTool: { _, _ in BridgeReply(text: "") }
+        )
+        _ = session.respond(
+            to: Data(#"{"jsonrpc":"2.0","id":0,"method":"ping"}"#.utf8),
+            listTools: { BridgeReply(tools: []) },
+            callTool: { _, _ in BridgeReply(text: "") }
+        )
+        #expect(pauses.all.isEmpty)
+
+        let first = session.respond(to: initialize, listTools: { BridgeReply(tools: []) }, callTool: { _, _ in BridgeReply(text: "") })
+        #expect(first != nil)
+        #expect(pauses.all == [6])
+
+        _ = session.respond(to: initialize, listTools: { BridgeReply(tools: []) }, callTool: { _, _ in BridgeReply(text: "") })
+        _ = session.respond(
+            to: Data(#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#.utf8),
+            listTools: { BridgeReply(tools: []) },
+            callTool: { _, _ in BridgeReply(text: "") }
+        )
+        #expect(pauses.all == [6])
+    }
+
+    @Test("With no hold nothing waits")
+    func noHold() {
+        var session = AgentBridgeProtocol()
+        let pauses = Recorder<TimeInterval>()
+        session.pause = { pauses.record($0) }
+
+        _ = session.respond(
+            to: Data(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#.utf8),
+            listTools: { BridgeReply(tools: []) },
+            callTool: { _, _ in BridgeReply(text: "") }
+        )
+
+        #expect(pauses.all.isEmpty)
+    }
+
     // MARK: initialize and notifications
 
     @Test("initialize answers with the client's protocol version, the server's identity, and a tools capability")

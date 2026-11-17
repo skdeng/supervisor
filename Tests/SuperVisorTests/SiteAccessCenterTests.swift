@@ -68,6 +68,8 @@ final class SiteCenterFixture {
 
     func center(
         polling: SiteAccessCenter.CodePolling = .standard,
+        simulatedPages: SiteBrowser.SimulatedPages? = nil,
+        settling: SiteBrowser.Settling = .standard,
         now: @escaping @Sendable () -> Date = { Date() }
     ) -> SiteAccessCenter {
         SiteAccessCenter(
@@ -77,6 +79,8 @@ final class SiteCenterFixture {
             settings: settings,
             dataStore: .nonPersistent(),
             codePolling: polling,
+            simulatedPages: simulatedPages,
+            settling: settling,
             now: now
         )
     }

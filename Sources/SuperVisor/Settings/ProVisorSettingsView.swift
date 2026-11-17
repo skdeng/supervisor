@@ -20,6 +20,7 @@ struct ProVisorSettingsView: View {
     var body: some View {
         Picker("Look for ideas", selection: $settings.provisorScoutHours) {
             Text("Only when asked").tag(0)
+            Text("Every hour").tag(1)
             Text("Every 3 hours").tag(3)
             Text("Every 6 hours").tag(6)
             Text("Once a day").tag(24)
@@ -40,7 +41,7 @@ struct ProVisorSettingsView: View {
                 Button("Look Now") { center.scoutNow() }
                     .buttonStyle(.plain)
                     .font(.caption.weight(.medium))
-                    .disabled(!center.isActive || center.isScouting)
+                    .disabled(!center.isActive || center.isScouting || center.isFollowingUp)
             }
 
             if let report = center.lastScout {
@@ -100,11 +101,21 @@ struct ProVisorSettingsView: View {
             Button("Add Site…") { ProVisorSiteWindow.shared.showAdding(center: sites) }
                 .buttonStyle(.plain)
                 .font(.caption.weight(.medium))
+
+            if !sites.sites.isEmpty || sites.textsEnabled,
+               let pause = Self.pauseNotice(for: center.siteToolsUnavailable) {
+                Text(pause)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        .onAppear { sites.refresh() }
+        .onAppear { refresh() }
         // Full Disk Access is granted in System Settings, so the texts status is read again on
         // coming back to Settings.
-        .onWindowBecomesKey { sites.refresh() }
+        .onWindowBecomesKey { refresh() }
+        .onChange(of: sites.sites) { center.refreshSiteTools() }
+        .onChange(of: sites.textsEnabled) { center.refreshSiteTools() }
         .confirmationDialog(
             removing.map { "Remove \($0.name)?" } ?? "",
             isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
@@ -122,6 +133,29 @@ struct ProVisorSettingsView: View {
             }
         } message: { _ in
             Text("Its saved sign-in and the site's cookies are deleted.")
+        }
+    }
+
+    /// Reads the sites and texts again, then why a pass would run without the tools for them.
+    private func refresh() {
+        sites.refresh()
+        center.refreshSiteTools()
+    }
+
+    /// The line that says why ProVisor is not reading the granted sites and texts, or nil when
+    /// it is, or when there is nothing granted for it to read.
+    static func pauseNotice(for reason: ProVisorBridge.Unavailable?) -> String? {
+        switch reason {
+        case nil, .nothingGranted?:
+            nil
+        case .accessNotSealed?:
+            "Site and text reading is paused: access.json lets the scout call a tool SuperVisor doesn't know to be read-only."
+        case .cliNotTrusted?:
+            "Site and text reading is paused: the installed agent CLI isn't the signed build."
+        case .disclaimUnavailable?:
+            "Site and text reading is paused: this macOS can't start the agent without SuperVisor's own permissions."
+        case .serverFailed?:
+            "Site and text reading is paused: SuperVisor couldn't open its tool channel."
         }
     }
 
@@ -216,19 +250,20 @@ struct ProVisorSettingsView: View {
 
     private var statusText: String {
         if center.isScouting { return "Looking now…" }
+        if center.isFollowingUp { return "Checking on earlier decisions…" }
         if center.lastScout?.failed == true { return "Last pass failed" }
         guard let last = center.lastScoutDate else { return "Has not looked yet" }
         return "Last looked \(last.formatted(.relative(presentation: .named)))"
     }
 
     private var statusSymbol: String {
-        if center.isScouting { return "sparkles" }
+        if center.isScouting || center.isFollowingUp { return "sparkles" }
         if center.lastScout?.failed == true { return "exclamationmark.triangle.fill" }
         return center.lastScoutDate == nil ? "circle.dashed" : "checkmark.circle.fill"
     }
 
     private var statusTint: Color {
-        if center.isScouting { return .secondary }
+        if center.isScouting || center.isFollowingUp { return .secondary }
         if center.lastScout?.failed == true { return .orange }
         return center.lastScoutDate == nil ? .secondary : .green
     }

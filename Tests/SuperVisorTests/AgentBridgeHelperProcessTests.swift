@@ -220,7 +220,7 @@ struct AgentBridgeHelperProcessTests {
         #expect(!outcome.strayOutput)
     }
 
-    @Test("Without a token in its environment the helper refuses to contact the app",
+    @Test("Without a token in its environment the helper offers no tools, refuses a call, and never contacts the app",
           .enabled(if: BuiltExecutable.url != nil, BuiltExecutable.skipReason))
     func missingToken() throws {
         let executable = try #require(BuiltExecutable.url)
@@ -242,11 +242,73 @@ struct AgentBridgeHelperProcessTests {
         ])
         defer { helper.terminate() }
 
-        helper.send(#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#)
+        helper.send(#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+        let listed = try #require(helper.receive())
+        #expect(listed["id"] == .number(1))
+        #expect(listed["result"] == .object(["tools": .array([])]))
+        #expect(listed["error"] == nil)
+
+        helper.send(#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo"}}"#)
         let called = try #require(helper.receive())
-        #expect(called["result"]?["isError"] == .bool(true))
+        #expect(called["result"] == .object([
+            "content": .array([
+                .object([
+                    "type": .string("text"),
+                    "text": .string("That tool is not available to this run."),
+                ]),
+            ]),
+            "isError": .bool(true),
+        ]))
         #expect(connections.all.isEmpty)
         #expect(helper.finish().exitedCleanly)
+        #expect(connections.all.isEmpty)
+    }
+
+    @Test("The helper holds its first initialize for the settle time, once, and answers everything else at once",
+          .enabled(if: BuiltExecutable.url != nil, BuiltExecutable.skipReason))
+    func holdsFirstInitialize() throws {
+        let executable = try #require(BuiltExecutable.url)
+        let helper = try Helper(executable: executable, environment: [
+            AgentBridgeHelper.settleVariable: "1500",
+        ])
+        defer { helper.terminate() }
+        let initialize = #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#
+
+        func seconds(answering line: String) throws -> TimeInterval {
+            let started = Date()
+            helper.send(line)
+            _ = try #require(helper.receive())
+            return Date().timeIntervalSince(started)
+        }
+
+        #expect(try seconds(answering: #"{"jsonrpc":"2.0","id":9,"method":"ping"}"#) < 1.0)
+        let first = try seconds(answering: initialize)
+        #expect(first >= 1.4)
+        #expect(first < 6)
+        #expect(try seconds(answering: initialize) < 1.0)
+        #expect(try seconds(answering: #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#) < 1.0)
+        #expect(helper.finish().exitedCleanly)
+    }
+
+    @Test("A settle value that is not a whole number of milliseconds from 0 to 15000 is no wait")
+    func settleValues() {
+        func settle(_ value: String?) -> Int {
+            AgentBridgeHelper.settleMilliseconds(
+                environment: value.map { [AgentBridgeHelper.settleVariable: $0] } ?? [:]
+            )
+        }
+
+        #expect(settle("6000") == 6_000)
+        #expect(settle("0") == 0)
+        #expect(settle("1") == 1)
+        #expect(settle("15000") == 15_000)
+        #expect(settle("007") == 7)
+        for refused in [
+            nil, "", " ", "15001", "99999", "100000", "-1", "-6000", "+6000", " 6000", "6000 ",
+            "6000.5", "6e3", "abc", "6 000", "٦٠٠٠", "6000\n",
+        ] {
+            #expect(settle(refused) == 0, "\(refused ?? "nil")")
+        }
     }
 
     @Test("The helper does not send its token to a server that is not this app's code",
@@ -394,6 +456,7 @@ struct AgentBridgeHelperProcessTests {
     @Test("The socket path is under Application Support unless the environment names another")
     func socketPath() {
         let standard = NSHomeDirectory() + "/Library/Application Support/SuperVisor/agent-bridge.sock"
+        #expect(AgentBridgeHelper.defaultSocketPath == standard)
         #expect(AgentBridgeHelper.socketPath(environment: [:]) == standard)
         #expect(AgentBridgeHelper.socketPath(environment: ["HOME": "/elsewhere"]) == standard)
         #expect(AgentBridgeHelper.socketPath(environment: [

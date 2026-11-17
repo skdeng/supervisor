@@ -81,6 +81,8 @@ final class SiteAccessCenter: ObservableObject {
         settings: SettingsStore,
         dataStore: WKWebsiteDataStore,
         codePolling: CodePolling = .standard,
+        simulatedPages: SiteBrowser.SimulatedPages? = nil,
+        settling: SiteBrowser.Settling = .standard,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         let vault = SiteVault(store: secretStore)
@@ -106,6 +108,8 @@ final class SiteAccessCenter: ObservableObject {
             registryURL: registryURL,
             codes: codes,
             dataStore: dataStore,
+            simulatedPages: simulatedPages,
+            settling: settling,
             now: now
         )
         settingsObservation = settings.$provisorReadsTexts.sink { isOn in
@@ -156,6 +160,15 @@ final class SiteAccessCenter: ObservableObject {
     // MARK: Texts
 
     var textsEnabled: Bool { settings.provisorReadsTexts }
+
+    /// The tools a pass reaches through the bridge, over this center's sites and texts.
+    func makeTools() -> ProVisorTools {
+        ProVisorTools(
+            access: access,
+            messages: messages,
+            textsAreOn: { [settings] in settings.provisorReadsTexts }
+        )
+    }
 
     func setTextsEnabled(_ enabled: Bool) {
         settings.provisorReadsTexts = enabled

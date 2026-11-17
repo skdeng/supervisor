@@ -10,6 +10,10 @@ import Foundation
 /// one proposal out. What to look for, what is worth proposing, and what was learned from
 /// earlier decisions all live with the agent: in its brief and in the notes it keeps.
 ///
+/// Scouting runs and follow-up runs, which can change nothing outside the workspace, can also
+/// read the sites and texts the user granted, through the bridge (`ProVisorBridge`). Runs that
+/// carry out an action never can.
+///
 /// A singleton because Settings needs the live state and reaches no module instance: the
 /// registry builds a second, never-activated set of modules just to list their names.
 @MainActor
@@ -27,6 +31,11 @@ final class ProVisorCenter: ObservableObject {
     /// Every valid proposal on disk, whatever its status. `ProposalQueue` picks what shows.
     @Published private(set) var proposals: [Proposal] = []
     @Published private(set) var isScouting = false
+    /// Whether a pass over the checks a decision left owed is running.
+    @Published private(set) var isFollowingUp = false
+    /// Why passes did not get the site and text tools the last time one started; nil while
+    /// they do, and before any pass has decided.
+    @Published private(set) var siteToolsUnavailable: ProVisorBridge.Unavailable?
     /// The proposal an acting run is carrying out right now.
     @Published private(set) var actingID: String?
     /// Approved proposals waiting behind the acting run.
@@ -46,6 +55,8 @@ final class ProVisorCenter: ObservableObject {
     private static let lastScoutKey = "provisor.lastScoutAt"
     private static let scoutTimeout: Duration = .seconds(20 * 60)
     private static let actTimeout: Duration = .seconds(10 * 60)
+    private static let followUpTimeout: Duration = .seconds(10 * 60)
+    private static let emailedCodeTimeout: Duration = .seconds(60)
 
     private let defaults: UserDefaults
     private var watcher: DirectoryTreeWatcher?
@@ -54,6 +65,14 @@ final class ProVisorCenter: ObservableObject {
     private var workspaceObservers: [NSObjectProtocol] = []
     private var scoutService: AgentTaskService?
     private var actService: AgentTaskService?
+    private var followUpService: AgentTaskService?
+    /// Waits until the next time a follow-up pass may start (`FollowUpSchedule.nextStart`).
+    private var followUpTask: Task<Void, Never>?
+    private var followUpLedger: FollowUpLedger
+    private var accessWatcher: FileChangeWatcher?
+    /// The emailed-code lookups under way, held so stopping can end them.
+    private var lookupServices: [UUID: AgentTaskService] = [:]
+    private lazy var bridge = ProVisorBridge(sites: SiteAccessCenter.shared)
     /// A proposal waiting to be carried out, captured as it stood when it was approved or
     /// admitted, with what the run is to do.
     private struct PendingAct {
@@ -87,6 +106,8 @@ final class ProVisorCenter: ObservableObject {
     private var actingTask: PendingAct?
     /// Proposals already admitted under a standing approval, so a reload never admits one twice.
     private var automaticIDs: Set<String> = []
+    /// Runs admitted under a standing approval since the last scouting pass started. Only a
+    /// scouting pass resets it, so follow-up passes draw on the same allowance.
     private var automaticRunsThisPass = 0
     private var announcer = ProposalAnnouncer()
     private var lastAttempt: Date?
@@ -96,6 +117,7 @@ final class ProVisorCenter: ObservableObject {
 
     private init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        followUpLedger = FollowUpLedger(defaults: defaults)
     }
 
     /// When the last scouting pass that finished did so.
@@ -120,6 +142,20 @@ final class ProVisorCenter: ObservableObject {
         standingRules = StandingApprovals.load(from: ProVisorHome.standingURL)
         // Items a run raised just before the app last quit are still waiting in the folder.
         admitRaisedItems()
+        bridge.removeStaleConfigurations()
+        SiteAccessCenter.shared.emailedCode = { [weak self] sender, since in
+            await self?.lookUpEmailedCode(sender: sender, since: since)
+        }
+        let accessWatcher = FileChangeWatcher(url: ProVisorHome.accessURL) { [weak self] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.refreshSiteTools()
+                }
+            }
+        }
+        self.accessWatcher = accessWatcher
+        accessWatcher.start()
+        refreshSiteTools()
 
         let watcher = DirectoryTreeWatcher(url: ProVisorHome.proposalsURL) { [weak self] in
             DispatchQueue.main.async {
@@ -141,14 +177,20 @@ final class ProVisorCenter: ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.cancelSchedule() }
+                MainActor.assumeIsolated {
+                    self?.cancelSchedule()
+                    self?.cancelFollowUp()
+                }
             },
             workspaceCenter.addObserver(
                 forName: NSWorkspace.didWakeNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.armSchedule() }
+                MainActor.assumeIsolated {
+                    self?.armSchedule()
+                    self?.armFollowUp()
+                }
             },
         ]
 
@@ -156,6 +198,7 @@ final class ProVisorCenter: ObservableObject {
         cadenceSubscription = SettingsStore.shared.$provisorScoutHours
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.armSchedule() }
+        armFollowUp()
     }
 
     func stop() {
@@ -164,6 +207,11 @@ final class ProVisorCenter: ObservableObject {
         activation += 1
 
         cancelSchedule()
+        cancelFollowUp()
+        SiteAccessCenter.shared.emailedCode = nil
+        accessWatcher?.stop()
+        accessWatcher = nil
+        siteToolsUnavailable = nil
         cadenceSubscription?.cancel()
         cadenceSubscription = nil
         for observer in workspaceObservers {
@@ -175,9 +223,12 @@ final class ProVisorCenter: ObservableObject {
 
         // The agent process must not outlive the app. Ask it to stop, give it a moment, then
         // take its whole process group down.
-        let services = [scoutService, actService].compactMap { $0 }
+        let services = [scoutService, actService, followUpService].compactMap { $0 }
+            + Array(lookupServices.values)
         scoutService = nil
         actService = nil
+        followUpService = nil
+        lookupServices = [:]
         for service in services {
             service.cancel()
         }
@@ -193,11 +244,16 @@ final class ProVisorCenter: ObservableObject {
             service.forceStopForTeardown()
         }
 
+        // Each run's own task ends its access when its process ends; stopping the bridge makes
+        // sure none outlives the center.
+        bridge.stop()
+
         pendingActs = []
         queuedIDs = []
         actingID = nil
         actingTask = nil
         isScouting = false
+        isFollowingUp = false
         proposals = []
         standingRules = []
         automaticIDs = []
@@ -238,21 +294,20 @@ final class ProVisorCenter: ObservableObject {
         scheduleTask = nil
     }
 
+    /// Starts a scouting pass unless one is running. A pass that comes due while a follow-up
+    /// pass runs waits for it: finishing that pass re-arms the schedule, which is then overdue.
     private func startScout() {
-        guard isActive, !isScouting else { return }
+        guard isActive, !isScouting, !isFollowingUp else { return }
 
         // Read fresh: the file is the user's, and may have been edited by hand since.
         standingRules = StandingApprovals.load(from: ProVisorHome.standingURL)
 
-        let arguments: [String]
+        let brief: String
+        let access: ProVisorAccess
         do {
             try ProVisorHome.prepare()
-            arguments = try ProVisorCommand.scoutArguments(
-                brief: ProVisorHome.loadBrief(),
-                access: ProVisorHome.loadAccess(),
-                standing: standingRules,
-                now: Date()
-            )
+            brief = try ProVisorHome.loadBrief()
+            access = try ProVisorHome.loadAccess()
         } catch {
             // Counted as an attempt, so the schedule backs off and tries again later instead
             // of stopping for good on a file the user is halfway through editing.
@@ -268,21 +323,60 @@ final class ProVisorCenter: ObservableObject {
         cancelSchedule()
         AppLog.notice(.provisor, "scout started")
 
+        let prepared = prepareBridge(access: access)
+        let arguments = ProVisorCommand.scoutArguments(
+            brief: brief,
+            access: access,
+            standing: standingRules,
+            now: Date(),
+            bridge: prepared?.bridge,
+            connectorHold: prepared == nil ? bridge.holdConfigurationPath() : nil
+        )
         let service = AgentTaskService()
         scoutService = service
         let activation = self.activation
         Task { [weak self] in
-            let outcome: Result<AgentTaskResult, any Error>
-            do {
-                outcome = .success(try await service.run(
-                    arguments: arguments,
-                    workingDirectory: ProVisorHome.workspaceURL,
-                    timeout: ProVisorCenter.scoutTimeout
-                ))
-            } catch {
-                outcome = .failure(error)
-            }
-            await self?.finishScout(outcome, activation: activation)
+            guard let self else { return }
+            let outcome = await self.runPass(
+                service,
+                arguments: arguments,
+                timeout: ProVisorCenter.scoutTimeout,
+                prepared: prepared
+            )
+            await self.finishScout(outcome, activation: activation)
+        }
+    }
+
+    /// Prepares the run's site and text tools, or nothing when the conditions for them do not
+    /// hold, and publishes why.
+    private func prepareBridge(access: ProVisorAccess) -> ProVisorBridge.PreparedRun? {
+        defer { siteToolsUnavailable = bridge.lastUnavailable }
+        guard case let .success(run) = bridge.prepare(access: access) else { return nil }
+        return run
+    }
+
+    /// Runs a pass's agent process in the workspace and ends the run's tool access when the
+    /// process ends, however it ends, whether or not the center is still active.
+    private func runPass(
+        _ service: AgentTaskService,
+        arguments: [String],
+        timeout: Duration,
+        prepared: ProVisorBridge.PreparedRun?
+    ) async -> Result<AgentTaskResult, any Error> {
+        defer {
+            if let prepared { bridge.finished(prepared) }
+        }
+        do {
+            return .success(try await service.run(
+                arguments: arguments,
+                workingDirectory: ProVisorHome.workspaceURL,
+                timeout: timeout,
+                onLaunch: { [bridge] pid in
+                    if let prepared { bridge.launched(prepared, pid: pid) }
+                }
+            ))
+        } catch {
+            return .failure(error)
         }
     }
 
@@ -320,6 +414,7 @@ final class ProVisorCenter: ObservableObject {
         guard activation == self.activation else { return }
         announceAdded(in: loaded)
         armSchedule()
+        armFollowUp()
     }
 
     private func announceAdded(in loaded: [Proposal]) {
@@ -338,6 +433,195 @@ final class ProVisorCenter: ObservableObject {
         )
         if admitted > 0 {
             AppLog.notice(.provisor, "raised items admitted \(admitted)")
+        }
+    }
+
+    // MARK: - Follow-up passes
+
+    /// Arms the one timer for the next follow-up pass: it fires when a pass owed for a due note
+    /// may start (`FollowUpSchedule.nextStart`), and is dropped when no note is due. It is
+    /// evaluated again whenever something that decides it changes: a reviewed run, a scouting
+    /// pass, or a follow-up pass finishes, the Mac wakes, or the center starts.
+    private func armFollowUp() {
+        cancelFollowUp()
+        let now = Date()
+        guard isActive,
+              FollowUpNotes.hasDueNote(
+                  in: ProVisorHome.followUpsURL,
+                  on: LocalDay(now, timeZone: .current)
+              )
+        else { return }
+        let start = FollowUpSchedule.nextStart(
+            now: now,
+            last: followUpLedger.last,
+            startedToday: followUpLedger.startedToday(now: now, timeZone: .current),
+            calendar: .current
+        )
+        followUpTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(0, start.timeIntervalSince(now))))
+            guard let self, !Task.isCancelled else { return }
+            self.followUpTask = nil
+            self.startFollowUp()
+        }
+    }
+
+    private func cancelFollowUp() {
+        followUpTask?.cancel()
+        followUpTask = nil
+    }
+
+    private func mayStartFollowUp(now: Date) -> Bool {
+        FollowUpSchedule.mayStart(
+            now: now,
+            last: followUpLedger.last,
+            startedToday: followUpLedger.startedToday(now: now, timeZone: .current)
+        )
+    }
+
+    /// Starts a pass over the due notes in `followups/`, which settles what checks out and
+    /// raises what does not. It shares the scout's one-pass-at-a-time rule, and a pass that is
+    /// running when the timer fires holds it back to a later time. The scouting report in
+    /// Settings is left as it was.
+    private func startFollowUp() {
+        guard isActive else { return }
+        guard !isScouting, !isFollowingUp else {
+            armFollowUp()
+            return
+        }
+        let now = Date()
+        guard FollowUpNotes.hasDueNote(
+            in: ProVisorHome.followUpsURL,
+            on: LocalDay(now, timeZone: .current)
+        ) else { return }
+        guard mayStartFollowUp(now: now) else {
+            armFollowUp()
+            return
+        }
+
+        standingRules = StandingApprovals.load(from: ProVisorHome.standingURL)
+        let brief: String
+        let access: ProVisorAccess
+        do {
+            try ProVisorHome.prepare()
+            brief = try ProVisorHome.loadBrief()
+            access = try ProVisorHome.loadAccess()
+        } catch {
+            AppLog.error(.provisor, "follow-up setup failed")
+            return
+        }
+
+        isFollowingUp = true
+        followUpLedger = followUpLedger.recordingStart(now: now, timeZone: .current)
+        followUpLedger.save(to: defaults)
+        AppLog.notice(.provisor, "follow-up started")
+
+        let prepared = prepareBridge(access: access)
+        let arguments = ProVisorCommand.followUpArguments(
+            brief: brief,
+            access: access,
+            standing: standingRules,
+            now: now,
+            bridge: prepared?.bridge,
+            connectorHold: prepared == nil ? bridge.holdConfigurationPath() : nil
+        )
+        let service = AgentTaskService()
+        followUpService = service
+        let activation = self.activation
+        Task { [weak self] in
+            guard let self else { return }
+            let outcome = await self.runPass(
+                service,
+                arguments: arguments,
+                timeout: ProVisorCenter.followUpTimeout,
+                prepared: prepared
+            )
+            await self.finishFollowUp(outcome, activation: activation)
+        }
+    }
+
+    private func finishFollowUp(
+        _ outcome: Result<AgentTaskResult, any Error>,
+        activation: Int
+    ) async {
+        guard activation == self.activation else { return }
+        followUpService = nil
+        isFollowingUp = false
+
+        switch outcome {
+        case .success:
+            AppLog.notice(.provisor, "follow-up finished")
+        case let .failure(error):
+            AppLog.error(.provisor, "follow-up failed: \(Self.logName(error))")
+        }
+
+        // Proposals the pass wrote are counted from disk, and any under a standing approval are
+        // admitted by the reload, as after a scouting pass.
+        let loaded = await reload()
+        guard activation == self.activation else { return }
+        announceAdded(in: loaded)
+        // A scouting pass that came due during this one is overdue, so arming starts it after the
+        // settle delay.
+        armSchedule()
+        armFollowUp()
+    }
+
+    /// Re-reads why a pass would run without the site and text tools, without starting one.
+    /// Settings asks when it appears; the center asks when `access.json` changes.
+    func refreshSiteTools() {
+        guard isActive, let access = try? ProVisorHome.loadAccess() else { return }
+        siteToolsUnavailable = bridge.evaluate(access: access)
+    }
+
+    // MARK: - Emailed sign-in codes
+
+    /// The code a site emailed to `sender` after `since`, looked up by a minimal run on the
+    /// user's mail. It never goes through the acting queue, so a pass waiting on a sign-in
+    /// cannot be held up behind it.
+    private func lookUpEmailedCode(sender: String, since: Date) async -> String? {
+        guard isActive, let access = try? ProVisorHome.loadAccess() else { return nil }
+        let lookup = EmailedCodeLookup(run: { [weak self] arguments in
+            await self?.runLookup(arguments)
+        })
+        return await lookup.code(
+            sender: sender,
+            since: since,
+            access: access,
+            connectorHold: bridge.holdConfigurationPath()
+        )
+    }
+
+    /// Runs one lookup in a fresh empty folder, which is deleted afterwards, and returns the
+    /// run's answer; nil when it failed.
+    private func runLookup(_ arguments: [String]) async -> String? {
+        guard isActive else { return nil }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "provisor-code-\(UUID().uuidString.prefix(8).lowercased())",
+            isDirectory: true
+        )
+        do {
+            try FileManager.default.createDirectory(
+                at: folder,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
+            return nil
+        }
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let service = AgentTaskService()
+        let key = UUID()
+        lookupServices[key] = service
+        defer { lookupServices[key] = nil }
+        do {
+            return try await service.run(
+                arguments: arguments,
+                workingDirectory: folder,
+                timeout: Self.emailedCodeTimeout
+            ).text
+        } catch {
+            AppLog.error(.provisor, "code lookup failed: \(Self.logName(error))")
+            return nil
         }
     }
 
@@ -552,25 +836,33 @@ final class ProVisorCenter: ObservableObject {
         let arguments: [String]
         do {
             let access = try ProVisorHome.loadAccess()
+            // Sites a later pass can read are named to a run that ends by leaving checks owed.
+            let siteNames = bridge.availableSiteNames(access: access)
+            let hold = bridge.holdConfigurationPath()
             switch pending.task {
             case let .approved(option):
                 arguments = ProVisorCommand.approvedArguments(
                     proposal: proposal,
                     option: option,
-                    access: access
+                    access: access,
+                    siteNames: siteNames,
+                    connectorHold: hold
                 )
             case let .instructed(instruction, reference):
                 arguments = ProVisorCommand.instructedArguments(
                     proposal: proposal,
                     instruction: instruction,
                     reference: reference,
-                    access: access
+                    access: access,
+                    siteNames: siteNames,
+                    connectorHold: hold
                 )
             case let .standing(rule):
                 arguments = ProVisorCommand.automaticArguments(
                     proposal: proposal,
                     rule: rule,
-                    access: access
+                    access: access,
+                    connectorHold: hold
                 )
             }
         } catch {
@@ -647,6 +939,10 @@ final class ProVisorCenter: ObservableObject {
                 return
             }
             self?.announceAdded(in: loaded)
+        }
+        // A run under a standing approval writes no notes; a reviewed one may leave a check owed.
+        if !isAutomatic {
+            armFollowUp()
         }
         startNextAct()
     }

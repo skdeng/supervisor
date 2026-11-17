@@ -72,6 +72,24 @@ enum SelfCheck {
             }
             application.run()
             exit(0)
+        case "tools":
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            let check = ToolsCheck()
+            check.start { result in
+                finish(result, report: report)
+            }
+            application.run()
+            exit(0)
+        case "connectors":
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            let check = ConnectorsCheck()
+            check.start { result in
+                finish(result, report: report)
+            }
+            application.run()
+            exit(0)
         default:
             finish(["error": "unknown check"], report: report)
         }
@@ -547,6 +565,237 @@ private final class BridgeCheck {
 
         var value: Int {
             lock.withLock { count }
+        }
+    }
+}
+
+/// Whether a real agent run can call the site tools the app serves to a scouting pass: the
+/// tools are the ones `ProVisorTools` offers, answered by its own handler over a `SiteAccess`
+/// that holds no grant. The run asks for a site nobody granted, so the answer is the
+/// unknown-site sentence, which proves the call reached the handler and its reply came back.
+///
+/// Nothing here reads the user's registry, Keychain, or Messages database.
+@MainActor
+private final class ToolsCheck {
+    private final class MemorySecretStore: SecretStore, @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [String: Data] = [:]
+
+        func read(account: String) throws -> Data? {
+            lock.withLock { items[account] }
+        }
+
+        func write(_ data: Data, account: String) throws {
+            lock.withLock { items[account] = data }
+        }
+
+        func delete(account: String) throws {
+            lock.withLock { _ = items.removeValue(forKey: account) }
+        }
+    }
+
+    private final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+
+        func increment() {
+            lock.withLock { count += 1 }
+        }
+
+        var value: Int {
+            lock.withLock { count }
+        }
+    }
+
+    func start(completion: @escaping ([String: Any]) -> Void) {
+        let suffix = UUID().uuidString.prefix(8).lowercased()
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tools-check-\(suffix)", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: folder,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        // A socket of this check's own, so it never meets the one a running app is serving.
+        let socketPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("svt-\(suffix).sock").path
+
+        let access = SiteAccess(
+            vault: SiteVault(store: MemorySecretStore()),
+            registryURL: folder.appendingPathComponent("sites.json"),
+            codes: SignInCodes(
+                authenticator: { _ in nil },
+                texted: { _, _ in nil },
+                emailed: { _, _ in nil },
+                messageBaseline: { nil },
+                firstTextedCode: { _ in nil }
+            ),
+            dataStore: .nonPersistent()
+        )
+        let tools = ProVisorTools(
+            access: access,
+            messages: MessagesStore(path: folder.appendingPathComponent("none.db").path),
+            textsAreOn: { false }
+        )
+        // A record is what makes the site tools appear; no grant stands behind it.
+        let offered = ProVisorTools.descriptors(
+            sites: [SiteRecord(id: "nowhere.example", name: "Nowhere", added: Date())],
+            textsAreOn: false
+        )
+
+        let token = AgentBridgeServer.makeToken()
+        let calls = CallCounter()
+        let server = AgentBridgeServer(
+            path: socketPath,
+            version: AgentBridgeHelper.bundleVersion
+        ) { token, tool, arguments in
+            calls.increment()
+            return await tools.handle(visit: token, tool: tool, arguments: arguments)
+        }
+        server.register(BridgeRun(token: token, rootProcess: nil, tools: offered))
+
+        var result: [String: Any] = ["check": "tools"]
+        let configurationURL = folder.appendingPathComponent("mcp.json")
+        do {
+            try server.start()
+            let data = try JSONSerialization.data(withJSONObject: ["mcpServers": [ProVisorTools.server: [
+                "type": "stdio",
+                "command": Bundle.main.executablePath ?? "",
+                "args": [AgentBridgeHelper.flag],
+                "env": [
+                    AgentBridgeHelper.tokenVariable: token,
+                    AgentBridgeHelper.socketVariable: socketPath,
+                ],
+                "alwaysLoad": true,
+            ] as [String: Any]]])
+            FileManager.default.createFile(
+                atPath: configurationURL.path,
+                contents: data,
+                attributes: [.posixPermissions: 0o600]
+            )
+        } catch {
+            server.stop()
+            try? FileManager.default.removeItem(at: folder)
+            result["succeeded"] = false
+            result["toolCalls"] = 0
+            result["sawRefusal"] = false
+            result["failure"] = "setup"
+            completion(result)
+            return
+        }
+
+        let arguments = [
+            "-p", "Call open_site with the site 'nowhere.example' and reply with exactly what the tool returns.",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--restricted",
+            "--permission-prompts", "none",
+            "--no-session-persistence",
+            "--tools", "",
+            "--model", ProVisorCommand.utilityModel,
+            "--max-turns", "4",
+            "--max-budget-usd", "0.10",
+            "--strict-mcp-config",
+            "--mcp-config", configurationURL.path,
+            "--allowedTools",
+        ] + ProVisorTools.allowedToolRules(for: offered)
+
+        Task { @MainActor in
+            do {
+                let outcome = try await AgentTaskService().run(
+                    arguments: arguments,
+                    workingDirectory: folder,
+                    timeout: .seconds(120),
+                    environment: [AgentBridgeHelper.socketVariable: socketPath],
+                    onLaunch: { pid in
+                        server.setRootProcess(pid, for: token)
+                    }
+                )
+                result["succeeded"] = true
+                result["sawRefusal"] = outcome.text.contains("No granted site matches")
+            } catch {
+                result["succeeded"] = false
+                result["sawRefusal"] = false
+                result["failure"] = (error as? AgentTaskError)?.caseName ?? "unexpected"
+            }
+            result["toolCalls"] = calls.value
+            access.end(visit: token)
+            server.stop()
+            try? FileManager.default.removeItem(at: folder)
+            completion(result)
+        }
+    }
+}
+
+/// Whether the account's connectors are up by the first turn of a run that carries the hold
+/// configuration: three runs in a row each look up a Gmail tool with `ToolSearch`, and the report
+/// counts the answers that name one. Each run starts in an empty folder of its own, and a
+/// failed run counts as no tool found. The answers are never reported, only counts and times.
+@MainActor
+private final class ConnectorsCheck {
+    private static let runs = 3
+
+    func start(completion: @escaping ([String: Any]) -> Void) {
+        let suffix = UUID().uuidString.prefix(8).lowercased()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("connectors-check-\(suffix)", isDirectory: true)
+        let configurations = root.appendingPathComponent("configuration", isDirectory: true)
+        let workspace = root.appendingPathComponent("workspace", isDirectory: true)
+        var result: [String: Any] = ["check": "connectors", "runs": Self.runs]
+
+        let hold: URL
+        do {
+            try FileManager.default.createDirectory(
+                at: workspace,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            hold = try ProVisorBridge.writeHoldConfiguration(
+                executablePath: Bundle.main.executablePath ?? "",
+                into: configurations
+            )
+        } catch {
+            try? FileManager.default.removeItem(at: root)
+            result["foundTool"] = 0
+            result["seconds"] = [Double]()
+            result["failure"] = "setup"
+            completion(result)
+            return
+        }
+
+        let arguments = [
+            "-p", "Use the ToolSearch tool to look for a tool that searches Gmail threads. Reply with its exact tool name, or the single word NONE.",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--restricted",
+            "--permission-prompts", "none",
+            "--no-session-persistence",
+            "--tools", "ToolSearch",
+            "--model", ProVisorCommand.utilityModel,
+            "--max-turns", "4",
+            "--max-budget-usd", "0.10",
+            "--mcp-config", hold.path,
+            "--allowedTools", "mcp__claude_ai_Gmail__search_*",
+        ]
+
+        Task { @MainActor in
+            var found = 0
+            var seconds: [Double] = []
+            for _ in 0..<Self.runs {
+                let started = Date()
+                if let outcome = try? await AgentTaskService().run(
+                    arguments: arguments,
+                    workingDirectory: workspace,
+                    timeout: .seconds(90)
+                ), outcome.text.contains("mcp__claude_ai_Gmail__") {
+                    found += 1
+                }
+                seconds.append(Date().timeIntervalSince(started))
+            }
+            result["foundTool"] = found
+            result["seconds"] = seconds
+            try? FileManager.default.removeItem(at: root)
+            completion(result)
         }
     }
 }

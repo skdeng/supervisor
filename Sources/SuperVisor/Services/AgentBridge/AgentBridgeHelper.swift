@@ -7,6 +7,10 @@ import Foundation
 /// handed in its environment, and it sends that token only to a server running this app's own
 /// code.
 ///
+/// Started with no token, it offers no tools and never contacts the app. Either way it can wait
+/// before answering the first `initialize` (`settleVariable`), which holds back the first turn
+/// of a client that waits for its configured servers to connect.
+///
 /// It runs before any UI exists and does not touch AppKit or the app's log. **Standard output
 /// carries protocol lines and nothing else**: anything else written there corrupts the stream
 /// the client is parsing.
@@ -16,6 +20,10 @@ enum AgentBridgeHelper {
     /// Names a socket path to use in place of the default, for a process whose home folder
     /// makes that path too long for `sun_path`.
     static let socketVariable = "SUPERVISOR_BRIDGE_SOCKET"
+    /// Names how many milliseconds the helper waits before answering the first `initialize`,
+    /// so a client that waits for its configured servers holds its first turn that long.
+    static let settleVariable = "SUPERVISOR_BRIDGE_SETTLE_MS"
+    static let maximumSettleMilliseconds = 15_000
 
     #if DEBUG
     /// Set to `1`, makes a debug build skip the check that the server runs this app's code.
@@ -30,10 +38,18 @@ enum AgentBridgeHelper {
     /// How long one tool call may take to answer.
     private static let replyTimeout: TimeInterval = 300
 
+    /// Answers every `tools/call` of a helper started with no token, which offers no tools.
+    static let noToolSentence = "That tool is not available to this run."
     static let unreachableSentence = "SuperVisor is not reachable."
     static let unverifiedServerSentence = "SuperVisor could not be verified."
 
     /// The app's bridge socket. `NSHomeDirectory()` ignores `$HOME`.
+    static var defaultSocketPath: String {
+        NSHomeDirectory() + "/Library/Application Support/SuperVisor/agent-bridge.sock"
+    }
+
+    /// The socket this process connects to: `defaultSocketPath` unless the environment names
+    /// another.
     static var socketPath: String {
         socketPath(environment: ProcessInfo.processInfo.environment)
     }
@@ -42,12 +58,23 @@ enum AgentBridgeHelper {
         if let override = environment[socketVariable], !override.isEmpty {
             return override
         }
-        return NSHomeDirectory() + "/Library/Application Support/SuperVisor/agent-bridge.sock"
+        return defaultSocketPath
     }
 
     /// The bundle version a helper reports and the app expects.
     static var bundleVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
+    }
+
+    /// The wait named by `settleVariable`: a whole number of milliseconds from 0 to
+    /// `maximumSettleMilliseconds`. Anything else, or no value, is 0.
+    static func settleMilliseconds(environment: [String: String]) -> Int {
+        guard let text = environment[settleVariable],
+              text.range(of: #"\A[0-9]{1,5}\z"#, options: .regularExpression) != nil,
+              let value = Int(text),
+              value <= maximumSettleMilliseconds
+        else { return 0 }
+        return value
     }
 
     static func isRequested(in arguments: [String]) -> Bool {
@@ -88,10 +115,12 @@ enum AgentBridgeHelper {
         // A client that exits mid-write must surface as a failed write, not kill this process.
         signal(SIGPIPE, SIG_IGN)
 
-        let token = ProcessInfo.processInfo.environment[tokenVariable] ?? ""
+        let environment = ProcessInfo.processInfo.environment
+        let token = environment[tokenVariable] ?? ""
         let path = socketPath
         let version = bundleVersion
         var session = AgentBridgeProtocol()
+        session.initializeHold = TimeInterval(settleMilliseconds(environment: environment)) / 1_000
         var input = BridgeLineReader(
             descriptor: STDIN_FILENO,
             limit: AgentBridgeProtocol.maximumRequestBytes
@@ -104,7 +133,9 @@ enum AgentBridgeHelper {
                 reply = session.respond(
                     to: line,
                     listTools: {
-                        exchange(
+                        // With no token the helper only holds a client back, and never
+                        // contacts the app.
+                        token.isEmpty ? BridgeReply(tools: []) : exchange(
                             BridgeRequest(
                                 token: token, version: version, kind: .list,
                                 tool: nil, arguments: nil
@@ -113,7 +144,7 @@ enum AgentBridgeHelper {
                         )
                     },
                     callTool: { name, arguments in
-                        exchange(
+                        token.isEmpty ? .failure(noToolSentence) : exchange(
                             BridgeRequest(
                                 token: token, version: version, kind: .call,
                                 tool: name, arguments: arguments
@@ -139,9 +170,6 @@ enum AgentBridgeHelper {
     /// One request and one reply, retried while the app is busy. Every failure becomes a fixed
     /// sentence: the token and the underlying errors never reach the client.
     private static func exchange(_ request: BridgeRequest, path: String) -> BridgeReply {
-        guard !request.token.isEmpty else {
-            return .failure("The tool bridge was started without credentials.")
-        }
         guard let line = try? JSONEncoder().encode(request) else {
             return .failure("The tool request could not be encoded.")
         }

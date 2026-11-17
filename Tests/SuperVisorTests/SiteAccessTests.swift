@@ -642,6 +642,7 @@ struct SiteAccessTests {
         #expect(failure(await fixture.access.follow(link: 0, visit: "run")) == .noSuchLink)
         #expect(failure(await fixture.access.follow(link: -1, visit: "run")) == .noSuchLink)
         #expect(failure(await fixture.access.follow(link: Int.max, visit: "run")) == .noSuchLink)
+        #expect(failure(await fixture.access.follow(link: Int.min, visit: "run")) == .noSuchLink)
         #expect(fixture.access.currentPage(visit: "run")?.title == "Account")
     }
 
