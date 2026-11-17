@@ -96,6 +96,9 @@ struct WorkingEntry: Identifiable, Equatable, Sendable {
 /// Merges authoritative registry snapshots with low-latency hook metadata.
 @MainActor
 final class AgentFleetCenter: ObservableObject {
+    /// The attention-glow owner the queue raises and clears: SwarmVisor's module id.
+    static let glowOwner = "swarm"
+
     @Published private(set) var sessions: [FleetSession] = []
     @Published private(set) var ttyBySessionPID: [Int32: String] = [:]
     /// Each live session's host app, resolved once when the session first appears — a process's
@@ -440,7 +443,7 @@ final class AgentFleetCenter: ObservableObject {
             // never touches the glow, so an already-seen queue stays quiet.
             if entry.reason.interrupts != current.reason.interrupts {
                 if entry.reason.interrupts {
-                    AttentionGlowCenter.shared.raise()
+                    AttentionGlowCenter.shared.raise(for: Self.glowOwner)
                 } else {
                     clearGlowIfQuiet()
                 }
@@ -464,7 +467,7 @@ final class AgentFleetCenter: ObservableObject {
         // already queued.
         queue.sort { $0.since > $1.since }
         if reason.interrupts {
-            AttentionGlowCenter.shared.raise()
+            AttentionGlowCenter.shared.raise(for: Self.glowOwner)
         }
         AppLog.notice(
             .swarm,
@@ -476,7 +479,7 @@ final class AgentFleetCenter: ObservableObject {
     /// session stopped on its own dialog — is not something to keep the notch lit for.
     private func clearGlowIfQuiet() {
         guard !queue.contains(where: { $0.reason.interrupts }) else { return }
-        AttentionGlowCenter.shared.clear()
+        AttentionGlowCenter.shared.clear(for: Self.glowOwner)
     }
 
     private func refreshQueuedMetadata(for session: FleetSession) {

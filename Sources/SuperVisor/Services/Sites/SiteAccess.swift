@@ -55,6 +55,19 @@ final class SiteAccess {
     private let settling: SiteBrowser.Settling
     private let codeWaitLimit: Duration
     private let now: () -> Date
+
+    /// Called with the site's id each time `open` answers `.needsPerson` to its caller, once
+    /// whatever that answer leaves in the registry has been written. Every cause calls it: a
+    /// site already flagged, a session that ended, a start page that left the site's hosts, a
+    /// sign-in only the person can finish, and a day's attempts used up. An open that began
+    /// before the site's grant and record were replaced or removed calls nothing: its answer
+    /// describes a grant and record that have gone.
+    var onPersonNeeded: (@MainActor (_ siteID: String) -> Void)?
+
+    /// Called with the site's id each time `open` returns the site's start page, under the same
+    /// rule about an open that began before the site was replaced or removed.
+    var onOpened: (@MainActor (_ siteID: String) -> Void)?
+
     private var visits: [String: Visit] = [:]
     private var signInGates: [String: SerialGate] = [:]
     /// How many sign-ins have finished for a site. A visit that began before one finished looks
@@ -159,7 +172,24 @@ final class SiteAccess {
             visit = Visit()
             visits[visitID] = visit
         }
-        return await visit.gate.perform { await openLocked(siteID: siteID, visit: visit) }
+        return await visit.gate.perform {
+            let epoch = recordEpochs[siteID, default: 0]
+            let result = await openLocked(siteID: siteID, visit: visit, epoch: epoch)
+            announce(result, siteID: siteID, epoch: epoch)
+            return result
+        }
+    }
+
+    /// Tells `onOpened` or `onPersonNeeded` how an open ended, unless the site's grant and
+    /// record were replaced or removed since `epoch`, when the answer describes a grant and
+    /// record that have gone.
+    private func announce(_ result: Result<PageSnapshot, Failure>, siteID: String, epoch: Int) {
+        guard recordEpochs[siteID, default: 0] == epoch else { return }
+        switch result {
+        case .success: onOpened?(siteID)
+        case .failure(.needsPerson): onPersonNeeded?(siteID)
+        case .failure: break
+        }
     }
 
     /// Follows link number `index` (counted from 1) of the page the visit last read, by loading
@@ -217,7 +247,11 @@ final class SiteAccess {
         return .found(grant: grant, record: record)
     }
 
-    private func openLocked(siteID: String, visit: Visit) async -> Result<PageSnapshot, Failure> {
+    private func openLocked(
+        siteID: String,
+        visit: Visit,
+        epoch: Int
+    ) async -> Result<PageSnapshot, Failure> {
         // The links of an earlier page are not links of whatever this call ends with.
         visit.page = nil
         let grant: SiteGrant
@@ -229,7 +263,6 @@ final class SiteAccess {
         }
         if site.needsPerson { return .failure(.needsPerson) }
 
-        let epoch = recordEpochs[siteID, default: 0]
         let finishedAtStart = signInsFinished[siteID, default: 0]
         if visit.siteID != siteID {
             visit.browser?.close()

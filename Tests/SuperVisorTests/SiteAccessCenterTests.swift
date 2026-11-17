@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SQLite3
 import Testing
@@ -119,6 +120,38 @@ private func record(_ host: String = "example.com", name: String = "Bank") -> Si
     SiteRecord(id: host, name: name, added: Date(timeIntervalSince1970: 1_700_000_000))
 }
 
+/// A grant that keeps a signed-in session and no password.
+private func sessionGrant(_ host: String = "example.com") -> SiteGrant {
+    SiteGrant(
+        username: "",
+        password: "",
+        authenticatorKey: nil,
+        signInURL: URL(string: "https://\(host)/login")!,
+        startURL: URL(string: "https://\(host)/account")!,
+        fillHosts: [host],
+        browseHosts: [host],
+        codeKind: .none,
+        codeSender: nil,
+        signOutControlSeen: true,
+        remembersPassword: false
+    )
+}
+
+/// What `SiteAccessCenter.onSiteSaved` was called with, in order.
+@MainActor
+private final class SaveLog {
+    struct Entry: Equatable {
+        let siteID: String
+        let wasAwaited: Bool
+    }
+
+    private(set) var entries: [Entry] = []
+
+    func record(_ record: SiteRecord, _ wasAwaited: Bool) {
+        entries.append(Entry(siteID: record.id, wasAwaited: wasAwaited))
+    }
+}
+
 /// Polls quickly, for tests that wait for a code to arrive.
 private let quickPolling = SiteAccessCenter.CodePolling(interval: .milliseconds(20), limit: .seconds(5))
 
@@ -193,24 +226,261 @@ struct SiteAccessCenterTests {
     @Test("A site's status: needs you, then signed in, then not signed in yet")
     func siteStatus() {
         var site = record()
-        #expect(SiteAccessCenter.SiteStatus(site) == .notSignedInYet)
+        #expect(SiteAccessCenter.SiteStatus(site, awaiting: []) == .notSignedInYet)
         let date = Date(timeIntervalSince1970: 1_800_000_000)
         site.lastSignedIn = date
-        #expect(SiteAccessCenter.SiteStatus(site) == .signedIn(date))
+        #expect(SiteAccessCenter.SiteStatus(site, awaiting: []) == .signedIn(date))
         site.needsPerson = true
-        #expect(SiteAccessCenter.SiteStatus(site) == .needsYou)
+        #expect(SiteAccessCenter.SiteStatus(site, awaiting: []) == .needsYou)
     }
 
     @Test("A site kept by its session reads as signed in that way, and needs you once its session ends")
     func sessionSiteStatus() {
         var site = record()
         site.keepsSessionOnly = true
-        #expect(SiteAccessCenter.SiteStatus(site) == .notSignedInYet)
+        #expect(SiteAccessCenter.SiteStatus(site, awaiting: []) == .notSignedInYet)
         let date = Date(timeIntervalSince1970: 1_800_000_000)
         site.lastSignedIn = date
-        #expect(SiteAccessCenter.SiteStatus(site) == .signedInKeepingSession(date))
+        #expect(SiteAccessCenter.SiteStatus(site, awaiting: []) == .signedInKeepingSession(date))
         site.needsPerson = true
-        #expect(SiteAccessCenter.SiteStatus(site) == .needsYou)
+        #expect(SiteAccessCenter.SiteStatus(site, awaiting: []) == .needsYou)
+    }
+
+    // MARK: Waiting on the person
+
+    @Test("A run turned away from a site leaves it flagged, awaiting the person, and in the list", .timeLimit(.minutes(1)))
+    func turnedAwayRunIsRecorded() async throws {
+        let fixture = try SiteCenterFixture()
+        let bank = TestBank()
+        let center = fixture.center(simulatedPages: bank.site.answer, settling: .fast)
+        try center.save(grant: sessionGrant(), record: record())
+        defer { center.access.end(visit: "run") }
+        #expect(center.awaitingSignIn.isEmpty)
+
+        let result = await center.access.open(siteID: "example.com", visit: "run")
+
+        #expect(result == .failure(.needsPerson))
+        #expect(center.awaitingSignIn == ["example.com"])
+        // The hook refreshed the list after the flag was written.
+        #expect(center.sites.first?.needsPerson == true)
+    }
+
+    @Test("A day's attempts used up put a site in the awaiting set, and a later open that reads its page takes it out", .timeLimit(.minutes(2)))
+    func openingTakesTheSiteOutOfTheAwaitingSet() async throws {
+        let fixture = try SiteCenterFixture()
+        let bank = TestBank()
+        let center = fixture.center(simulatedPages: bank.site.answer, settling: .fast)
+        try center.save(
+            grant: SiteGrant(
+                username: bank.username,
+                password: bank.password,
+                authenticatorKey: nil,
+                signInURL: URL(string: "https://example.com/login")!,
+                startURL: URL(string: "https://example.com/account")!,
+                fillHosts: ["example.com"],
+                browseHosts: ["example.com"],
+                codeKind: .none,
+                codeSender: nil,
+                signInSteps: [
+                    SignInStep(
+                        kind: .username, origin: "https://example.com", path: "/login",
+                        field: FieldKey(name: "username", id: "user", autocomplete: "username", type: "text")
+                    ),
+                    SignInStep(
+                        kind: .password, origin: "https://example.com", path: "/login",
+                        field: FieldKey(name: "password", id: "pass", autocomplete: "current-password", type: "password")
+                    ),
+                ]
+            ),
+            record: record()
+        )
+        defer { center.access.end(visit: "run") }
+
+        for _ in 1...SignInAttempts.perDay {
+            bank.signOut()
+            #expect(await center.access.open(siteID: "example.com", visit: "run") != .failure(.needsPerson))
+        }
+        #expect(center.awaitingSignIn.isEmpty)
+
+        bank.signOut()
+        #expect(await center.access.open(siteID: "example.com", visit: "run") == .failure(.needsPerson))
+        // Out of attempts is no flag, so only the awaiting set says the person is wanted.
+        #expect(center.awaitingSignIn == ["example.com"])
+        #expect(center.sites.first?.needsPerson == false)
+
+        bank.markSignedIn()
+        if case .failure = await center.access.open(siteID: "example.com", visit: "run") {
+            Issue.record("the site's start page could not be read")
+        }
+        #expect(center.awaitingSignIn.isEmpty)
+    }
+
+    @Test("Saving a flagged site that a run was turned away from reports it once and clears the wait", .timeLimit(.minutes(1)))
+    func savingAnAwaitedSiteIsReported() async throws {
+        let fixture = try SiteCenterFixture()
+        let bank = TestBank()
+        let center = fixture.center(simulatedPages: bank.site.answer, settling: .fast)
+        try center.save(grant: sessionGrant(), record: record())
+        defer { center.access.end(visit: "run") }
+        _ = await center.access.open(siteID: "example.com", visit: "run")
+        let log = SaveLog()
+        center.onSiteSaved = { log.record($0, $1) }
+
+        bank.markSignedIn()
+        try center.save(grant: sessionGrant(), record: record())
+
+        #expect(log.entries == [.init(siteID: "example.com", wasAwaited: true)])
+        #expect(center.awaitingSignIn.isEmpty)
+        #expect(center.sites.first?.needsPerson == false)
+    }
+
+    @Test("Saving a site that a run was turned away from reports it as awaited though its record was never flagged")
+    func savingAnAwaitedSiteWithACleanRecord() throws {
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        try center.save(grant: grant(), record: record())
+        let log = SaveLog()
+        center.onSiteSaved = { log.record($0, $1) }
+
+        // A day's attempts used up tell the hook and leave the record unflagged.
+        center.access.onPersonNeeded?("example.com")
+        #expect(center.awaitingSignIn == ["example.com"])
+        #expect(center.sites.first?.needsPerson == false)
+        try center.save(grant: grant(), record: record())
+
+        #expect(log.entries == [.init(siteID: "example.com", wasAwaited: true)])
+        #expect(center.awaitingSignIn.isEmpty)
+    }
+
+    @Test("Saving a site flagged in the registry reports it as awaited though no run was turned away since the launch")
+    func savingAFlaggedSiteIsReported() throws {
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        try center.save(grant: grant(), record: record())
+        var flagged = try #require(SiteRegistry.load(from: fixture.registry).first)
+        flagged.needsPerson = true
+        try SiteRegistry.save([flagged], to: fixture.registry)
+        let log = SaveLog()
+        center.onSiteSaved = { log.record($0, $1) }
+        #expect(center.awaitingSignIn.isEmpty)
+
+        try center.save(grant: grant(), record: record())
+
+        #expect(log.entries == [.init(siteID: "example.com", wasAwaited: true)])
+    }
+
+    @Test("Saving a site nothing waited on reports it as not awaited, and another site's wait is left alone")
+    func savingASiteNothingWaitedOn() throws {
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        try center.save(grant: grant(), record: record())
+        try center.save(grant: grant("other.example.org"), record: record("other.example.org", name: "Other"))
+        let log = SaveLog()
+        center.onSiteSaved = { log.record($0, $1) }
+
+        try center.save(grant: grant(), record: record())
+        #expect(log.entries == [.init(siteID: "example.com", wasAwaited: false)])
+
+        center.access.onPersonNeeded?("other.example.org")
+        try center.save(grant: grant(), record: record())
+        #expect(log.entries.last == .init(siteID: "example.com", wasAwaited: false))
+        #expect(center.awaitingSignIn == ["other.example.org"])
+    }
+
+    @Test("A save that fails reports nothing and leaves the wait in place")
+    func failedSaveKeepsTheWait() throws {
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        try center.save(grant: grant(), record: record())
+        center.access.onPersonNeeded?("example.com")
+        let log = SaveLog()
+        center.onSiteSaved = { log.record($0, $1) }
+
+        #expect(throws: SiteVault.Failure.invalidGrant) {
+            try center.save(grant: grant("other.example.org"), record: record("example.com"))
+        }
+
+        #expect(log.entries.isEmpty)
+        #expect(center.awaitingSignIn == ["example.com"])
+    }
+
+    @Test("Removing a site ends its wait")
+    func removalEndsTheWait() async throws {
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        try center.save(grant: grant(), record: record())
+        try center.save(grant: grant("other.example.org"), record: record("other.example.org", name: "Other"))
+        center.access.onPersonNeeded?("example.com")
+        center.access.onPersonNeeded?("other.example.org")
+
+        try await center.remove("example.com")
+
+        #expect(center.awaitingSignIn == ["other.example.org"])
+    }
+
+    @Test("A removal that fails leaves the site awaiting the person", .enabled(if: getuid() != 0))
+    func failedRemovalKeepsTheWait() async throws {
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        try center.save(grant: grant(), record: record())
+        center.access.onPersonNeeded?("example.com")
+
+        // A directory that cannot be written to refuses the registry's replacement file.
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: fixture.directory.path)
+        await #expect(throws: (any Error).self) { try await center.remove("example.com") }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.directory.path)
+
+        #expect(center.awaitingSignIn == ["example.com"])
+    }
+
+    @Test("Telling the hook again of a site already awaited publishes nothing")
+    func awaitingPublishesOnlyChanges() throws {
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        try center.save(grant: grant(), record: record())
+        var published: [Set<String>] = []
+        let subscription = center.$awaitingSignIn.sink { published.append($0) }
+        defer { subscription.cancel() }
+
+        center.access.onPersonNeeded?("example.com")
+        center.access.onPersonNeeded?("example.com")
+
+        #expect(published == [[], ["example.com"]])
+    }
+
+    @Test("The center reports every turn-away, each time, once the awaiting set holds the site")
+    func turnAwayIsReportedEachTime() throws {
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        try center.save(grant: grant(), record: record())
+        var reported: [(String, Set<String>)] = []
+        center.onPersonNeeded = { siteID in
+            reported.append((siteID, center.awaitingSignIn))
+        }
+
+        center.access.onPersonNeeded?("example.com")
+        center.access.onPersonNeeded?("example.com")
+
+        #expect(reported.map(\.0) == ["example.com", "example.com"])
+        #expect(reported.allSatisfy { $0.1 == ["example.com"] })
+    }
+
+    @Test("A site reads as needing you when its record is flagged or a run was turned away from it")
+    func statusFollowsTheWait() {
+        let clean = record()
+        var flagged = record("other.example.org", name: "Other")
+        flagged.needsPerson = true
+        let date = Date(timeIntervalSince1970: 1_800_000_000)
+        var signedIn = record()
+        signedIn.lastSignedIn = date
+
+        #expect(SiteAccessCenter.SiteStatus(clean, awaiting: []) == .notSignedInYet)
+        #expect(SiteAccessCenter.SiteStatus(clean, awaiting: ["example.com"]) == .needsYou)
+        #expect(SiteAccessCenter.SiteStatus(clean, awaiting: ["other.example.org"]) == .notSignedInYet)
+        #expect(SiteAccessCenter.SiteStatus(flagged, awaiting: []) == .needsYou)
+        #expect(SiteAccessCenter.SiteStatus(flagged, awaiting: ["example.com"]) == .needsYou)
+        #expect(SiteAccessCenter.SiteStatus(signedIn, awaiting: []) == .signedIn(date))
+        #expect(SiteAccessCenter.SiteStatus(signedIn, awaiting: ["example.com"]) == .needsYou)
     }
 
     // MARK: Texts

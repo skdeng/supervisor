@@ -35,8 +35,10 @@ final class SiteAccessCenter: ObservableObject {
         case signedInKeepingSession(Date)
         case notSignedInYet
 
-        init(_ record: SiteRecord) {
-            if record.needsPerson {
+        /// A site reads as needing the person when its record says so or a run was turned away
+        /// from it since they last signed in (`awaiting`).
+        init(_ record: SiteRecord, awaiting: Set<String>) {
+            if record.needsPerson || awaiting.contains(record.id) {
                 self = .needsYou
             } else if let date = record.lastSignedIn {
                 self = record.keepsSessionOnly ? .signedInKeepingSession(date) : .signedIn(date)
@@ -55,10 +57,23 @@ final class SiteAccessCenter: ObservableObject {
     }
 
     @Published private(set) var sites: [SiteRecord] = []
+    /// The ids of the sites a run was turned away from for want of the person's sign-in since
+    /// they last signed in to it. Held in memory only, so a relaunch starts with none; a site
+    /// flagged in the registry stays flagged (`SiteRecord.needsPerson`).
+    @Published private(set) var awaitingSignIn: Set<String> = []
     /// Follows the setting alone until `refresh()` has tried the Messages database.
     @Published private(set) var textsStatus: TextsStatus
 
     let access: SiteAccess
+
+    /// Called after each save, once the site is stored and the list refreshed, with the saved
+    /// record and whether the site was waiting on the person: flagged as needing them, or
+    /// turned away from a run since they last signed in.
+    var onSiteSaved: (@MainActor (_ record: SiteRecord, _ wasAwaited: Bool) -> Void)?
+
+    /// Called with the site's id each time a run is turned away from it for want of the
+    /// person's sign-in, once `awaitingSignIn` and `sites` say so.
+    var onPersonNeeded: (@MainActor (_ siteID: String) -> Void)?
 
     /// Where emailed codes come from. Nil means a sign-in that asks for one gets none.
     var emailedCode: (@Sendable (_ sender: String, _ since: Date) async -> String?)? {
@@ -114,6 +129,13 @@ final class SiteAccessCenter: ObservableObject {
             settling: settling,
             now: now
         )
+        access.onPersonNeeded = { [weak self] siteID in
+            self?.personNeeded(siteID)
+        }
+        // A site whose start page a run could read is not waiting on the person.
+        access.onOpened = { [weak self] siteID in
+            self?.forgetAwaiting(siteID)
+        }
         settingsObservation = settings.$provisorReadsTexts.sink { isOn in
             textsSwitch.set(isOn)
         }
@@ -140,10 +162,19 @@ final class SiteAccessCenter: ObservableObject {
     }
 
     /// Stores the grant and record, replacing any for the site, and marks it signed in by the
-    /// person.
+    /// person. The site stops awaiting them; `onSiteSaved` hears of the save and of whether it
+    /// was awaited.
     func save(grant: SiteGrant, record: SiteRecord) throws {
-        defer { refresh() }
-        try access.add(grant: grant, record: record)
+        let wasAwaited = isAwaited(record.id)
+        do {
+            try access.add(grant: grant, record: record)
+        } catch {
+            refresh()
+            throw error
+        }
+        forgetAwaiting(record.id)
+        refresh()
+        onSiteSaved?(record, wasAwaited)
     }
 
     /// Removes the site's sign-in, registry entry, and cookies, and throws when that could not
@@ -157,6 +188,30 @@ final class SiteAccessCenter: ObservableObject {
             AppLog.error(.sites, "removing site \(siteID) failed: \(error)")
             throw error
         }
+        forgetAwaiting(siteID)
+    }
+
+    /// Whether the site is flagged as needing the person, or a run was turned away from it since
+    /// they last signed in. Reads the registry, so a flag written a moment ago counts.
+    private func isAwaited(_ siteID: String) -> Bool {
+        awaitingSignIn.contains(siteID)
+            || access.sites().contains { $0.id == siteID && $0.needsPerson }
+    }
+
+    /// A `@Published` value publishes on every write, so a set that would not change is left
+    /// alone.
+    private func personNeeded(_ siteID: String) {
+        if !awaitingSignIn.contains(siteID) {
+            awaitingSignIn.insert(siteID)
+        }
+        refresh()
+        onPersonNeeded?(siteID)
+    }
+
+    private func forgetAwaiting(_ siteID: String) {
+        if awaitingSignIn.contains(siteID) {
+            awaitingSignIn.remove(siteID)
+        }
     }
 
     // MARK: Texts
@@ -168,7 +223,8 @@ final class SiteAccessCenter: ObservableObject {
         ProVisorTools(
             access: access,
             messages: messages,
-            textsAreOn: { [settings] in settings.provisorReadsTexts }
+            textsAreOn: { [settings] in settings.provisorReadsTexts },
+            awaiting: { [weak self] in self?.awaitingSignIn ?? [] }
         )
     }
 

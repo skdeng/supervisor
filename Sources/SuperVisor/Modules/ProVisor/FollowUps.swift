@@ -3,13 +3,30 @@ import Foundation
 
 /// When a follow-up pass may start: soon after a check is owed, and not so often that it spends
 /// the user's quota.
+///
+/// A pass owed because the person just signed in to a site keeps to a schedule of its own
+/// (`mayStartAfterGrant`, `nextStartAfterGrant`): it starts within seconds, since the check it
+/// makes is the one that was waiting on that sign-in, and its daily count is kept apart from
+/// the passes that notes owe.
 enum FollowUpSchedule {
+    /// The schedule a starting pass keeps to, and the daily count it is charged to.
+    enum Charge: Equatable {
+        /// The pass is owed for a sign-in, within that count's limit.
+        case afterGrant
+        /// Any other pass, or one owed for a sign-in once that count's limit is spent.
+        case ordinary
+    }
+
     /// The shortest wait before a pass owed now may start.
     static let delay: TimeInterval = 60
     /// The shortest time between the starts of two passes.
     static let minimumGap: TimeInterval = 10 * 60
     /// The most passes that start on one local day.
     static let perDay = 6
+    /// The wait before a pass owed after a sign-in may start.
+    static let grantDelay: TimeInterval = 5
+    /// The most passes owed after a sign-in that start on one local day.
+    static let grantsPerDay = 6
 
     /// A pass may start when fewer than `perDay` have started today and `minimumGap` has passed
     /// since the last one. A last start in the future, which a clock set back leaves behind,
@@ -39,24 +56,79 @@ enum FollowUpSchedule {
         }
         return earliest
     }
+
+    /// How a pass is scheduled and counted: after a sign-in when one owes it and fewer than
+    /// `grantsPerDay` such passes have started today, and as an ordinary pass otherwise.
+    static func charge(afterGrantOwed: Bool, grantsStartedToday: Int) -> Charge {
+        afterGrantOwed && mayStartAfterGrant(startedToday: grantsStartedToday) ? .afterGrant : .ordinary
+    }
+
+    /// The charge of a pass that starts at `now`, or nil when it may not start yet: a pass owed
+    /// after a sign-in within its count starts at once, and any other waits for `mayStart`.
+    /// `startedToday` counts the ordinary passes started today and `grantsStartedToday` those
+    /// owed after a sign-in.
+    static func chargeToStart(
+        now: Date,
+        last: Date?,
+        afterGrantOwed: Bool,
+        startedToday: Int,
+        grantsStartedToday: Int
+    ) -> Charge? {
+        let charge = charge(afterGrantOwed: afterGrantOwed, grantsStartedToday: grantsStartedToday)
+        guard charge == .afterGrant || mayStart(now: now, last: last, startedToday: startedToday) else {
+            return nil
+        }
+        return charge
+    }
+
+    /// A pass owed after a sign-in may start while fewer than `grantsPerDay` such passes have
+    /// started today. The gap between passes does not apply.
+    static func mayStartAfterGrant(startedToday: Int) -> Bool {
+        startedToday < grantsPerDay
+    }
+
+    /// The earliest time a pass owed after a sign-in from `now` may start: `grantDelay` after
+    /// `now` while fewer than `grantsPerDay` such passes have started today, and otherwise the
+    /// time `nextStart` gives a pass owed for any other reason. `grantsStartedToday` counts
+    /// the passes started after a sign-in, `startedToday` the others.
+    static func nextStartAfterGrant(
+        now: Date,
+        last: Date?,
+        startedToday: Int,
+        grantsStartedToday: Int,
+        calendar: Calendar
+    ) -> Date {
+        guard mayStartAfterGrant(startedToday: grantsStartedToday) else {
+            return nextStart(now: now, last: last, startedToday: startedToday, calendar: calendar)
+        }
+        return now.addingTimeInterval(grantDelay)
+    }
 }
 
-/// Whether a follow-up pass is owed: for a note that is due, or once after the user granted a
-/// site a proposal asked for, so the check waiting on that site is made with it. One request
-/// is held at a time, and starting a pass answers it.
+/// Whether a follow-up pass is owed: for a note that is due, or once after the user signed in
+/// to a site that something was waiting on, so the check waiting on that site is made with it.
+/// The sites signed in to are held until a pass starts, which answers them all.
 struct FollowUpDemand: Equatable {
-    private(set) var siteGranted = false
+    private var signedIn: Set<String> = []
+
+    /// The ids of the sites signed in to since the last pass started, sorted.
+    var justSignedIn: [String] { signedIn.sorted() }
+
+    /// Whether a pass is owed for a sign-in, whatever the notes say.
+    var isOwedAfterGrant: Bool { !signedIn.isEmpty }
 
     func isOwed(hasDueNote: Bool) -> Bool {
-        hasDueNote || siteGranted
+        hasDueNote || isOwedAfterGrant
     }
 
-    mutating func requestAfterGrant() {
-        siteGranted = true
+    mutating func requestAfterGrant(site id: String) {
+        signedIn.insert(id)
     }
 
-    mutating func passStarted() {
-        siteGranted = false
+    /// A pass started and was told about the sites in `told`, which it answers. A site signed in
+    /// to after that list was made stays owed.
+    mutating func passStarted(told: [String]) {
+        signedIn.subtract(told)
     }
 }
 
@@ -101,15 +173,21 @@ struct LocalDay: Comparable, Equatable, Sendable {
 }
 
 /// How many follow-up passes started on the current local day, and when the last one did.
+/// Passes owed after a sign-in are counted apart from those a note owes, and either kind moves
+/// the time of the last start.
 struct FollowUpLedger: Equatable {
     private(set) var last: Date?
     private var day: String?
     private var count = 0
+    private var grantDay: String?
+    private var grantCount = 0
 
     private enum Key {
         static let last = "provisor.lastFollowUpAt"
         static let day = "provisor.followUpDay"
         static let count = "provisor.followUpCount"
+        static let grantDay = "provisor.grantFollowUpDay"
+        static let grantCount = "provisor.grantFollowUpCount"
     }
 
     init() {}
@@ -119,16 +197,25 @@ struct FollowUpLedger: Equatable {
         last = stored > 0 ? Date(timeIntervalSince1970: stored) : nil
         day = defaults.string(forKey: Key.day)
         count = max(0, defaults.integer(forKey: Key.count))
+        grantDay = defaults.string(forKey: Key.grantDay)
+        grantCount = max(0, defaults.integer(forKey: Key.grantCount))
     }
 
     func save(to defaults: UserDefaults) {
         defaults.set(last?.timeIntervalSince1970 ?? 0, forKey: Key.last)
         defaults.set(day, forKey: Key.day)
         defaults.set(count, forKey: Key.count)
+        defaults.set(grantDay, forKey: Key.grantDay)
+        defaults.set(grantCount, forKey: Key.grantCount)
     }
 
     func startedToday(now: Date, timeZone: TimeZone) -> Int {
         day == Self.day(of: now, in: timeZone) ? count : 0
+    }
+
+    /// How many passes owed after a sign-in started on the local day of `now`.
+    func grantStartedToday(now: Date, timeZone: TimeZone) -> Int {
+        grantDay == Self.day(of: now, in: timeZone) ? grantCount : 0
     }
 
     /// The ledger after a pass starts at `now`. The first start of a new day restarts the count.
@@ -144,6 +231,20 @@ struct FollowUpLedger: Equatable {
         return updated
     }
 
+    /// The ledger after a pass owed after a sign-in starts at `now`. The first such start of a
+    /// new day restarts that count.
+    func recordingGrantStart(now: Date, timeZone: TimeZone) -> FollowUpLedger {
+        var updated = self
+        let today = Self.day(of: now, in: timeZone)
+        if updated.grantDay != today {
+            updated.grantDay = today
+            updated.grantCount = 0
+        }
+        updated.grantCount += 1
+        updated.last = now
+        return updated
+    }
+
     /// `yyyy-MM-dd` for the calendar day `date` falls on in `timeZone`.
     static func day(of date: Date, in timeZone: TimeZone) -> String {
         date.formatted(Date.ISO8601FormatStyle(timeZone: timeZone).year().month().day())
@@ -152,55 +253,84 @@ struct FollowUpLedger: Equatable {
 
 /// The notes in `followups/` that owe a check today.
 ///
-/// A note is the agent's own file, so the app reads two things from its first lines: that the
-/// first says `Status: open`, and the date on the second, `Check from: yyyy-MM-dd`, the first
-/// day the check can be made. Nothing else in a note is read, and nothing in it is acted on.
+/// A note is the agent's own file, so the app reads three things from its first lines: that the
+/// first says `Status: open`, the date on the second, `Check from: yyyy-MM-dd`, the first day
+/// the check can be made, and on the third, when the check needs a site's pages,
+/// `Waits on: <host>`. Nothing else in a note is read, and nothing in it is acted on.
 enum FollowUpNotes {
     static let openLine = "Status: open"
     static let checkFromPrefix = "Check from:"
+    static let waitsOnPrefix = "Waits on:"
     /// A larger note is not read.
     static let maximumNoteBytes = 64 << 10
-    /// How much of a note is read: both lines have to fit.
-    static let headBytes = 256
+    /// How much of a note is read: all three lines have to fit, the third holding a host name
+    /// of up to 253 bytes.
+    static let headBytes = 512
     /// The most directory entries examined in one look.
     static let maximumEntries = 1_000
 
-    /// Whether `folder` holds a note that is open and due on `today`.
-    static func hasDueNote(in folder: URL, on today: LocalDay) -> Bool {
+    /// Whether the site named by a note's `Waits on:` line can be read now: it is a granted
+    /// site that is not flagged as needing the person and that no run was turned away from
+    /// since they last signed in (`awaiting`).
+    static func isReadable(_ host: String, granted: [SiteRecord], awaiting: Set<String>) -> Bool {
+        guard let site = granted.first(where: { $0.id == host }) else { return false }
+        return !site.needsPerson && !awaiting.contains(host)
+    }
+
+    /// Whether `folder` holds a note that is open and due on `today`. A note that waits on a
+    /// site is due only while `readable` says the site can be read.
+    static func hasDueNote(in folder: URL, on today: LocalDay, readable: (String) -> Bool) -> Bool {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
         return names.prefix(maximumEntries).contains {
-            isDue(folder.appendingPathComponent($0, isDirectory: false), on: today)
+            isDue(folder.appendingPathComponent($0, isDirectory: false), on: today, readable: readable)
         }
     }
 
     /// Whether the file at `url` is an open note that is due on `today`: a regular file, not a
     /// symbolic link, named `*.md`, no larger than `maximumNoteBytes`, whose beginning
-    /// satisfies `isDue(head:on:)`.
-    static func isDue(_ url: URL, on today: LocalDay) -> Bool {
+    /// satisfies `isDue(head:on:readable:)`.
+    static func isDue(_ url: URL, on today: LocalDay, readable: (String) -> Bool) -> Bool {
         guard let head = head(of: url) else { return false }
-        return isDue(head: head, on: today)
+        return isDue(head: head, on: today, readable: readable)
     }
 
     /// Whether the first bytes of a note say it is open and due on `today`: after a leading
-    /// byte-order mark, the first line is `Status: open` once trimmed, and the second line is
-    /// not a `Check from:` date after `today`. A second line that is missing, is something
-    /// else, or holds a date that cannot be read leaves the note due.
-    static func isDue(head: Data, on today: LocalDay) -> Bool {
+    /// byte-order mark, the first line is `Status: open` once trimmed, the second line is not a
+    /// `Check from:` date after `today`, and a third line of `Waits on:` and a host name does
+    /// not name a site that `readable` refuses. A second line that is missing, is something
+    /// else, or holds a date that cannot be read leaves the note due, and so does a third line
+    /// that is missing, is something else, or holds anything but a lowercase host name.
+    static func isDue(head: Data, on today: LocalDay, readable: (String) -> Bool) -> Bool {
         let scalars = String(decoding: head, as: UTF8.self).unicodeScalars
         let text = scalars.first == "\u{FEFF}" ? String(scalars.dropFirst()) : String(scalars)
-        let lines = text.split(maxSplits: 2, omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+        let lines = text.split(maxSplits: 3, omittingEmptySubsequences: false, whereSeparator: \.isNewline)
         guard let first = lines.first,
               first.trimmingCharacters(in: .whitespaces) == openLine
         else { return false }
 
-        guard lines.count > 1 else { return true }
-        let second = lines[1].trimmingCharacters(in: .whitespaces)
-        guard second.hasPrefix(checkFromPrefix),
-              let day = LocalDay(
-                  parsing: second.dropFirst(checkFromPrefix.count).trimmingCharacters(in: .whitespaces)
-              )
-        else { return true }
-        return day <= today
+        if lines.count > 1 {
+            let second = lines[1].trimmingCharacters(in: .whitespaces)
+            if second.hasPrefix(checkFromPrefix),
+               let day = LocalDay(
+                   parsing: second.dropFirst(checkFromPrefix.count).trimmingCharacters(in: .whitespaces)
+               ),
+               day > today {
+                return false
+            }
+        }
+        if lines.count > 2, let host = waitedOnHost(lines[2]) {
+            return readable(host)
+        }
+        return true
+    }
+
+    /// The host a note's third line says it waits on: `Waits on:` and a name that is a valid
+    /// host, in lowercase ASCII. Nil for any other line.
+    private static func waitedOnHost(_ line: Substring) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix(waitsOnPrefix) else { return nil }
+        let host = trimmed.dropFirst(waitsOnPrefix.count).trimmingCharacters(in: .whitespaces)
+        return SiteHost.isValid(host) ? host : nil
     }
 
     /// The first `headBytes` of a note that is a regular file named `*.md`, not a symbolic

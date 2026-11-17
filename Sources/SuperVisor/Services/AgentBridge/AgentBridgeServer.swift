@@ -80,6 +80,7 @@ final class AgentBridgeServer: @unchecked Sendable {
     private let rootIsTrusted: @Sendable (pid_t) -> Bool
     private let rootStartTime: @Sendable (pid_t) -> ProcessStartTime?
     private let callTimeout: TimeInterval
+    private let requestTimeout: TimeInterval
     private let handler: Handler
     private let acceptQueue = DispatchQueue(label: "com.supervisor.agent-bridge.accept")
     private let connectionQueue = DispatchQueue(
@@ -102,7 +103,8 @@ final class AgentBridgeServer: @unchecked Sendable {
     /// `rootStartTime` reads when a root process started, which is recorded and compared with
     /// the process found at that pid when a caller's ancestry is walked.
     /// `callTimeout` bounds one tool call; the helper gives up on a reply after five minutes,
-    /// so a longer bound would answer no one.
+    /// so a longer bound would answer no one. `requestTimeout` bounds the wait for a caller's
+    /// request line.
     init(
         path: String,
         version: String,
@@ -113,6 +115,7 @@ final class AgentBridgeServer: @unchecked Sendable {
         rootStartTime: @escaping @Sendable (pid_t) -> ProcessStartTime? =
             ProcessAncestry.startTime(of:),
         callTimeout: TimeInterval = 270,
+        requestTimeout: TimeInterval = AgentBridgeServer.requestTimeout,
         handler: @escaping Handler
     ) {
         self.path = path
@@ -121,6 +124,7 @@ final class AgentBridgeServer: @unchecked Sendable {
         self.rootIsTrusted = rootIsTrusted
         self.rootStartTime = rootStartTime
         self.callTimeout = callTimeout
+        self.requestTimeout = requestTimeout
         self.handler = handler
     }
 
@@ -236,7 +240,7 @@ final class AgentBridgeServer: @unchecked Sendable {
         switch BridgeWire.readLine(
             from: connection,
             limit: BridgeWire.maximumRequestLine,
-            timeout: Self.requestTimeout
+            timeout: requestTimeout
         ) {
         case let .line(data):
             line = data

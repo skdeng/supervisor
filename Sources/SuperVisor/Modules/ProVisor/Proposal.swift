@@ -336,8 +336,12 @@ enum ProposalQueue {
 /// Keeps count of which proposals the user has been told about, so each is announced once
 /// however many runs finish while it waits. A scouting pass and a reviewed run can overlap.
 struct ProposalAnnouncer {
-    /// Every proposal that has been on file at a seeding or a count. Nil until seeded.
+    /// Every proposal that has been on file at a seeding or a count, less those held back. Nil
+    /// until seeded.
     private var seen: Set<String>?
+    /// Proposals left out of a count because their request's host was still being looked up,
+    /// waiting for `countReleased`.
+    private var heldBack: Set<String> = []
 
     /// Takes what is on file at the first read after a start as already known, so proposals
     /// that were waiting at launch are never announced as new.
@@ -350,17 +354,82 @@ struct ProposalAnnouncer {
     /// How many proposals in `loaded` are news: those awaiting a decision that were neither
     /// on file before nor admitted under a standing approval. Something admitted under a rule
     /// is being dealt with, which is the point of having given one. A repeated request for a
-    /// site already asked for is not news either (`ProposalQueue.repeatedSiteRequests`).
-    mutating func countNew(in loaded: [Proposal], automatic: Set<String>, now: Date = Date()) -> Int {
+    /// site already asked for is not news either (`ProposalQueue.repeatedSiteRequests`), nor is
+    /// a request that a sign-in prompt announces in its own right (`covered`,
+    /// `SignInDemand.coveredProposalIDs`).
+    ///
+    /// A request in `awaitingRecognition` is neither counted nor seen: whether it is a sign-in
+    /// prompt or an idea is not known yet, and `countReleased` counts it once it is. Every
+    /// other proposal in `loaded` is seen afterwards, counted or not.
+    mutating func countNew(
+        in loaded: [Proposal],
+        automatic: Set<String>,
+        covered: Set<String> = [],
+        awaitingRecognition: Set<String> = [],
+        now: Date = Date()
+    ) -> Int {
         let known = seen ?? []
+        return admit(
+            loaded.filter { !known.contains($0.id) },
+            from: loaded,
+            automatic: automatic,
+            covered: covered,
+            awaitingRecognition: awaitingRecognition,
+            now: now
+        )
+    }
+
+    /// How many of the proposals `countNew` held back are news, now that their host is no
+    /// longer in `awaitingRecognition`, by the same rules. One still awaiting stays held back,
+    /// and one no longer on file is forgotten. Nothing is news before the announcer is seeded.
+    mutating func countReleased(
+        in loaded: [Proposal],
+        automatic: Set<String>,
+        covered: Set<String>,
+        awaitingRecognition: Set<String>,
+        now: Date = Date()
+    ) -> Int {
+        heldBack.formIntersection(loaded.map(\.id))
+        guard seen != nil, !heldBack.isEmpty else { return 0 }
+        return admit(
+            loaded.filter { heldBack.contains($0.id) },
+            from: loaded,
+            automatic: automatic,
+            covered: covered,
+            awaitingRecognition: awaitingRecognition,
+            now: now
+        )
+    }
+
+    /// Marks `candidates` seen and counts the news among them, holding back those awaiting
+    /// recognition.
+    private mutating func admit(
+        _ candidates: [Proposal],
+        from loaded: [Proposal],
+        automatic: Set<String>,
+        covered: Set<String>,
+        awaitingRecognition: Set<String>,
+        now: Date
+    ) -> Int {
         let repeated = ProposalQueue.repeatedSiteRequests(in: loaded, now: now)
-        let added = loaded.filter { proposal in
-            proposal.status == .proposed
-                && !known.contains(proposal.id)
-                && !automatic.contains(proposal.id)
-                && !repeated.contains(proposal.id)
-        }.count
-        seen = known.union(loaded.map(\.id))
+        var known = seen ?? []
+        var added = 0
+        for proposal in candidates {
+            if awaitingRecognition.contains(proposal.id) {
+                heldBack.insert(proposal.id)
+                continue
+            }
+            heldBack.remove(proposal.id)
+            known.insert(proposal.id)
+            if proposal.status == .proposed,
+               !automatic.contains(proposal.id),
+               !repeated.contains(proposal.id),
+               !covered.contains(proposal.id)
+            {
+                added += 1
+            }
+        }
+        seen = known
         return added
     }
 }

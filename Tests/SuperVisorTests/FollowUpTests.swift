@@ -57,6 +57,69 @@ struct FollowUpScheduleTests {
         #expect(FollowUpSchedule.mayStart(now: now, last: now.addingTimeInterval(3_600), startedToday: 0))
         #expect(!FollowUpSchedule.mayStart(now: now, last: now.addingTimeInterval(3_600), startedToday: 6))
     }
+
+    @Test("A pass owed after a sign-in waits five seconds and has its own six a day")
+    func afterGrantLimits() {
+        #expect(FollowUpSchedule.grantDelay == 5)
+        #expect(FollowUpSchedule.grantsPerDay == 6)
+    }
+
+    @Test("A starting pass is charged to the sign-in count only while one is owed and that count has room")
+    func charge() {
+        for grants in 0...9 {
+            #expect(
+                FollowUpSchedule.charge(afterGrantOwed: true, grantsStartedToday: grants)
+                    == (grants < 6 ? .afterGrant : .ordinary),
+                "\(grants) sign-in passes started"
+            )
+            #expect(
+                FollowUpSchedule.charge(afterGrantOwed: false, grantsStartedToday: grants) == .ordinary,
+                "none owed, \(grants) sign-in passes started"
+            )
+        }
+    }
+
+    @Test("Which charge a pass that starts now takes, given what is owed and the day's two counts")
+    func chargeToStart() {
+        let recent = now.addingTimeInterval(-60)
+        let old = now.addingTimeInterval(-3_600)
+        // (owed after a sign-in, last start, ordinary today, sign-in passes today, expected)
+        let table: [(Bool, Date?, Int, Int, FollowUpSchedule.Charge?)] = [
+            (false, nil, 0, 0, .ordinary),
+            (false, old, 5, 9, .ordinary),
+            (false, recent, 1, 0, nil),
+            (false, old, 6, 0, nil),
+            (true, recent, 1, 0, .afterGrant),
+            (true, recent, 6, 5, .afterGrant),
+            (true, nil, 0, 0, .afterGrant),
+            (true, old, 0, 6, .ordinary),
+            (true, recent, 0, 6, nil),
+            (true, old, 6, 6, nil),
+            (true, old, 5, 7, .ordinary),
+        ]
+        for (owed, last, ordinary, grants, expected) in table {
+            #expect(
+                FollowUpSchedule.chargeToStart(
+                    now: now,
+                    last: last,
+                    afterGrantOwed: owed,
+                    startedToday: ordinary,
+                    grantsStartedToday: grants
+                ) == expected,
+                "owed \(owed), last \(String(describing: last)), \(ordinary) ordinary, \(grants) sign-in"
+            )
+        }
+    }
+
+    @Test("A pass owed after a sign-in is held up by its own count and by nothing else")
+    func afterGrantCap() {
+        for started in 0...8 {
+            #expect(
+                FollowUpSchedule.mayStartAfterGrant(startedToday: started) == (started < 6),
+                "\(started) started"
+            )
+        }
+    }
 }
 
 @Suite("Follow-up next start")
@@ -130,6 +193,57 @@ struct FollowUpNextStartTests {
         #expect(
             FollowUpSchedule.nextStart(now: now, last: nil, startedToday: 6, calendar: tokyo)
                 == nextMidnight.addingTimeInterval(60)
+        )
+    }
+
+    @Test("After a sign-in a pass starts five seconds on, whatever the gap or the ordinary count")
+    func afterGrantSkipsDelayAndGap() {
+        for (secondsAgo, ordinary) in [(0.0, 1), (30, 1), (599, 3), (86_400, 0), (0, 6), (60, 9)] {
+            #expect(
+                FollowUpSchedule.nextStartAfterGrant(
+                    now: now,
+                    last: now.addingTimeInterval(-secondsAgo),
+                    startedToday: ordinary,
+                    grantsStartedToday: 0,
+                    calendar: calendar
+                ) == now.addingTimeInterval(5),
+                "\(secondsAgo) seconds after the last start, \(ordinary) ordinary today"
+            )
+        }
+        #expect(
+            FollowUpSchedule.nextStartAfterGrant(
+                now: now, last: nil, startedToday: 0, grantsStartedToday: 5, calendar: calendar
+            ) == now.addingTimeInterval(5)
+        )
+    }
+
+    @Test("Past the day's sign-in passes the ordinary rules decide")
+    func afterGrantFallsBack() {
+        let recent = now.addingTimeInterval(-180)
+        for grants in [6, 7, 20] {
+            for (last, ordinary) in [(Date?.none, 0), (recent, 1), (recent, 6), (now.addingTimeInterval(7_200), 2)] {
+                #expect(
+                    FollowUpSchedule.nextStartAfterGrant(
+                        now: now,
+                        last: last,
+                        startedToday: ordinary,
+                        grantsStartedToday: grants,
+                        calendar: calendar
+                    ) == FollowUpSchedule.nextStart(
+                        now: now,
+                        last: last,
+                        startedToday: ordinary,
+                        calendar: calendar
+                    ),
+                    "\(grants) sign-in passes, \(ordinary) ordinary"
+                )
+            }
+        }
+        // 180 seconds after a start, the ordinary gap holds a pass for another 420.
+        #expect(
+            FollowUpSchedule.nextStartAfterGrant(
+                now: now, last: recent, startedToday: 1, grantsStartedToday: 6, calendar: calendar
+            ) == now.addingTimeInterval(420)
         )
     }
 
@@ -256,6 +370,79 @@ struct FollowUpLedgerTests {
         #expect(restored.last == instant.addingTimeInterval(900))
     }
 
+    @Test("Passes owed after a sign-in are counted apart from the others, and either moves the last start")
+    func grantStartsAreCountedApart() {
+        var ledger = FollowUpLedger()
+        for minute in 0..<3 {
+            ledger = ledger.recordingGrantStart(
+                now: instant.addingTimeInterval(TimeInterval(minute) * 60),
+                timeZone: losAngeles
+            )
+        }
+
+        #expect(ledger.grantStartedToday(now: instant.addingTimeInterval(3_600), timeZone: losAngeles) == 3)
+        #expect(ledger.startedToday(now: instant.addingTimeInterval(3_600), timeZone: losAngeles) == 0)
+        #expect(ledger.last == instant.addingTimeInterval(120))
+
+        let ordinary = ledger.recordingStart(now: instant.addingTimeInterval(900), timeZone: losAngeles)
+        #expect(ordinary.startedToday(now: instant.addingTimeInterval(900), timeZone: losAngeles) == 1)
+        #expect(ordinary.grantStartedToday(now: instant.addingTimeInterval(900), timeZone: losAngeles) == 3)
+        #expect(ordinary.last == instant.addingTimeInterval(900))
+
+        let sibling = ordinary.recordingGrantStart(now: instant.addingTimeInterval(960), timeZone: losAngeles)
+        #expect(sibling.grantStartedToday(now: instant.addingTimeInterval(960), timeZone: losAngeles) == 4)
+        #expect(sibling.startedToday(now: instant.addingTimeInterval(960), timeZone: losAngeles) == 1)
+    }
+
+    @Test("The sign-in count begins again on the next local day")
+    func grantCountRestartsDaily() {
+        let ledger = FollowUpLedger()
+            .recordingGrantStart(now: instant, timeZone: losAngeles)
+            .recordingGrantStart(now: instant.addingTimeInterval(60), timeZone: losAngeles)
+
+        // Fourteen hours later it is still Sunday in Los Angeles, and already Monday in Tokyo.
+        let later = instant.addingTimeInterval(14 * 3_600)
+        #expect(ledger.grantStartedToday(now: later, timeZone: losAngeles) == 2)
+        #expect(ledger.grantStartedToday(now: later, timeZone: tokyo) == 0)
+
+        let nextDay = instant.addingTimeInterval(86_400)
+        #expect(ledger.grantStartedToday(now: nextDay, timeZone: losAngeles) == 0)
+        let restarted = ledger.recordingGrantStart(now: nextDay, timeZone: losAngeles)
+        #expect(restarted.grantStartedToday(now: nextDay, timeZone: losAngeles) == 1)
+    }
+
+    @Test("Both counts are kept across launches, under keys of their own")
+    func grantPersistence() throws {
+        let suite = "follow-up-ledger-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let ledger = FollowUpLedger()
+            .recordingStart(now: instant, timeZone: losAngeles)
+            .recordingGrantStart(now: instant.addingTimeInterval(30), timeZone: losAngeles)
+            .recordingGrantStart(now: instant.addingTimeInterval(90), timeZone: losAngeles)
+        ledger.save(to: defaults)
+
+        let restored = FollowUpLedger(defaults: defaults)
+        #expect(restored == ledger)
+        #expect(restored.startedToday(now: instant, timeZone: losAngeles) == 1)
+        #expect(restored.grantStartedToday(now: instant, timeZone: losAngeles) == 2)
+        #expect(restored.last == instant.addingTimeInterval(90))
+        #expect(defaults.integer(forKey: "provisor.grantFollowUpCount") == 2)
+        #expect(defaults.string(forKey: "provisor.grantFollowUpDay") == FollowUpLedger.day(of: instant, in: losAngeles))
+    }
+
+    @Test("A stored sign-in count that is negative reads as none")
+    func hostileGrantDefaults() throws {
+        let suite = "follow-up-ledger-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(-3, forKey: "provisor.grantFollowUpCount")
+        defaults.set(FollowUpLedger.day(of: instant, in: losAngeles), forKey: "provisor.grantFollowUpDay")
+
+        #expect(FollowUpLedger(defaults: defaults).grantStartedToday(now: instant, timeZone: losAngeles) == 0)
+    }
+
     @Test("A stored count that is negative reads as none")
     func hostileDefaults() throws {
         let suite = "follow-up-ledger-\(UUID().uuidString)"
@@ -296,11 +483,11 @@ final class FollowUpNotesTests {
     }
 
     private func isDue(_ contents: String) throws -> Bool {
-        FollowUpNotes.isDue(try write("a.md", contents), on: today)
+        FollowUpNotes.isDue(try write("a.md", contents), on: today, readable: { _ in true })
     }
 
     private func isDue(head: [UInt8]) -> Bool {
-        FollowUpNotes.isDue(head: Data(head), on: today)
+        FollowUpNotes.isDue(head: Data(head), on: today, readable: { _ in true })
     }
 
     // MARK: The first line
@@ -336,9 +523,9 @@ final class FollowUpNotesTests {
             "Notes\nStatus: open\n",
             "",
             "\n",
-            String(repeating: "x", count: 300) + "\n",
+            String(repeating: "x", count: FollowUpNotes.headBytes + 4) + "\n",
             // A first line longer than what is read cannot be the status line.
-            String(repeating: " ", count: 260) + "Status: open\n",
+            String(repeating: " ", count: FollowUpNotes.headBytes + 4) + "Status: open\n",
         ] {
             #expect(try !isDue(contents), "\(contents.prefix(30).debugDescription)")
         }
@@ -407,16 +594,132 @@ final class FollowUpNotesTests {
     @Test("Only the first bytes are read, so a date cut off by them reads as no date")
     func headIsBounded() throws {
         // The first line fills the read, leaving nothing of the second.
-        let long = "Status: open" + String(repeating: " ", count: 244)
+        let long = "Status: open" + String(repeating: " ", count: FollowUpNotes.headBytes - 12)
         #expect(long.utf8.count == FollowUpNotes.headBytes)
         #expect(try isDue(long + "\nCheck from: 2099-01-01\n"))
 
         // The second line begins in the read and is cut inside its date, so it is not a date.
-        let cut = "Status: open\n" + String(repeating: " ", count: 229) + "Check from: 2099-01-01"
+        let cut = "Status: open\n" + String(repeating: " ", count: FollowUpNotes.headBytes - 27) + "Check from: 2099-01-01"
         #expect(try isDue(cut))
         // With less before it, the whole date is read and holds the note back.
         let whole = "Status: open\n" + String(repeating: " ", count: 200) + "Check from: 2099-01-01"
         #expect(try !isDue(whole))
+    }
+
+    // MARK: A note that waits on a site
+
+    private func isDue(_ contents: String, readable: @escaping (String) -> Bool) throws -> Bool {
+        FollowUpNotes.isDue(try write("a.md", contents), on: today, readable: readable)
+    }
+
+    private let waiting = "Status: open\nCheck from: 2026-11-16\nWaits on: example.com\nCheck the receipt."
+
+    @Test("A note that waits on a site is due while the site can be read, and not while it cannot")
+    func waitsOnReadability() throws {
+        var asked: [String] = []
+
+        #expect(try isDue(waiting, readable: { asked.append($0); return true }))
+        #expect(try !isDue(waiting, readable: { asked.append($0); return false }))
+        #expect(asked == ["example.com", "example.com"])
+    }
+
+    @Test("A note's date still holds it back when the site it waits on can be read")
+    func dateStillApplies() throws {
+        #expect(try !isDue(
+            "Status: open\nCheck from: 2026-11-17\nWaits on: example.com",
+            readable: { _ in true }
+        ))
+        #expect(try !isDue("Status: settled\nCheck from: 2026-11-16\nWaits on: example.com", readable: { _ in true }))
+    }
+
+    @Test("A note without the line is due as before, and readability is never asked")
+    func noWaitsOnLine() throws {
+        for contents in [
+            "Status: open",
+            "Status: open\nCheck from: 2026-11-16",
+            "Status: open\nCheck from: 2026-11-16\nCheck the receipt.",
+            "Status: open\nCheck from: 2026-11-16\n\nWaits on: example.com",
+            "Status: open\nWaits on: example.com",
+            "Status: open\nCheck from: 2026-11-16\nnotes\nWaits on: example.com",
+        ] {
+            var asked = false
+            #expect(try isDue(contents, readable: { _ in asked = true; return false }), "\(contents.debugDescription)")
+            #expect(!asked, "\(contents.debugDescription)")
+        }
+    }
+
+    @Test("A value that is not a lowercase host name is no line at all, so the note is due")
+    func invalidHostIsIgnored() throws {
+        for value in [
+            "", "   ", "Example.com", "EXAMPLE.COM", "example", "example..com", "-example.com", "example-.com",
+            "exa mple.com", "https://example.com", "example.com/account", "example.com:443", "example.com.",
+            "user@example.com", "exampl\u{0435}.com", "\u{FF45}xample.com", "example.com, other.example.org",
+            "127.0.0.1", String(repeating: "a", count: 254) + ".com",
+        ] {
+            #expect(try isDue("Status: open\nCheck from: 2026-11-16\nWaits on: \(value)", readable: { _ in false }), "\(value.debugDescription)")
+        }
+    }
+
+    @Test("The host may be spaced after the colon or not, indented, and end the line any way")
+    func waitsOnSpelling() throws {
+        for contents in [
+            "Status: open\nCheck from: 2026-11-16\nWaits on:example.com",
+            "Status: open\nCheck from: 2026-11-16\nWaits on:   example.com   ",
+            "Status: open\r\nCheck from: 2026-11-16\r\n\tWaits on: example.com\r\nrest",
+            "Status: open\rCheck from: 2026-11-16\rWaits on: example.com\rrest",
+            "Status: open\nCheck from: 2026-11-16\nWaits on: example.com",
+        ] {
+            #expect(try !isDue(contents, readable: { _ in false }), "\(contents.debugDescription)")
+            #expect(try isDue(contents, readable: { _ in true }), "\(contents.debugDescription)")
+        }
+    }
+
+    @Test("A third line is read even when the second is not a date, and the longest host name still fits the read")
+    func waitsOnRegardlessOfTheSecondLine() throws {
+        #expect(try !isDue("Status: open\nsoon\nWaits on: example.com", readable: { _ in false }))
+
+        let longest = [String(repeating: "a", count: 63), String(repeating: "b", count: 63),
+                       String(repeating: "c", count: 63), String(repeating: "d", count: 61)].joined(separator: ".")
+        #expect(longest.utf8.count == 253)
+        #expect(SiteHost.isValid(longest))
+        var asked: [String] = []
+        #expect(try !isDue(
+            "Status: open\nCheck from: 2026-11-16\nWaits on: \(longest)\nrest",
+            readable: { asked.append($0); return false }
+        ))
+        #expect(asked == [longest])
+    }
+
+    @Test("The folder holds a due note unless every note that is due waits on a site that cannot be read")
+    func folderLookupWithReadability() throws {
+        try write("a.md", waiting)
+        #expect(FollowUpNotes.hasDueNote(in: folder, on: today, readable: { $0 == "example.com" }))
+        #expect(!FollowUpNotes.hasDueNote(in: folder, on: today, readable: { _ in false }))
+
+        try write("b.md", "Status: open\nCheck from: 2026-11-16\nWaits on: other.example.org")
+        #expect(FollowUpNotes.hasDueNote(in: folder, on: today, readable: { $0 == "other.example.org" }))
+        #expect(!FollowUpNotes.hasDueNote(in: folder, on: today, readable: { _ in false }))
+
+        try write("c.md", "Status: open\nCheck from: 2026-11-16\nCheck the receipt.")
+        #expect(FollowUpNotes.hasDueNote(in: folder, on: today, readable: { _ in false }))
+    }
+
+    @Test("A site can be read when it is granted, not flagged, and not awaiting the person")
+    func siteReadability() {
+        func record(_ id: String, needsPerson: Bool = false) -> SiteRecord {
+            var record = SiteRecord(id: id, name: id, added: Date(timeIntervalSince1970: 1_700_000_000))
+            record.needsPerson = needsPerson
+            return record
+        }
+        let granted = [record("example.com"), record("flagged.example.org", needsPerson: true), record("awaited.example.net")]
+        let awaiting: Set<String> = ["awaited.example.net"]
+
+        #expect(FollowUpNotes.isReadable("example.com", granted: granted, awaiting: awaiting))
+        #expect(!FollowUpNotes.isReadable("flagged.example.org", granted: granted, awaiting: awaiting))
+        #expect(!FollowUpNotes.isReadable("awaited.example.net", granted: granted, awaiting: awaiting))
+        #expect(!FollowUpNotes.isReadable("unknown.example.io", granted: granted, awaiting: awaiting))
+        #expect(!FollowUpNotes.isReadable("example.com", granted: [], awaiting: []))
+        #expect(FollowUpNotes.isReadable("example.com", granted: granted, awaiting: ["other.example.io"]))
     }
 
     // MARK: Which files count
@@ -424,12 +727,12 @@ final class FollowUpNotesTests {
     @Test("Only a regular file named *.md counts")
     func fileNames() throws {
         for name in ["a.md", "2026-11-15-cancel-foo.md", "x.y.md"] {
-            #expect(FollowUpNotes.isDue(try write(name, "Status: open\n"), on: today), "\(name)")
+            #expect(FollowUpNotes.isDue(try write(name, "Status: open\n"), on: today, readable: { _ in true }), "\(name)")
         }
         for name in ["a.txt", "a", "a.md.txt", "a.MD", "a.markdown", ".hidden"] {
-            #expect(!FollowUpNotes.isDue(try write(name, "Status: open\n"), on: today), "\(name)")
+            #expect(!FollowUpNotes.isDue(try write(name, "Status: open\n"), on: today, readable: { _ in true }), "\(name)")
         }
-        #expect(!FollowUpNotes.isDue(folder.appendingPathComponent("missing.md"), on: today))
+        #expect(!FollowUpNotes.isDue(folder.appendingPathComponent("missing.md"), on: today, readable: { _ in true }))
     }
 
     @Test("A symbolic link is never read, even to a due note")
@@ -438,8 +741,8 @@ final class FollowUpNotesTests {
         let link = folder.appendingPathComponent("link.md")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
 
-        #expect(!FollowUpNotes.isDue(link, on: today))
-        #expect(!FollowUpNotes.hasDueNote(in: folder, on: today))
+        #expect(!FollowUpNotes.isDue(link, on: today, readable: { _ in true }))
+        #expect(!FollowUpNotes.hasDueNote(in: folder, on: today, readable: { _ in true }))
     }
 
     @Test("A directory or a named pipe called *.md is not a note, and does not hold the look up", .timeLimit(.minutes(1)))
@@ -449,9 +752,9 @@ final class FollowUpNotesTests {
         let pipe = folder.appendingPathComponent("pipe.md")
         #expect(mkfifo(pipe.path, 0o600) == 0)
 
-        #expect(!FollowUpNotes.isDue(directory, on: today))
-        #expect(!FollowUpNotes.isDue(pipe, on: today))
-        #expect(!FollowUpNotes.hasDueNote(in: folder, on: today))
+        #expect(!FollowUpNotes.isDue(directory, on: today, readable: { _ in true }))
+        #expect(!FollowUpNotes.isDue(pipe, on: today, readable: { _ in true }))
+        #expect(!FollowUpNotes.hasDueNote(in: folder, on: today, readable: { _ in true }))
     }
 
     @Test("A note over 64 KiB is not read")
@@ -463,27 +766,27 @@ final class FollowUpNotesTests {
         let over = head + Data(repeating: UInt8(ascii: "a"), count: limit - head.count + 1)
 
         #expect(atLimit.count == limit)
-        #expect(FollowUpNotes.isDue(try write("at.md", atLimit), on: today))
-        #expect(!FollowUpNotes.isDue(try write("over.md", over), on: today))
+        #expect(FollowUpNotes.isDue(try write("at.md", atLimit), on: today, readable: { _ in true }))
+        #expect(!FollowUpNotes.isDue(try write("over.md", over), on: today, readable: { _ in true }))
     }
 
     @Test("The folder holds a due note when any one is due")
     func folderLookup() throws {
-        #expect(!FollowUpNotes.hasDueNote(in: folder, on: today))
-        #expect(!FollowUpNotes.hasDueNote(in: folder.appendingPathComponent("missing"), on: today))
+        #expect(!FollowUpNotes.hasDueNote(in: folder, on: today, readable: { _ in true }))
+        #expect(!FollowUpNotes.hasDueNote(in: folder.appendingPathComponent("missing"), on: today, readable: { _ in true }))
 
         try write("a.md", "Status: settled\nevidence")
         try write("b.md", "Status: asked\n")
         try write("c.txt", "Status: open\n")
         try write("d.md", "Status: open\nCheck from: 2026-11-20\nNot yet.")
-        #expect(!FollowUpNotes.hasDueNote(in: folder, on: today))
+        #expect(!FollowUpNotes.hasDueNote(in: folder, on: today, readable: { _ in true }))
 
         try write("e.md", "Status: open\nCheck from: 2026-11-16\nCheck the receipt.")
-        #expect(FollowUpNotes.hasDueNote(in: folder, on: today))
-        #expect(!FollowUpNotes.hasDueNote(in: folder, on: LocalDay(year: 2026, month: 11, day: 15)))
-        #expect(FollowUpNotes.hasDueNote(in: folder, on: LocalDay(year: 2026, month: 11, day: 20)))
+        #expect(FollowUpNotes.hasDueNote(in: folder, on: today, readable: { _ in true }))
+        #expect(!FollowUpNotes.hasDueNote(in: folder, on: LocalDay(year: 2026, month: 11, day: 15), readable: { _ in true }))
+        #expect(FollowUpNotes.hasDueNote(in: folder, on: LocalDay(year: 2026, month: 11, day: 20), readable: { _ in true }))
 
         try write("e.md", "Status: settled\nSettled on 2026-11-20.")
-        #expect(!FollowUpNotes.hasDueNote(in: folder, on: today))
+        #expect(!FollowUpNotes.hasDueNote(in: folder, on: today, readable: { _ in true }))
     }
 }

@@ -42,6 +42,7 @@ struct AgentBridgeServerTests {
             rootTrusted: @escaping @Sendable (pid_t) -> Bool = { _ in true },
             recordedStartTime: (@Sendable (pid_t) -> ProcessStartTime?)? = nil,
             callTimeout: TimeInterval = 270,
+            requestTimeout: TimeInterval = AgentBridgeServer.requestTimeout,
             handlerDelay: Duration = .zero,
             handlerBarrier: TestBarrier? = nil,
             handlerFails: Bool = false,
@@ -92,6 +93,7 @@ struct AgentBridgeServerTests {
                 },
                 rootStartTime: recordedStartTime ?? ProcessAncestry.startTime(of:),
                 callTimeout: callTimeout,
+                requestTimeout: requestTimeout,
                 handler: handler
             )
             do {
@@ -410,25 +412,28 @@ struct AgentBridgeServerTests {
 
     @Test("A caller that is not this app's code is refused at once, without waiting for a request")
     func untrustedPeerRefusedBeforeReading() throws {
-        let fixture = try Fixture(trusted: { _ in false })
+        // A server that read first would answer only after its request timeout. The two bounds
+        // sit far apart so that a busy machine cannot blur which one the refusal met.
+        let serverWait: TimeInterval = 60
+        let clientWait: TimeInterval = 15
+        let fixture = try Fixture(trusted: { _ in false }, requestTimeout: serverWait)
         defer { fixture.tearDown() }
         fixture.register()
 
         let started = Date()
         let silent = try #require(UnixSocket.connect(to: fixture.path))
         defer { close(silent) }
-        // A server that read first would answer only after its request timeout of a second.
         let outcome = BridgeWire.readLine(
             from: silent,
             limit: BridgeWire.maximumReplyLine,
-            timeout: 0.5
+            timeout: clientWait
         )
         guard case let .line(line) = outcome else {
-            Issue.record("no refusal arrived within half a second: \(outcome)")
+            Issue.record("no refusal arrived before the server's wait for a request: \(outcome)")
             return
         }
         #expect(try JSONDecoder().decode(BridgeReply.self, from: line) == .failure(Self.refused))
-        #expect(Date().timeIntervalSince(started) < 0.5)
+        #expect(Date().timeIntervalSince(started) < clientWait)
         #expect(fixture.calls.all.isEmpty)
     }
 

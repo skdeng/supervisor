@@ -641,8 +641,10 @@ struct SiteBrowserTests {
         async let second = browser.open(url("https://example.com/two"))
         let pages = try await [first, second]
 
+        // Each open answers with its own page, which two loads overlapping in one web view
+        // would not. Which of the two ran last is the scheduler's choice.
         #expect(pages.map(\.title) == ["One", "Two"])
-        #expect(browser.currentURL == url("https://example.com/two"))
+        #expect([url("https://example.com/one"), url("https://example.com/two")].contains(browser.currentURL))
     }
 
     @Test("A snapshot reads the page as it is now", .timeLimit(.minutes(1)))

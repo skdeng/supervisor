@@ -36,6 +36,8 @@ struct ProVisorTools {
     let access: SiteAccess
     let messages: MessagesStore
     let textsAreOn: @MainActor () -> Bool
+    /// The ids of the sites a run was turned away from since the person last signed in.
+    var awaiting: @MainActor () -> Set<String> = { [] }
     var now: @MainActor () -> Date = { Date() }
     var timeZone: TimeZone = .current
 
@@ -76,7 +78,7 @@ struct ProVisorTools {
         }
         let granted = access.sites()
         guard let site = Self.match(wanted, in: granted) else {
-            return .refused(.unknownSite, Self.unknownSite(granted: granted))
+            return .refused(.unknownSite, Self.unknownSite(granted: granted, awaiting: awaiting()))
         }
         switch await access.open(siteID: site.id, visit: visit) {
         case let .success(page):
@@ -148,7 +150,8 @@ struct ProVisorTools {
         granted: [SiteRecord]
     ) -> Answer {
         switch failure {
-        case .unknownSite: .refused(.unknownSite, Self.unknownSite(granted: granted))
+        case .unknownSite:
+            .refused(.unknownSite, Self.unknownSite(granted: granted, awaiting: awaiting()))
         case .needsPerson:
             .refused(.needsPerson, Self.needsPerson(siteName: siteName, siteID: siteID))
         case .unavailable: .refused(.unavailable, Self.unavailable(siteName: siteName))
@@ -191,10 +194,14 @@ nonisolated extension ProVisorTools {
 
     /// The tools to offer a run: the three site tools when any site is granted, `read_texts`
     /// when texts are switched on.
-    static func descriptors(sites: [SiteRecord], textsAreOn: Bool) -> [BridgeTool] {
+    static func descriptors(
+        sites: [SiteRecord],
+        awaiting: Set<String>,
+        textsAreOn: Bool
+    ) -> [BridgeTool] {
         var tools: [BridgeTool] = []
         if !sites.isEmpty {
-            tools += [openSiteTool(sites), followLinkTool, readMoreTool]
+            tools += [openSiteTool(sites, awaiting: awaiting), followLinkTool, readMoreTool]
         }
         if textsAreOn {
             tools.append(readTextsTool)
@@ -208,13 +215,25 @@ nonisolated extension ProVisorTools {
     }
 
     /// The sites as a model is told them: each name with its id, which is the site's host.
-    static func siteList(_ sites: [SiteRecord]) -> String {
-        sites.map(siteLabel).joined(separator: ", ")
+    static func siteList(_ sites: [SiteRecord], awaiting: Set<String>) -> String {
+        sites.map { siteLabel($0, awaiting: awaiting) }.joined(separator: ", ")
     }
 
-    /// A site's name with its id, which is the host a proposal's `site` names it by.
-    static func siteLabel(_ site: SiteRecord) -> String {
-        "\(cleanName(site)) (\(site.id))"
+    /// A site's name with its id, which is the host a proposal's `site` names it by. A site that
+    /// is flagged as needing the person, or that a run was turned away from (`awaiting`), says
+    /// that the person has been asked to sign in again to it, inside the parentheses so that a
+    /// comma-joined list stays unambiguous.
+    static func siteLabel(_ site: SiteRecord, awaiting: Set<String>) -> String {
+        let waiting = site.needsPerson || awaiting.contains(site.id)
+        return "\(cleanName(site)) (\(site.id)" + (waiting ? "; waiting for them to sign in again" : "") + ")"
+    }
+
+    /// The labels of the granted sites among `ids`, in the order of `ids`, for naming the sites
+    /// the person just signed in to. An id that is not a granted site is left out.
+    static func signedInLabels(_ ids: [String], granted: [SiteRecord]) -> [String] {
+        ids.compactMap { id in
+            granted.first { $0.id == id }.map { siteLabel($0, awaiting: []) }
+        }
     }
 
     static func cleanName(_ site: SiteRecord) -> String {
@@ -249,12 +268,12 @@ nonisolated extension ProVisorTools {
         return .object(members)
     }
 
-    private static func openSiteTool(_ sites: [SiteRecord]) -> BridgeTool {
+    private static func openSiteTool(_ sites: [SiteRecord], awaiting: Set<String>) -> BridgeTool {
         BridgeTool(
             name: Tool.openSite.rawValue,
             description: "Opens a granted website's start page, signed in as the person, and "
                 + "returns what it shows with a numbered list of links; it only reads, and cannot "
-                + "type, press a button, or go to an address. Granted sites: \(siteList(sites)).",
+                + "type, press a button, or go to an address. Granted sites: \(siteList(sites, awaiting: awaiting)).",
             inputSchema: schema(
                 ["site": property("string", "A granted site's name or its id (its host).")],
                 required: ["site"]
@@ -326,15 +345,15 @@ nonisolated extension ProVisorTools {
     static let textsUnreadable = "Texts can't be read until SuperVisor has Full Disk Access."
     static let notOffered = "That tool is not available to this run."
 
-    static func unknownSite(granted: [SiteRecord]) -> String {
+    static func unknownSite(granted: [SiteRecord], awaiting: Set<String>) -> String {
         "No granted site matches that. Granted sites: "
-            + (granted.isEmpty ? "none" : siteList(granted)) + "."
+            + (granted.isEmpty ? "none" : siteList(granted, awaiting: awaiting)) + "."
     }
 
     static func needsPerson(siteName: String, siteID: String) -> String {
-        "\(siteName) needs the person to sign in again. Raise that as an item with \"site\": "
-            + "\"\(siteID)\", as \"When you cannot check something\" describes, and do not try "
-            + "this site again in this run."
+        "\(siteName) needs the person to sign in again, and SuperVisor has asked them. Keep a "
+            + "follow-up note open for this check (Status: open, Check from: today's date, "
+            + "Waits on: \(siteID)) and leave this site alone for the rest of this run."
     }
 
     static func unavailable(siteName: String) -> String {

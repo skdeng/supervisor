@@ -659,6 +659,7 @@ private final class ToolsCheck {
         // A record is what makes the site tools appear; no grant stands behind it.
         let offered = ProVisorTools.descriptors(
             sites: [SiteRecord(id: "nowhere.example", name: "Nowhere", added: Date())],
+            awaiting: [],
             textsAreOn: false
         )
 

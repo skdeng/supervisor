@@ -259,7 +259,8 @@ public final class NotchEngine: ObservableObject {
 
     /// Briefly present the compact surface, then auto-collapse. Never steals the expanded
     /// panel: while the sheet is open a peek presents nothing, and only a zero-duration
-    /// release still resolves a hold. A non-finite duration peeks indefinitely — the surface
+    /// release still resolves a hold. A banner still supplied when the sheet closes is shown
+    /// then (`performTransition`). A non-finite duration peeks indefinitely — the surface
     /// holds until the peeking module resolves it (`requestCollapse()` / `requestExpand()`)
     /// or the user opens the sheet.
     public func requestPeek(_ seconds: TimeInterval) {
@@ -519,7 +520,20 @@ public final class NotchEngine: ObservableObject {
         performTransition(to: newState)
     }
 
-    private func performTransition(to newState: NotchState) {
+    private func performTransition(to requested: NotchState) {
+        // Every close of the sheet arrives here, whichever path started it. A module still
+        // supplying a banner holds the surface: its hold was taken, or asked for and ignored,
+        // while the sheet was open, so the peek resumes and the banner shows.
+        let resumesPeek = Self.resumesPeek(
+            leaving: state,
+            for: requested,
+            bannerSupplied: { activePeekBanner() != nil }
+        )
+        let newState = resumesPeek ? .compact : requested
+        if resumesPeek {
+            AppLog.debug(.engine, "peek resumed after the sheet closed")
+            isPeeking = true
+        }
         guard newState != state else { return }
         // The window is a constant-size canvas; only the SwiftUI content morphs, so the
         // Dynamic-Island animation is never clipped by a window resize. `NotchRootView` owns
@@ -533,6 +547,16 @@ public final class NotchEngine: ObservableObject {
         // Interactivity depends on both hover and the new state; recompute outside animation.
         updateInteractivity()
         hover.refresh()
+    }
+
+    /// Whether moving from `current` to `requested` closes the sheet while some module still
+    /// supplies a banner, so the surface peeks to show it.
+    static func resumesPeek(
+        leaving current: NotchState,
+        for requested: NotchState,
+        bannerSupplied: () -> Bool
+    ) -> Bool {
+        current == .expanded && requested != .expanded && bannerSupplied()
     }
 
     // MARK: Window geometry

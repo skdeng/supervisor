@@ -133,7 +133,10 @@ A single morphing surface, driven by a small state machine, that modules feed co
   them sorted by `order`. Enabling or disabling a module in Settings activates/deactivates it live
   (`reconcileModules`, driven by `SettingsStore.$moduleEnabled`) — no relaunch. Note: the sheet
   opens on **click** (`toggleSheet()`), hover only shows a subtle grow affordance. `compactRevision`
-  is bumped on `setNeedsCompactRefresh`.
+  is bumped on `setNeedsCompactRefresh`. **A hold requested while the sheet is open is not
+  taken** (`requestPeek` ignores it), so when the surface leaves `.expanded` by any path the
+  engine peeks again if some module still supplies a banner (`resumesPeek`); a banner raised
+  under an open sheet would otherwise have a glow and never show.
 - **`Core/NotchWindow.swift`** — a borderless, non-activating `NSPanel` above the status-bar
   level, on all spaces, floating over fullscreen, transparent. It is a **fixed-size canvas**
   (`canvasFrame`): always large enough for the expanded panel, the widest compact content, and
@@ -456,7 +459,7 @@ sink. Preserve these guards when touching the relevant code:
   overrides and keeps everything else as typed. The choice is written back (`chose`,
   `instructed`) for the scout to learn from and is read back **for display only**: a retry
   starts from the recommended option and an empty box, because a box pre-filled from a file
-  the scout can rewrite would run the scout's words as the user's. The banner carries a count only, and `AppLog` records names and counts —
+  the scout can rewrite would run the scout's words as the user's. The ideas banner carries a count only, a sign-in banner names only a site the rule under "A site the agent asks for" allows, and `AppLog` records names and counts —
   never proposal text or a failure's message, which can quote the agent's output, and never
   page text, message text, browsing history, or an address with a query string (a site is named
   by its host). Verify a change to the flags by running the CLI in a scratch directory and
@@ -594,7 +597,14 @@ sink. Preserve these guards when touching the relevant code:
   disk** (`ProposalStore.settleSiteRequest`): it is recorded done, with no run started, only
   while the file is still open and still names the site the window was opened for, and only
   that site settles it. The queue shows, and the banner announces, one open request per site,
-  the earliest (`ProposalQueue.repeatedSiteRequests`).
+  the earliest (`ProposalQueue.repeatedSiteRequests`). **A sign-in prompt in the notch, banner
+  or sheet row, names only a granted site (by the user's own name for it) or a requested host
+  that same history check recognises** (`SignInDemand.Item.isAnnounceable`). A requested host
+  the history does not know is never a prompt: it stays an ordinary queue item counted among
+  the new ideas, with an address the user types. A request is held out of both the prompts
+  and the count until its lookup answers (`HostRecognition`, off the main actor, kept per
+  local day), so it is announced once, as one or the other. Saving a site from any window
+  settles the earliest open request that names it (`SignInDemand.effectOfSaving`).
 - **Texts are read-only, bounded, and masked for a model** (`MessagesStore`). The database
   opens `SQLITE_OPEN_READONLY`, each call on a connection of its own that closes before the call
   returns (an open read transaction would pin the write-ahead log, and a fresh connection sees
@@ -817,9 +827,10 @@ names below are the code paths.
   Attention stays quiet: a newly added entry raises a rotating brand-gradient glow around the
   notch, joins the flat sheet queue, and announces itself through the peek banner (Claude mark,
   session name, reason, one-tap Jump) — below the notch on a cutout screen, inline in the pill on
-  a flat one. The toast lives exactly as long as the glow: it holds until the user opens the
-  sheet or jumps to the terminal (either clears the glow) or the session leaves the queue, and
-  the glow's clearing is the module's only signal that the user looked. There is no other pill
+  a flat one. The toast lives exactly as long as SwarmVisor's claim on the glow: it holds until the
+  user opens the sheet (which ends every module's claim) or jumps to the terminal (which ends
+  SwarmVisor's alone) or the session leaves the queue, and that claim ending is the module's
+  only signal that the user looked. There is no other pill
   presence and no attention count. Only a genuinely new session PID announces — an entry
   rewritten in place (a late tty, refreshed metadata) updates the toast where it stands.
   SwarmVisor's `order` of 15 puts its toast ahead of FlowVisor's break nudge when both want the
@@ -985,14 +996,20 @@ names below are the code paths.
     as the shared token-free configuration; the `connectors` self-check re-measures it. Without
     the hold a pass reports a mail tool missing that was seconds from connecting.
   - **A follow-up pass** works through the notes in `followups/`. A note's first line is
-    `Status: open` and its second `Check from: yyyy-MM-dd`, the first local day the check can
-    be made; the app reads only those two lines, from a regular, non-symlink `*.md` file of at
-    most 64 KiB, and a missing or unreadable date leaves the note due (`FollowUpNotes`). A pass
-    is owed when a note is open and due, or once after the user saved a site from a window a
-    proposal's request opened, so the check that waited on it is made with it
-    (`FollowUpDemand`). It starts a minute after it is owed, at least ten minutes after the
-    last start, and at most six a local day (`FollowUpSchedule`; the ledger is in
-    `UserDefaults`). It waits while a scouting pass or another follow-up pass runs, is dropped
+    `Status: open`, its second `Check from: yyyy-MM-dd`, the first local day the check can
+    be made, and its third, when the check waits on a site, `Waits on: <host>`; the app reads
+    only those lines, from a regular, non-symlink `*.md` file of at most 64 KiB, and a missing
+    or unreadable date leaves the note due (`FollowUpNotes`). **A note that waits on a site is
+    due only while that site can be read** (granted, not flagged, not turned away): a pass
+    started for it would be turned away at once, up to six times a day, with nothing changed
+    until the person signs in. A pass is owed when a note is open and due, or once after the
+    user signed in to a site that was in demand (below), so the check that waited on it is
+    made with it (`FollowUpDemand`). A note-driven pass starts a minute after it is owed, at
+    least ten minutes after the last start, and at most six a local day; **a pass owed by a
+    sign-in starts 5 s after the save, skips that gap, has its own allowance of six a day, and
+    is told which sites the person just signed in to** (`FollowUpSchedule.chargeToStart`; the
+    ledgers are in `UserDefaults`). The told sites and the charge are consumed only once the
+    pass has launched, so one that fails to start stays owed. It waits while a scouting pass or another follow-up pass runs, is dropped
     on sleep and re-armed on wake like the scouting timer, carries the scout's confinement and
     bridge with a smaller allowance (30 turns, $0.75, 10 minutes), looks for nothing beyond the
     owed checks, and leaves the scouting report in Settings alone. Proposals it writes are
@@ -1052,13 +1069,35 @@ names below are the code paths.
     rule and offers **Stop Doing This**; Settings lists every rule in force with **Remove**. A
     revoked rule stays on file, and the scout is told never to offer it again. Something
     admitted under a rule is not announced: only what needs a decision raises the banner.
-  - **Attention:** a finished run that adds proposals needing a decision — a scouting pass, a
-    follow-up pass, or a reviewed run raising something it could not settle — raises the
-    attention glow and an 8-second banner carrying a count only (`ProposalAnnouncer`; each
-    proposal is announced once, since passes and a reviewed run can overlap, and a repeated
-    request for a site already asked for is not news). No compact presence.
+  - **Asking for a sign-in.** `SignInDemand` is the list of sites that need the person: a
+    granted site that is flagged in `sites.json` or that a run was turned away from since the
+    person last signed in (`SiteAccessCenter.awaitingSignIn`, in memory, fed by
+    `SiteAccess.onPersonNeeded` and emptied by a save, a removal, or a later visit that opens
+    the site), and a host an open request names. `SiteAccess` tells its hooks only about an
+    answer that still describes the current record, so a visit that began before the person
+    saved the site again says nothing. A site turned away because its start page left the
+    site's hosts or its day's attempts are used up is awaited, never flagged: flagging stops
+    the app's own attempts until the person signs in. **For a granted site the app asks the
+    person itself**, so `open_site`'s reply tells the agent that it has, to keep a follow-up
+    note with `Waits on: <host>`, and to leave the site alone for the run; the agent raises an
+    item only for a site it has not been given. The prompts shown are the announceable items
+    (see Untrusted Input) less the granted sites the user put off with **Not now**, which
+    stay hidden until a run is next turned away from them (`SignInPostponements`).
+  - **Attention:** ProVisor holds one announcement (`ProVisorAnnouncement`, a pure reducer
+    with the effects of each transition in `Effects.between`). A sign-in prompt raises the
+    glow and a banner, **Sign in to <name>** with a Sign In button, held until the user opens
+    the sheet or taps it; it outranks the ideas count, and a second site grows "and N more"
+    under the name already shown, so the button never changes under a cursor. A finished run
+    that adds proposals needing a decision — a scouting pass, a follow-up pass, or a reviewed
+    run raising something it could not settle — raises the glow and an 8-second banner
+    carrying a count only (`ProposalAnnouncer`; each proposal is announced once, since passes
+    and a reviewed run can overlap, and a repeated request for a site already asked for is not
+    news). A count that a sign-in covered returns if the sign-in leaves the demand unseen. A
+    proposal behind a visible sign-in prompt is folded into that prompt's sheet row and left
+    out of the count. In the sheet, sign-in rows lead the section, three unprompted and the
+    rest behind **N more**. No compact presence.
   - **Settings › ProVisor** lists the granted sites, each with its name, host, and one of
-    **Needs you**, **Signed in** *(when)* (with "asks you when it signs you out" for a kept
+    **Needs you** (flagged, or a run was turned away since the last sign-in), **Signed in** *(when)* (with "asks you when it signs you out" for a kept
     session), or **Not signed in yet**, and with **Sign In Again** and **Remove**. Remove
     deletes the Keychain item, the registry entry, and the cookies and site data the site's
     browse hosts left, except what another granted site shares (data is kept per registrable
@@ -1099,7 +1138,12 @@ at runtime.
   process alone** (`FileLogMirror.writesInThisProcess`): the test runner exercises the same
   code, and its lines would read in the file as things the running app did.
 - **`Services/Attention/AttentionGlowCenter.swift`** — a module-agnostic one-shot attention signal
-  read by the root view and cleared when the sheet opens.
+  read by the root view. **Each module holds its own claim** (`raise(for:)`, `clear(for:)`,
+  keyed by module id); the glow shows while any claim stands, and opening the sheet ends them
+  all (`clear()`). A module retires its banner when its own claim ends
+  (`claimPublisher(for:)`), never on the glow going dark: with one shared flag, a module
+  acting on its own banner would retire another module's banner that a higher-ranked one was
+  covering, before anyone saw it.
 - **`Services/Hotkeys/GlobalHotKey.swift`** — a system-wide shortcut over Carbon's
   `RegisterEventHotKey`. It needs no Accessibility grant, fires while another app owns the
   keyboard, and **consumes** the keystroke — `NSEvent.addGlobalMonitorForEvents` (what the dormant

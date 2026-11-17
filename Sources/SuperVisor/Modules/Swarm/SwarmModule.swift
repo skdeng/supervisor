@@ -61,14 +61,16 @@ final class SwarmModule: NotchModule, ObservableObject {
         sessionsSubscription = fleetCenter.$sessions.sink { [weak self] _ in
             self?.reconcileExpandedPresence()
         }
-        // The toast lives exactly as long as the glow: both are renderings of the same
-        // unresolved-attention state, and the glow is what the root view clears when the user
-        // opens the sheet. Its clearing is the module's only signal that the user looked.
-        glowSubscription = AttentionGlowCenter.shared.$isRaised.sink { [weak self] raised in
-            if !raised {
-                self?.retireAnnouncement()
+        // The toast lives exactly as long as SwarmVisor's glow claim: both are renderings of the
+        // same unresolved-attention state, and the claim is what the root view ends when the
+        // user opens the sheet. Its ending is the module's only signal that the user looked;
+        // another module ending its own claim leaves this one standing.
+        glowSubscription = AttentionGlowCenter.shared.claimPublisher(for: AgentFleetCenter.glowOwner)
+            .sink { [weak self] claimed in
+                if !claimed {
+                    self?.retireAnnouncement()
+                }
             }
-        }
 
         // Hooks can begin waiting for a permission decision at any time, so the listener is
         // established before registry discovery starts.
@@ -130,12 +132,12 @@ final class SwarmModule: NotchModule, ObservableObject {
         return AnyView(SwarmPeekBannerView(module: self))
     }
 
-    /// Teleports to the session's terminal or host app and acknowledges the attention: the glow clears, and
-    /// the toast retires with it. The queue entry stays: it is cleared only by the session
+    /// Teleports to the session's terminal or host app and acknowledges the attention: SwarmVisor's
+    /// glow claim ends, and the toast retires with it. The queue entry stays: it is cleared only by the session
     /// resuming or by an explicit dismissal, exactly as when Jump is pressed on the sheet row.
     func jump(to target: JumpTarget) {
         terminalTeleport.teleport(to: target)
-        AttentionGlowCenter.shared.clear()
+        AttentionGlowCenter.shared.clear(for: AgentFleetCenter.glowOwner)
         retireAnnouncement()
     }
 

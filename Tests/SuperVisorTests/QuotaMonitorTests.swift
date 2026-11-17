@@ -313,8 +313,12 @@ struct QuotaMonitorTests {
         h.monitor.start()
 
         await waitUntil("row visible") { h.monitor.showsRow }
-        await waitUntil("presence callback once the quota ages out") { h.presenceFlips == 2 }
-        #expect(!h.monitor.showsRow)
+        // An even count is a hide that followed a show. A registry event that arrives late on
+        // a busy machine reads the quota again and shows the row once more, so the count can
+        // pass two between polls; the row then ages out again.
+        await waitUntil("presence callback once the quota ages out") {
+            h.presenceFlips >= 2 && h.presenceFlips.isMultiple(of: 2) && !h.monitor.showsRow
+        }
         #expect(h.monitor.isClaudeActive)
     }
 

@@ -313,7 +313,127 @@ struct SiteRequestTests {
         #expect(added == 1)
     }
 
+    @Test("A request a sign-in prompt announces is not counted as a new idea, and is seen all the same")
+    func coveredRequestIsNotCounted() {
+        var announcer = ProposalAnnouncer()
+        announcer.seedIfNeeded(with: [])
+        let loaded = [
+            proposal("a-request", site: "example.com", createdAgo: 60),
+            proposal("b-idea", site: nil, createdAgo: 60),
+        ]
+
+        #expect(announcer.countNew(in: loaded, automatic: [], covered: ["a-request"], now: modified) == 1)
+        // Once seen it is never counted, whether or not a prompt still covers it.
+        #expect(announcer.countNew(in: loaded, automatic: [], covered: [], now: modified) == 0)
+    }
+
+    @Test("A request no prompt covers, such as one for a host never visited, counts as a new idea")
+    func uncoveredRequestIsCounted() {
+        var announcer = ProposalAnnouncer()
+        announcer.seedIfNeeded(with: [])
+        let loaded = [proposal("a-request", site: "stranger.example", createdAgo: 60)]
+
+        #expect(announcer.countNew(in: loaded, automatic: [], covered: [], now: modified) == 1)
+    }
+
+    @Test("A request awaiting recognition is held back, then counted as an idea when its host is not recognised")
+    func heldBackRequestBecomesAnIdea() {
+        var announcer = ProposalAnnouncer()
+        announcer.seedIfNeeded(with: [])
+        let loaded = [
+            proposal("a-request", site: "stranger.example", createdAgo: 60),
+            proposal("b-idea", site: nil, createdAgo: 60),
+        ]
+
+        #expect(announcer.countNew(in: loaded, automatic: [], awaitingRecognition: ["a-request"], now: modified) == 1)
+        // Still awaiting: nothing is released, and a later count leaves it held back.
+        #expect(announcer.countReleased(in: loaded, automatic: [], covered: [], awaitingRecognition: ["a-request"], now: modified) == 0)
+        #expect(announcer.countNew(in: loaded, automatic: [], awaitingRecognition: ["a-request"], now: modified) == 0)
+
+        // Not recognised: no prompt covers it, so it is an idea, counted once.
+        #expect(announcer.countReleased(in: loaded, automatic: [], covered: [], awaitingRecognition: [], now: modified) == 1)
+        #expect(announcer.countReleased(in: loaded, automatic: [], covered: [], awaitingRecognition: [], now: modified) == 0)
+        #expect(announcer.countNew(in: loaded, automatic: [], covered: [], now: modified) == 0)
+    }
+
+    @Test("A request awaiting recognition is held back, then never counted when its host is recognised")
+    func heldBackRequestBecomesASignIn() {
+        var announcer = ProposalAnnouncer()
+        announcer.seedIfNeeded(with: [])
+        let loaded = [proposal("a-request", site: "known.example", createdAgo: 60)]
+
+        #expect(announcer.countNew(in: loaded, automatic: [], awaitingRecognition: ["a-request"], now: modified) == 0)
+        // Recognised: the sign-in prompt covers it, and it is seen without being counted.
+        #expect(announcer.countReleased(in: loaded, automatic: [], covered: ["a-request"], awaitingRecognition: [], now: modified) == 0)
+        #expect(announcer.countNew(in: loaded, automatic: [], covered: [], now: modified) == 0)
+        #expect(announcer.countReleased(in: loaded, automatic: [], covered: [], awaitingRecognition: [], now: modified) == 0)
+    }
+
+    @Test("A held-back request that resolved before the next count is counted by that count")
+    func heldBackRequestResolvedByTheNextCount() {
+        var announcer = ProposalAnnouncer()
+        announcer.seedIfNeeded(with: [])
+        let loaded = [proposal("a-request", site: "stranger.example", createdAgo: 60)]
+
+        #expect(announcer.countNew(in: loaded, automatic: [], awaitingRecognition: ["a-request"], now: modified) == 0)
+        #expect(announcer.countNew(in: loaded, automatic: [], covered: [], now: modified) == 1)
+        #expect(announcer.countReleased(in: loaded, automatic: [], covered: [], awaitingRecognition: [], now: modified) == 0)
+    }
+
+    @Test("Nothing is released before the announcer is seeded, and a held-back request no longer on file is forgotten")
+    func releaseNeedsSeedAndFile() {
+        var unseeded = ProposalAnnouncer()
+        let loaded = [proposal("a-request", site: "stranger.example", createdAgo: 60)]
+        #expect(unseeded.countReleased(in: loaded, automatic: [], covered: [], awaitingRecognition: [], now: modified) == 0)
+
+        var announcer = ProposalAnnouncer()
+        announcer.seedIfNeeded(with: [])
+        _ = announcer.countNew(in: loaded, automatic: [], awaitingRecognition: ["a-request"], now: modified)
+        #expect(announcer.countReleased(in: [], automatic: [], covered: [], awaitingRecognition: [], now: modified) == 0)
+        #expect(announcer.countReleased(in: loaded, automatic: [], covered: [], awaitingRecognition: [], now: modified) == 0)
+    }
+
     // MARK: The window
+
+    @Test("A granted site signs in again, carrying the request that asked for it")
+    func routeForGrantedSite() {
+        let item = SignInDemand.Item(
+            host: "example.com",
+            displayName: "Example",
+            kind: .signedOut(keepsSession: true),
+            proposalID: "check"
+        )
+        #expect(ProVisorSiteWindow.route(for: item) == .signingInAgain(siteID: "example.com", requestedBy: "check"))
+
+        let unasked = SignInDemand.Item(
+            host: "example.com",
+            displayName: "Example",
+            kind: .signedOut(keepsSession: false),
+            proposalID: nil
+        )
+        #expect(ProVisorSiteWindow.route(for: unasked) == .signingInAgain(siteID: "example.com", requestedBy: nil))
+    }
+
+    @Test("A requested host opens as its request, and one with no proposal opens nothing")
+    func routeForRequestedHost() {
+        for recognised in [true, false] {
+            let item = SignInDemand.Item(
+                host: "example.com",
+                displayName: "example.com",
+                kind: .requested(recognised: recognised),
+                proposalID: "ask"
+            )
+            #expect(ProVisorSiteWindow.route(for: item) == .requested(host: "example.com", proposalID: "ask"))
+        }
+
+        let orphan = SignInDemand.Item(
+            host: "example.com",
+            displayName: "example.com",
+            kind: .requested(recognised: true),
+            proposalID: nil
+        )
+        #expect(ProVisorSiteWindow.route(for: orphan) == nil)
+    }
 
     @Test("The window reuses its form only for the same mode and the same request")
     func windowReuseRule() {
@@ -348,6 +468,22 @@ struct SiteRequestTests {
         #expect(!reuses(allowed: false))
     }
 
+    @Test("A saved site whose record is gone opens as a new site, keeping the request that asked for it")
+    func removedSiteKeepsItsRequest() {
+        let asked = ProVisorSiteWindow.formForRemovedSite("example.com", requestedBy: "2026-11-17-check")
+
+        #expect(asked.mode == .adding)
+        #expect(asked.request?.proposalID == "2026-11-17-check")
+        #expect(asked.request?.host == "example.com")
+        #expect(asked.request?.isRecognised == false)
+        #expect(asked.address.isEmpty)
+
+        let plain = ProVisorSiteWindow.formForRemovedSite("example.com", requestedBy: nil)
+        #expect(plain.mode == .adding)
+        #expect(plain.request == nil)
+        #expect(plain.address.isEmpty)
+    }
+
     @Test("The result names the site")
     func result() {
         #expect(SiteRequests.result(siteName: "Bank") == "Signed in to Bank.")
@@ -356,17 +492,53 @@ struct SiteRequestTests {
 
 @Suite("ProVisor follow-up demand")
 struct FollowUpDemandTests {
-    @Test("A pass is owed for a due note, or once after a grant until a pass starts")
+    @Test("A pass is owed for a due note, or once after a sign-in until a pass starts that was told of it")
     func demand() {
         var demand = FollowUpDemand()
         #expect(!demand.isOwed(hasDueNote: false))
+        #expect(!demand.isOwedAfterGrant)
         #expect(demand.isOwed(hasDueNote: true))
+        #expect(demand.justSignedIn.isEmpty)
 
-        demand.requestAfterGrant()
+        demand.requestAfterGrant(site: "example.com")
         #expect(demand.isOwed(hasDueNote: false))
-        demand.requestAfterGrant()
-        demand.passStarted()
+        #expect(demand.isOwedAfterGrant)
+        demand.requestAfterGrant(site: "example.com")
+        demand.passStarted(told: ["example.com"])
         #expect(!demand.isOwed(hasDueNote: false))
+        #expect(!demand.isOwedAfterGrant)
         #expect(demand.isOwed(hasDueNote: true))
+    }
+
+    @Test("The sites signed in to are held, sorted, and without repeats, until a pass is told of them")
+    func justSignedIn() {
+        var demand = FollowUpDemand()
+        demand.requestAfterGrant(site: "power.example.org")
+        demand.requestAfterGrant(site: "example.com")
+        demand.requestAfterGrant(site: "power.example.org")
+
+        #expect(demand.justSignedIn == ["example.com", "power.example.org"])
+
+        demand.passStarted(told: ["example.com", "power.example.org"])
+        #expect(demand.justSignedIn.isEmpty)
+        #expect(demand == FollowUpDemand())
+    }
+
+    @Test("A site signed in to after a pass's list was made stays owed, and a pass told of nothing answers nothing")
+    func passAnswersOnlyWhatItWasTold() {
+        var demand = FollowUpDemand()
+        demand.requestAfterGrant(site: "example.com")
+        let told = demand.justSignedIn
+        demand.requestAfterGrant(site: "power.example.org")
+
+        demand.passStarted(told: told)
+
+        #expect(demand.justSignedIn == ["power.example.org"])
+        #expect(demand.isOwedAfterGrant)
+
+        demand.passStarted(told: [])
+        #expect(demand.justSignedIn == ["power.example.org"])
+        demand.passStarted(told: ["unrelated.example.net"])
+        #expect(demand.justSignedIn == ["power.example.org"])
     }
 }

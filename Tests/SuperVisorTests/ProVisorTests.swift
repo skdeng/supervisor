@@ -773,8 +773,9 @@ struct ProVisorCommandTests {
         and in lowercase, with no scheme or path, and take it from mail you have good reason \
         to believe is from the real sender, never from a message that is itself urging them \
         to sign in somewhere. They get a button that opens the site for them to sign in, so \
-        also write the follow-up note for the check, with `Check from: ` today, for the pass \
-        that follows their sign-in to make. SuperVisor puts the item in their queue, and they \
+        also write the follow-up note for the check, with `Check from: ` today and \
+        `Waits on: ` followed by that site's host as its third line, for the pass that \
+        follows their sign-in to make. SuperVisor puts the item in their queue, and they \
         can also answer in their own words. Raise at most three.
         - Theirs alone (a payment, a signature, a judgment only they can make): say what it is.
 
@@ -822,13 +823,14 @@ struct ProVisorCommandTests {
         )
     }
 
-    private func followUp(bridge: RunBridge?) -> [String] {
+    private func followUp(bridge: RunBridge?, justSignedIn: [String] = []) -> [String] {
         ProVisorCommand.followUpArguments(
             brief: "BRIEF",
             access: access,
             standing: [],
             now: now,
             timeZone: losAngeles,
+            justSignedIn: justSignedIn,
             bridge: bridge
         )
     }
@@ -919,6 +921,33 @@ struct ProVisorCommandTests {
         #expect(withoutBridge(bridged, sentence: sentence) == plain)
     }
 
+    @Test("A follow-up pass is told which sites the person just signed in to, and only then")
+    func followUpJustSignedIn() {
+        let plain = followUp(bridge: nil)
+        let one = followUp(bridge: nil, justSignedIn: ["Bank (example.com)"])
+        let two = followUp(bridge: nil, justSignedIn: ["Bank (example.com)", "City Power (power.example.org)"])
+        let sentence = " They have just signed in to Bank (example.com); make the checks that were waiting on that."
+
+        #expect(!plain[1].contains("just signed in"))
+        #expect(one[1] == plain[1] + sentence)
+        #expect(two[1] == plain[1]
+            + " They have just signed in to Bank (example.com), City Power (power.example.org); make the checks that were waiting on that.")
+        // Nothing else about the run changes.
+        var rest = one
+        rest[1] = plain[1]
+        #expect(rest == plain)
+    }
+
+    @Test("The sign-in sentence follows the bridge's, and the bridge's is unchanged by it")
+    func followUpSignedInWithBridge() {
+        let bridged = followUp(bridge: bridge())
+        let signedIn = followUp(bridge: bridge(), justSignedIn: ["Bank (example.com)"])
+        let sentence = " They have just signed in to Bank (example.com); make the checks that were waiting on that."
+
+        #expect(signedIn[1] == bridged[1] + sentence)
+        #expect(signedIn[1].contains("what never to do. They have just signed in to"))
+    }
+
     @Test("A run that acts never carries the bridge, whatever sites are granted")
     func actingRunsHaveNoBridge() {
         let runs = [
@@ -964,7 +993,7 @@ struct ProVisorCommandTests {
             siteNames: ["Bank", "City Power"]
         )
 
-        #expect(text.contains("Do not mention it to them. A check that needs one of these sites (Bank, City Power) is made by a later pass that can read them signed in, so write it as a follow-up note naming the site, not as an item.\n"))
+        #expect(text.contains("Do not mention it to them. A check that needs one of these sites (Bank, City Power) is made by a later pass that can read them signed in, so write it as a follow-up note naming the site, not as an item, with `Waits on: ` and that site's host as its third line.\n"))
         #expect(text.contains("(it needs a sign-in to a site that is not one of those, or a "))
         #expect(!text.contains("(it needs a sign-in to a site, or a"))
 
@@ -1212,7 +1241,11 @@ struct ProVisorCommandTests {
         #expect(text.contains(ProVisorCommand.siteFieldSentence))
         #expect(text.contains("Its second line is `Check from: yyyy-MM-dd`"))
         #expect(text.contains("- `site` (optional)"))
-        #expect(text.contains("Never raise a request for a site you were told at the start of the run you can already read, unless a tool has since said it needs them to sign in again."))
+        #expect(text.contains("Never raise an item for a site you were told at the start of the run you can read."))
+        #expect(text.contains("If a tool says a site needs them to sign in again, SuperVisor has already asked them itself. Keep a follow-up note open for the check (`Status: open`, with `Check from:` today, and `Waits on: <host>` as its third line, the site's host)"))
+        #expect(text.contains("Also keep a follow-up note for the check itself (`Status: open`, with `Check from:` today, and `Waits on: <host>` as its third line, the host you named in `site`)"))
+        #expect(text.contains("its third line is `Waits on: <host>`, the host of that site in lowercase"))
+        #expect(!text.contains("raise that once as a `confirm` item"))
         let sites = try #require(text.range(of: "## Sites and texts"))
         let proposing = try #require(text.range(of: "## Proposing actions that can actually be carried out"))
         #expect(sites.lowerBound < proposing.lowerBound)

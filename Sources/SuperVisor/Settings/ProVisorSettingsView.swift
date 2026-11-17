@@ -203,7 +203,7 @@ struct ProVisorSettingsView: View {
 
     @ViewBuilder
     private func siteStatus(_ site: SiteRecord) -> some View {
-        switch SiteAccessCenter.SiteStatus(site) {
+        switch SiteAccessCenter.SiteStatus(site, awaiting: sites.awaitingSignIn) {
         case .needsYou:
             Text("Needs you")
                 .foregroundStyle(.orange)

@@ -750,7 +750,7 @@ struct SiteFormModelTests {
         #expect(saved.map(\.id) == ["example.com"])
         let site = try #require(center.sites.first)
         #expect(site.keepsSessionOnly)
-        #expect(SiteAccessCenter.SiteStatus(site) == .signedInKeepingSession(try #require(site.lastSignedIn)))
+        #expect(SiteAccessCenter.SiteStatus(site, awaiting: []) == .signedInKeepingSession(try #require(site.lastSignedIn)))
         let grant = try #require(center.storedGrant(for: "example.com"))
         #expect(!grant.remembersPassword)
         #expect(grant.password.isEmpty)

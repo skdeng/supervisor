@@ -27,41 +27,63 @@ enum ProposalRowState: Equatable {
     }
 }
 
-/// ProVisor's section: the proposals awaiting a decision, then those just carried out.
+/// ProVisor's section: the sites waiting on the person's sign-in, then the proposals awaiting
+/// a decision, then those just carried out.
+///
+/// A proposal whose request a sign-in row stands for (`SignInDemand.coveredProposalIDs`) is
+/// folded into that row, which opens its review and carries its Dismiss, so one site never
+/// asks twice.
 @MainActor
 struct ProVisorSectionView: View {
     @ObservedObject var center: ProVisorCenter
     /// Opens the review window on a proposal.
     let onReview: (String) -> Void
+    /// Opens the window to sign in to a site.
+    let onSignIn: (SignInDemand.Item) -> Void
 
-    /// Whether the proposals past the first few are showing. Resets with the sheet, which is
-    /// built only while it is expanded or hovered, so the queue opens folded every time.
-    @State private var showsMore = false
+    /// Whether the rows past the first few are showing. Resets with the sheet, which is built
+    /// only while it is expanded or hovered, so each list opens folded every time.
+    @State private var showsMoreSignIns = false
+    @State private var showsMoreProposals = false
 
     var body: some View {
         // Expiry is wall-clock: a proposal can leave the queue without any file changing.
         TimelineView(.periodic(from: Date(), by: 60)) { context in
+            let prompts = center.signInPrompts
+            let covered = SignInDemand.coveredProposalIDs(prompts)
             let visible = ProposalQueue.visible(center.proposals, now: context.date)
-            let lead = Array(visible.prefix(ProposalQueue.leadCount))
-            let rest = Array(visible.dropFirst(ProposalQueue.leadCount))
+                .filter { !covered.contains($0.id) }
 
             VStack(alignment: .leading, spacing: 8) {
-                ForEach(lead) { proposal in
-                    row(proposal)
+                FoldedList(items: prompts, showsMore: $showsMoreSignIns) { item in
+                    signInRow(item)
                 }
-
-                if !rest.isEmpty {
-                    foldToggle(count: rest.count)
-
-                    if showsMore {
-                        ForEach(rest) { proposal in
-                            row(proposal)
-                        }
-                    }
+                FoldedList(items: visible, showsMore: $showsMoreProposals) { proposal in
+                    row(proposal)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func signInRow(_ item: SignInDemand.Item) -> some View {
+        ProVisorSignInRow(
+            item: item,
+            onSignIn: { onSignIn(item) },
+            onReview: item.proposalID.map { id in { onReview(id) } },
+            onPostpone: {
+                center.postponeSignIn(item)
+            },
+            onDismiss: dismissal(of: item.proposalID)
+        )
+    }
+
+    /// Dismisses the proposal behind a sign-in row, unless it is being carried out, which a
+    /// dismissal must not pull out from under its run.
+    private func dismissal(of proposalID: String?) -> (() -> Void)? {
+        guard let proposalID, center.actingID != proposalID, !center.queuedIDs.contains(proposalID)
+        else { return nil }
+        return { center.dismiss(proposalID) }
     }
 
     private func row(_ proposal: Proposal) -> some View {
@@ -80,6 +102,31 @@ struct ProVisorSectionView: View {
             }
         )
     }
+}
+
+/// A list that shows its first `ProposalQueue.leadCount` rows and folds the rest behind a count.
+@MainActor
+private struct FoldedList<Item: Identifiable, Row: View>: View {
+    let items: [Item]
+    @Binding var showsMore: Bool
+    @ViewBuilder let row: (Item) -> Row
+
+    var body: some View {
+        ForEach(items.prefix(ProposalQueue.leadCount)) { item in
+            row(item)
+        }
+
+        let rest = Array(items.dropFirst(ProposalQueue.leadCount))
+        if !rest.isEmpty {
+            foldToggle(count: rest.count)
+
+            if showsMore {
+                ForEach(rest) { item in
+                    row(item)
+                }
+            }
+        }
+    }
 
     private func foldToggle(count: Int) -> some View {
         Button {
@@ -97,6 +144,111 @@ struct ProVisorSectionView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// A site waiting on the person's sign-in. Its text opens the review of the proposal that asked
+/// for it, when one did. A granted site can be put off; a requested one is declined by its
+/// proposal's Dismiss.
+@MainActor
+private struct ProVisorSignInRow: View {
+    let item: SignInDemand.Item
+    let onSignIn: () -> Void
+    let onReview: (() -> Void)?
+    let onPostpone: () -> Void
+    let onDismiss: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: NotchTheme.rowMarkerGap) {
+            ProVisorSignInMarker(size: NotchTheme.rowMarkerWidth)
+
+            if let onReview {
+                Button(action: onReview) {
+                    label.contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .notchTooltip("Review")
+                .help("Review")
+            } else {
+                label
+            }
+
+            ProVisorCapsuleButton(
+                title: "Sign In",
+                isProminent: true,
+                tooltip: ProVisorSignInText.tooltip(item),
+                action: onSignIn
+            )
+
+            switch item.kind {
+            case .signedOut:
+                ProVisorTextButton(
+                    title: "Not now",
+                    tooltip: "Hide until ProVisor next needs this site",
+                    action: onPostpone
+                )
+            case .requested:
+                if let onDismiss {
+                    ProVisorIconButton(systemName: "xmark", tooltip: "Dismiss", action: onDismiss)
+                }
+            }
+        }
+    }
+
+    private var label: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(verbatim: ProVisorSignInText.title(item))
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(NotchTheme.primaryForeground)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Text(ProVisorSignInText.reason(item.kind))
+                .font(.caption)
+                .foregroundStyle(NotchTheme.secondaryForeground)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The words a sign-in prompt is shown with. A site's name is the person's own or a validated
+/// host, and is always set as verbatim text, never parsed as markdown.
+enum ProVisorSignInText {
+    static func title(_ item: SignInDemand.Item) -> String {
+        "Sign in to \(item.displayName)"
+    }
+
+    static func reason(_ kind: SignInDemand.Item.Kind) -> String {
+        switch kind {
+        case .signedOut(keepsSession: true):
+            return "It signed you out"
+        case .signedOut(keepsSession: false):
+            return "SuperVisor couldn't sign in by itself"
+        case .requested:
+            return "ProVisor asked for this site"
+        }
+    }
+
+    static func more(_ count: Int) -> String? {
+        count > 0 ? "and \(count) more" : nil
+    }
+
+    static func tooltip(_ item: SignInDemand.Item) -> String {
+        "Open \(item.displayName) to sign in"
+    }
+}
+
+/// The key a sign-in prompt leads with, in the brand.
+@MainActor
+private struct ProVisorSignInMarker: View {
+    let size: CGFloat
+
+    var body: some View {
+        Image(systemName: "key.fill")
+            .font(.system(size: size * 0.72, weight: .semibold))
+            .foregroundStyle(NotchTheme.brandGradient)
+            .frame(width: size, height: size)
     }
 }
 
@@ -130,6 +282,7 @@ private struct ProVisorRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .notchTooltip("Review")
             .help("Review")
 
             // A proposal being carried out can be neither reviewed into a second approval nor
@@ -202,44 +355,105 @@ private struct ProVisorMarker: View {
     }
 }
 
-/// The notice a scouting pass raises when it adds proposals. It carries a count and nothing
-/// else: a proposal's text is drawn from the user's mail, and the pill is on screen over every
-/// window, so that text stays in the sheet the user chose to open.
+/// ProVisor's banner: a site to sign in to, or the count of proposals a pass added.
 @MainActor
 struct ProVisorPeekBannerView: View {
     @ObservedObject var module: ProVisorModule
 
     var body: some View {
-        if let count = module.announcedCount {
-            HStack(spacing: 10) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(NotchTheme.brandGradient)
-                    .frame(
-                        width: NotchTheme.compactContentHeight,
-                        height: NotchTheme.compactContentHeight
-                    )
+        switch module.announcement {
+        case let .ideas(count):
+            ProVisorIdeasBanner(count: count) {
+                module.review()
+            }
+        case let .signIn(item, more, _):
+            ProVisorSignInBanner(item: item, more: more) {
+                module.signIn(item)
+            }
+        case nil:
+            EmptyView()
+        }
+    }
+}
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("ProVisor")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(NotchTheme.primaryForeground)
-                        .lineLimit(1)
+/// The notice a pass raises when it adds proposals. It carries a count and nothing else: a
+/// proposal's text is drawn from the user's mail, and the pill is on screen over every window,
+/// so that text stays in the sheet the user chose to open.
+@MainActor
+private struct ProVisorIdeasBanner: View {
+    let count: Int
+    let onReview: () -> Void
 
-                    Text(count == 1 ? "1 new idea" : "\(count) new ideas")
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(NotchTheme.brandGradient)
+                .frame(
+                    width: NotchTheme.compactContentHeight,
+                    height: NotchTheme.compactContentHeight
+                )
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("ProVisor")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(NotchTheme.primaryForeground)
+                    .lineLimit(1)
+
+                Text(count == 1 ? "1 new idea" : "\(count) new ideas")
+                    .font(.caption)
+                    .foregroundStyle(NotchTheme.secondaryForeground)
+                    .lineLimit(1)
+            }
+
+            // The pill can be wider than the banner needs, so the action pins to the
+            // trailing content edge.
+            Spacer(minLength: 12)
+
+            ProVisorIconButton(systemName: "chevron.down", tooltip: "Review", action: onReview)
+        }
+    }
+}
+
+/// The notice for a site waiting on the person's sign-in: the site's name, how many others are
+/// waiting, and one button that opens it. The name is the person's own for a granted site, or a
+/// host their own browsers have visited (`SignInDemand.Item.isAnnounceable`).
+@MainActor
+private struct ProVisorSignInBanner: View {
+    let item: SignInDemand.Item
+    let more: Int
+    let onSignIn: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ProVisorSignInMarker(size: NotchTheme.compactContentHeight)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(verbatim: ProVisorSignInText.title(item))
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(NotchTheme.primaryForeground)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                if let more = ProVisorSignInText.more(more) {
+                    Text(more)
                         .font(.caption)
                         .foregroundStyle(NotchTheme.secondaryForeground)
                         .lineLimit(1)
                 }
-
-                // The pill can be wider than the banner needs, so the action pins to the
-                // trailing content edge.
-                Spacer(minLength: 12)
-
-                ProVisorIconButton(systemName: "chevron.down", tooltip: "Review") {
-                    module.review()
-                }
             }
+            .frame(maxWidth: 280, alignment: .leading)
+
+            // The pill can be wider than the banner needs, so the action pins to the trailing
+            // content edge.
+            Spacer(minLength: 12)
+
+            ProVisorCapsuleButton(
+                title: "Sign In",
+                isProminent: true,
+                tooltip: ProVisorSignInText.tooltip(item),
+                action: onSignIn
+            )
         }
     }
 }
@@ -264,15 +478,41 @@ private struct ProVisorIconButton: View {
     }
 }
 
+/// A small text control in the row's secondary color, for an action that sets something aside.
+@MainActor
+private struct ProVisorTextButton: View {
+    let title: String
+    let tooltip: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(NotchTheme.secondaryForeground)
+                .lineLimit(1)
+                .fixedSize()
+                .frame(height: NotchTheme.rowActionSize)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .notchTooltip(tooltip)
+        .help(tooltip)
+    }
+}
+
 @MainActor
 struct ProVisorCapsuleButton: View {
     let title: String
     var isProminent = false
     var isEnabled = true
+    /// A hover label for the notch surface, which shows no native tooltip. Windows leave it
+    /// nil and get the system's help tag with the title.
+    var tooltip: String?
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
+        let button = Button(action: action) {
             // One line whatever the title, so a button never grows its window taller.
             Text(title)
                 .font(.system(size: 12, weight: .semibold))
@@ -287,7 +527,12 @@ struct ProVisorCapsuleButton: View {
         .buttonStyle(.plain)
         .disabled(!isEnabled)
         .opacity(isEnabled ? 1 : 0.4)
-        .help(title)
+
+        if let tooltip {
+            button.notchTooltip(tooltip).help(tooltip)
+        } else {
+            button.help(title)
+        }
     }
 
     private var fill: AnyShapeStyle {

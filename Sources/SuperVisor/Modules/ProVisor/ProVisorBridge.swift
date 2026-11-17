@@ -114,6 +114,7 @@ final class ProVisorBridge {
     /// the access list, the system, and the installed CLI.
     private struct Eligibility {
         let sites: [SiteRecord]
+        let awaiting: Set<String>
         let textsAreOn: Bool
     }
 
@@ -124,14 +125,14 @@ final class ProVisorBridge {
         guard access.scoutIsSealed else { return .failure(.accessNotSealed) }
         guard disclaimIsAvailable() else { return .failure(.disclaimUnavailable) }
         guard cliIsTrusted() else { return .failure(.cliNotTrusted) }
-        return .success(Eligibility(sites: granted, textsAreOn: textsAreOn))
+        return .success(Eligibility(sites: granted, awaiting: sites.awaitingSignIn, textsAreOn: textsAreOn))
     }
 
     /// The names of the granted sites a pass could read now, in the order they are listed; empty
     /// when it could read none. It makes no run and leaves `lastUnavailable` as it was.
     func availableSiteNames(access: ProVisorAccess) -> [String] {
         guard case let .success(eligible) = eligibility(for: access) else { return [] }
-        return eligible.sites.map(ProVisorTools.siteLabel)
+        return eligible.sites.map { ProVisorTools.siteLabel($0, awaiting: eligible.awaiting) }
     }
 
     /// Checks the conditions for the tools without making a run, and returns why they are not
@@ -169,7 +170,11 @@ final class ProVisorBridge {
             return note(.failure(.serverFailed))
         }
 
-        let tools = ProVisorTools.descriptors(sites: eligible.sites, textsAreOn: eligible.textsAreOn)
+        let tools = ProVisorTools.descriptors(
+            sites: eligible.sites,
+            awaiting: eligible.awaiting,
+            textsAreOn: eligible.textsAreOn
+        )
         let token = AgentBridgeServer.makeToken()
         let configurationURL: URL
         do {
@@ -185,7 +190,7 @@ final class ProVisorBridge {
             bridge: RunBridge(
                 configurationPath: configurationURL.path,
                 toolRules: ProVisorTools.allowedToolRules(for: tools),
-                siteNames: eligible.sites.map(ProVisorTools.siteLabel),
+                siteNames: eligible.sites.map { ProVisorTools.siteLabel($0, awaiting: eligible.awaiting) },
                 textsAreOn: eligible.textsAreOn
             ),
             configurationURL: configurationURL

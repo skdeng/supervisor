@@ -45,12 +45,22 @@ final class ProVisorCenter: ObservableObject {
     @Published private(set) var standingRules: [StandingRule] = []
     /// Whether the module is enabled and the center is watching and scheduling.
     @Published private(set) var isActive = false
+    /// The sites the person is being asked to sign in to: granted sites that need them, and
+    /// sites an open proposal asks for (`SignInDemand`).
+    @Published private(set) var signInDemand: [SignInDemand.Item] = []
+    /// The sites to put in front of the person as sign-ins, on the banner and as sheet rows:
+    /// the announceable items of `signInDemand`, less those put off (`SignInDemand.prompts`).
+    @Published private(set) var signInPrompts: [SignInDemand.Item] = []
 
     /// Called when the set of proposals on disk changes.
     var onProposalsChanged: (() -> Void)?
     /// Called with how many proposals needing a decision a finished run added: a scouting
     /// pass, or a reviewed run raising something it found and could not settle.
     var onProposalsAdded: ((Int) -> Void)?
+    /// Called with the sites that entered `signInPrompts` since the last look, none of which
+    /// the person has been told about yet. `signInPrompts` already holds them when it is called.
+    /// A site put off and then turned away from again enters anew.
+    var onSignInNeeded: (([SignInDemand.Item]) -> Void)?
 
     private static let lastScoutKey = "provisor.lastScoutAt"
     private static let scoutTimeout: Duration = .seconds(20 * 60)
@@ -70,7 +80,20 @@ final class ProVisorCenter: ObservableObject {
     private var followUpTask: Task<Void, Never>?
     private var followUpLedger: FollowUpLedger
     private var followUpDemand = FollowUpDemand()
+    /// Whether the follow-up pass in progress, or the last one, reached the point of starting
+    /// its agent process.
+    private var followUpLaunched = false
     private var accessWatcher: FileChangeWatcher?
+    private var signInSubscription: AnyCancellable?
+    private var signInAnnouncer = SignInAnnouncer()
+    private var postponements = SignInPostponements()
+    /// The open requests whose host is still being looked up in the browsing history, as of the
+    /// last publish of the demand.
+    private var requestsAwaitingRecognition: Set<String> = []
+    /// Waits until the soonest open site request expires, when the demand changes with no file
+    /// or site changing (`SignInDemand.nextExpiry`).
+    private var demandExpiryTask: Task<Void, Never>?
+    private let hostRecognition: HostRecognition
     /// The emailed-code lookups under way, held so stopping can end them.
     private var lookupServices: [UUID: AgentTaskService] = [:]
     private lazy var bridge = ProVisorBridge(sites: SiteAccessCenter.shared)
@@ -116,9 +139,13 @@ final class ProVisorCenter: ObservableObject {
     private var activation = 0
     private var reloadSequence = 0
 
-    private init(defaults: UserDefaults = .standard) {
+    private init(
+        defaults: UserDefaults = .standard,
+        historyLookup: @escaping @Sendable (String) -> Bool = { BrowsingHistory().hasVisited(host: $0) }
+    ) {
         self.defaults = defaults
         followUpLedger = FollowUpLedger(defaults: defaults)
+        hostRecognition = HostRecognition(lookup: historyLookup)
     }
 
     /// When the last scouting pass that finished did so.
@@ -157,6 +184,7 @@ final class ProVisorCenter: ObservableObject {
         self.accessWatcher = accessWatcher
         accessWatcher.start()
         refreshSiteTools()
+        startWatchingSignInDemand()
 
         let watcher = DirectoryTreeWatcher(url: ProVisorHome.proposalsURL) { [weak self] in
             DispatchQueue.main.async {
@@ -210,6 +238,7 @@ final class ProVisorCenter: ObservableObject {
         cancelSchedule()
         cancelFollowUp()
         SiteAccessCenter.shared.emailedCode = nil
+        stopWatchingSignInDemand()
         accessWatcher?.stop()
         accessWatcher = nil
         siteToolsUnavailable = nil
@@ -261,6 +290,8 @@ final class ProVisorCenter: ObservableObject {
         automaticIDs = []
         automaticRunsThisPass = 0
         announcer = ProposalAnnouncer()
+        signInDemand = []
+        signInPrompts = []
     }
 
     // MARK: - Scouting
@@ -363,7 +394,8 @@ final class ProVisorCenter: ObservableObject {
         _ service: AgentTaskService,
         arguments: [String],
         timeout: Duration,
-        prepared: ProVisorBridge.PreparedRun?
+        prepared: ProVisorBridge.PreparedRun?,
+        launched: (@MainActor () -> Void)? = nil
     ) async -> Result<AgentTaskResult, any Error> {
         defer {
             if let prepared { bridge.finished(prepared) }
@@ -375,6 +407,7 @@ final class ProVisorCenter: ObservableObject {
                 timeout: timeout,
                 onLaunch: { [bridge] pid in
                     if let prepared { bridge.launched(prepared, pid: pid) }
+                    launched?()
                 }
             ))
         } catch {
@@ -419,12 +452,35 @@ final class ProVisorCenter: ObservableObject {
         armFollowUp()
     }
 
+    /// Counts the proposals a finished run added. A request whose host is still being looked
+    /// up in the person's browsing history is held back until the answer arrives
+    /// (`announceReleased`), since the answer decides whether it is announced as a sign-in.
     private func announceAdded(in loaded: [Proposal]) {
-        let added = announcer.countNew(in: loaded, automatic: automaticIDs)
-        if added > 0 {
-            AppLog.notice(.provisor, "proposals added \(added)")
-            onProposalsAdded?(added)
-        }
+        report(added: announcer.countNew(
+            in: loaded,
+            automatic: automaticIDs,
+            covered: SignInDemand.coveredProposalIDs(signInPrompts),
+            awaitingRecognition: requestsAwaitingRecognition,
+            now: Date()
+        ))
+    }
+
+    /// Counts the held-back requests whose host has been looked up: one announced as a sign-in
+    /// is covered by it, and one for a host the person's browsers do not know is a new idea.
+    private func announceReleased(now: Date) {
+        report(added: announcer.countReleased(
+            in: proposals,
+            automatic: automaticIDs,
+            covered: SignInDemand.coveredProposalIDs(signInPrompts),
+            awaitingRecognition: requestsAwaitingRecognition,
+            now: now
+        ))
+    }
+
+    private func report(added: Int) {
+        guard added > 0 else { return }
+        AppLog.notice(.provisor, "proposals added \(added)")
+        onProposalsAdded?(added)
     }
 
     /// Brings anything a reviewed run raised into the queue. The run cannot write there itself.
@@ -441,20 +497,35 @@ final class ProVisorCenter: ObservableObject {
     // MARK: - Follow-up passes
 
     /// Arms the one timer for the next follow-up pass: it fires when a pass that is owed may
-    /// start (`FollowUpSchedule.nextStart`), and is dropped when none is owed. A pass is owed
-    /// for a due note, or after a site was granted (`FollowUpDemand`). It is evaluated again
-    /// whenever something that decides it changes: a reviewed run, a scouting pass, or a
-    /// follow-up pass finishes, a site is granted, the Mac wakes, or the center starts.
+    /// start, and is dropped when none is owed or a scouting or follow-up pass is running, whose
+    /// end arms it again. A pass is owed for a due note, or after the person signed in to a
+    /// site that something was waiting on (`FollowUpDemand`); the latter starts on its own
+    /// schedule (`FollowUpSchedule.nextStartAfterGrant`). It is evaluated again whenever
+    /// something that decides it changes: a reviewed run, a scouting pass, or a follow-up pass
+    /// finishes, a site is signed in to, the Mac wakes, or the center starts.
     private func armFollowUp() {
         cancelFollowUp()
         let now = Date()
-        guard isActive, isFollowUpOwed(now: now) else { return }
+        guard isActive, !isScouting, !isFollowingUp, isFollowUpOwed(now: now) else { return }
+        scheduleFollowUp(at: nextFollowUpStart(now: now), from: now)
+    }
+
+    /// A pass that could not start stays owed. Its retry follows the ordinary schedule counted
+    /// from this attempt, so a failure that persists is tried at most once in the minimum gap
+    /// between passes, whichever schedule the pass was owed on.
+    private func retryFollowUp(after attempt: Date) {
+        cancelFollowUp()
+        guard isActive, !isScouting, !isFollowingUp, isFollowUpOwed(now: attempt) else { return }
         let start = FollowUpSchedule.nextStart(
-            now: now,
-            last: followUpLedger.last,
-            startedToday: followUpLedger.startedToday(now: now, timeZone: .current),
+            now: attempt,
+            last: attempt,
+            startedToday: followUpLedger.startedToday(now: attempt, timeZone: .current),
             calendar: .current
         )
+        scheduleFollowUp(at: start, from: attempt)
+    }
+
+    private func scheduleFollowUp(at start: Date, from now: Date) {
         followUpTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(max(0, start.timeIntervalSince(now))))
             guard let self, !Task.isCancelled else { return }
@@ -468,53 +539,97 @@ final class ProVisorCenter: ObservableObject {
         followUpTask = nil
     }
 
+    /// Whether a pass is owed: a sign-in is waiting on one, or a note is due. A note that waits
+    /// on a site is due only while the site can be read.
     private func isFollowUpOwed(now: Date) -> Bool {
-        followUpDemand.isOwed(
+        let sites = SiteAccessCenter.shared
+        let (granted, awaiting) = (sites.access.sites(), sites.awaitingSignIn)
+        return followUpDemand.isOwed(
             hasDueNote: FollowUpNotes.hasDueNote(
                 in: ProVisorHome.followUpsURL,
-                on: LocalDay(now, timeZone: .current)
+                on: LocalDay(now, timeZone: .current),
+                readable: { FollowUpNotes.isReadable($0, granted: granted, awaiting: awaiting) }
             )
         )
     }
 
-    /// Asks for a follow-up pass after the user granted a site, so a check that waited on it is
-    /// made with it. The pass keeps the follow-up schedule's limits, and one request
-    /// stands at a time.
-    func siteWasGranted() {
+    /// Asks for a follow-up pass after the person signed in to `siteID`, which something was
+    /// waiting on, so the check that waited on it is made with it. One request stands at a time
+    /// however many sites it names.
+    private func siteWasGranted(_ siteID: String) {
         guard isActive else { return }
-        followUpDemand.requestAfterGrant()
+        followUpDemand.requestAfterGrant(site: siteID)
         armFollowUp()
     }
 
-    /// The user saved a site from the window opened for proposal `proposalID`'s request for
-    /// `host`. The proposal is recorded done when the saved site is `host` and the file still
-    /// asks for it (`SiteRequests.settle`); either way a site was granted, so a follow-up pass
-    /// is asked for.
-    func siteRequestSaved(proposalID: String, host: String, site: SiteRecord) {
+    /// The person saved the sign-in for `record`; `wasAwaited` says the site was waiting on them.
+    /// The save answers the earliest open request for the site, which is recorded done
+    /// (`SiteRequests.settle`), and owes a pass when there was such a request or the site was
+    /// waiting (`SignInDemand.effectOfSaving`). Every save arrives here, from whichever window
+    /// made it.
+    private func siteSaved(_ record: SiteRecord, wasAwaited: Bool) {
         guard isActive else { return }
-        let outcome = SiteRequests.settle(
-            proposalID: proposalID,
-            host: host,
-            savedSiteID: site.id,
-            siteName: site.name,
-            in: ProVisorHome.proposalsURL,
-            isBusy: actingID == proposalID || queuedIDs.contains(proposalID)
+        let effect = SignInDemand.effectOfSaving(
+            record.id,
+            proposals: proposals,
+            now: Date(),
+            wasAwaited: wasAwaited
         )
-        if outcome == .settled {
-            AppLog.notice(.provisor, "site request settled")
-            reloadSoon()
-        } else {
-            AppLog.notice(.provisor, "site request left open: \(outcome.logName)")
+        if let proposalID = effect.settles {
+            let outcome = SiteRequests.settle(
+                proposalID: proposalID,
+                host: record.id,
+                savedSiteID: record.id,
+                siteName: record.name,
+                in: ProVisorHome.proposalsURL,
+                isBusy: actingID == proposalID || queuedIDs.contains(proposalID)
+            )
+            if outcome == .settled {
+                AppLog.notice(.provisor, "site request settled")
+                reloadSoon()
+            } else {
+                AppLog.notice(.provisor, "site request left open: \(outcome.logName)")
+            }
         }
-        siteWasGranted()
+        if effect.owesPass {
+            siteWasGranted(record.id)
+        }
     }
 
-    private func mayStartFollowUp(now: Date) -> Bool {
-        FollowUpSchedule.mayStart(
+    private func nextFollowUpStart(now: Date) -> Date {
+        let last = followUpLedger.last
+        let startedToday = followUpLedger.startedToday(now: now, timeZone: .current)
+        guard followUpDemand.isOwedAfterGrant else {
+            return FollowUpSchedule.nextStart(
+                now: now,
+                last: last,
+                startedToday: startedToday,
+                calendar: .current
+            )
+        }
+        return FollowUpSchedule.nextStartAfterGrant(
             now: now,
-            last: followUpLedger.last,
-            startedToday: followUpLedger.startedToday(now: now, timeZone: .current)
+            last: last,
+            startedToday: startedToday,
+            grantsStartedToday: followUpLedger.grantStartedToday(now: now, timeZone: .current),
+            calendar: .current
         )
+    }
+
+    /// The agent process of a follow-up pass started, so the sites it was told the person
+    /// signed in to are answered and a pass owed for a sign-in is charged to that day's count.
+    private func followUpDidLaunch(
+        told: [String],
+        charge: FollowUpSchedule.Charge,
+        activation: Int
+    ) {
+        guard activation == self.activation else { return }
+        followUpLaunched = true
+        followUpDemand.passStarted(told: told)
+        if charge == .afterGrant {
+            followUpLedger = followUpLedger.recordingGrantStart(now: Date(), timeZone: .current)
+            followUpLedger.save(to: defaults)
+        }
     }
 
     /// Starts a pass over the due notes in `followups/`, which settles what checks out and
@@ -529,7 +644,13 @@ final class ProVisorCenter: ObservableObject {
         }
         let now = Date()
         guard isFollowUpOwed(now: now) else { return }
-        guard mayStartFollowUp(now: now) else {
+        guard let charge = FollowUpSchedule.chargeToStart(
+            now: now,
+            last: followUpLedger.last,
+            afterGrantOwed: followUpDemand.isOwedAfterGrant,
+            startedToday: followUpLedger.startedToday(now: now, timeZone: .current),
+            grantsStartedToday: followUpLedger.grantStartedToday(now: now, timeZone: .current)
+        ) else {
             armFollowUp()
             return
         }
@@ -543,13 +664,22 @@ final class ProVisorCenter: ObservableObject {
             access = try ProVisorHome.loadAccess()
         } catch {
             AppLog.error(.provisor, "follow-up setup failed")
+            retryFollowUp(after: now)
             return
         }
 
         isFollowingUp = true
-        followUpDemand.passStarted()
-        followUpLedger = followUpLedger.recordingStart(now: now, timeZone: .current)
-        followUpLedger.save(to: defaults)
+        followUpLaunched = false
+        // The sites the pass is told about stay owed until its process has started.
+        let told = followUpDemand.justSignedIn
+        let justSignedIn = ProVisorTools.signedInLabels(
+            told,
+            granted: SiteAccessCenter.shared.access.sites()
+        )
+        if charge == .ordinary {
+            followUpLedger = followUpLedger.recordingStart(now: now, timeZone: .current)
+            followUpLedger.save(to: defaults)
+        }
         AppLog.notice(.provisor, "follow-up started")
 
         let prepared = prepareBridge(access: access)
@@ -558,6 +688,7 @@ final class ProVisorCenter: ObservableObject {
             access: access,
             standing: standingRules,
             now: now,
+            justSignedIn: justSignedIn,
             bridge: prepared?.bridge,
             connectorHold: prepared == nil ? bridge.holdConfigurationPath() : nil
         )
@@ -570,7 +701,10 @@ final class ProVisorCenter: ObservableObject {
                 service,
                 arguments: arguments,
                 timeout: ProVisorCenter.followUpTimeout,
-                prepared: prepared
+                prepared: prepared,
+                launched: { [weak self] in
+                    self?.followUpDidLaunch(told: told, charge: charge, activation: activation)
+                }
             )
             await self.finishFollowUp(outcome, activation: activation)
         }
@@ -599,7 +733,11 @@ final class ProVisorCenter: ObservableObject {
         // A scouting pass that came due during this one is overdue, so arming starts it after the
         // settle delay.
         armSchedule()
-        armFollowUp()
+        if followUpLaunched {
+            armFollowUp()
+        } else {
+            retryFollowUp(after: Date())
+        }
     }
 
     /// Re-reads why a pass would run without the site and text tools, without starting one.
@@ -1033,9 +1171,145 @@ final class ProVisorCenter: ObservableObject {
                 proposals = loaded
                 onProposalsChanged?()
             }
+            let sites = SiteAccessCenter.shared
+            let state = signInState(sites: sites.sites, awaiting: sites.awaitingSignIn, now: Date())
+            signInAnnouncer.seedIfNeeded(
+                with: SignInDemand.prompts(in: state.items, postponed: postponements.hosts),
+                pending: state.pending
+            )
+            publishSignInDemand(state)
             admitStandingActions(from: loaded)
         }
         return loaded
+    }
+
+    // MARK: - Sign-in demand
+
+    /// Follows the site list and the sites runs were turned away from. The values the
+    /// publishers deliver are used as they come: a `@Published` property still holds its old
+    /// value while its subscribers run.
+    private func startWatchingSignInDemand() {
+        let sites = SiteAccessCenter.shared
+        sites.refresh()
+        sites.onSiteSaved = { [weak self] record, wasAwaited in
+            self?.siteSaved(record, wasAwaited: wasAwaited)
+        }
+        sites.onPersonNeeded = { [weak self] siteID in
+            self?.siteTurnedAway(siteID)
+        }
+        hostRecognition.onAnswer = { [weak self] in
+            self?.refreshSignInDemand()
+        }
+        signInSubscription = Publishers.CombineLatest(sites.$sites, sites.$awaitingSignIn)
+            .sink { [weak self] records, awaiting in
+                guard let self, isActive else { return }
+                publishSignInDemand(signInState(sites: records, awaiting: awaiting, now: Date()))
+            }
+    }
+
+    private func stopWatchingSignInDemand() {
+        signInSubscription?.cancel()
+        signInSubscription = nil
+        SiteAccessCenter.shared.onSiteSaved = nil
+        SiteAccessCenter.shared.onPersonNeeded = nil
+        hostRecognition.onAnswer = nil
+        hostRecognition.reset()
+        signInAnnouncer = SignInAnnouncer()
+        postponements = SignInPostponements()
+        requestsAwaitingRecognition = []
+        demandExpiryTask?.cancel()
+        demandExpiryTask = nil
+    }
+
+    /// Hides a granted site's prompt, and keeps it from the banner, until a run is next turned
+    /// away from it (`SignInPostponements`).
+    func postponeSignIn(_ item: SignInDemand.Item) {
+        guard isActive else { return }
+        postponements.postpone(item)
+        AppLog.notice(.provisor, "sign-in put off for \(item.host)")
+        refreshSignInDemand()
+    }
+
+    /// A run was turned away from `siteID`: a prompt put off for it is offered again, and
+    /// announced as new.
+    private func siteTurnedAway(_ siteID: String) {
+        guard isActive, postponements.hosts.contains(siteID) else { return }
+        postponements.turnedAway(siteID)
+        refreshSignInDemand()
+    }
+
+    private func refreshSignInDemand() {
+        guard isActive else { return }
+        let sites = SiteAccessCenter.shared
+        publishSignInDemand(signInState(sites: sites.sites, awaiting: sites.awaitingSignIn, now: Date()))
+    }
+
+    /// The demand at one instant, which every part of a publish judges by.
+    private struct SignInState {
+        let items: [SignInDemand.Item]
+        /// The hosts in demand whose recognition is still being looked up, so not yet shown.
+        let pending: Set<String>
+        /// The open requests for the hosts in `pending`.
+        let awaitingRecognition: Set<String>
+        let now: Date
+    }
+
+    private func signInState(sites: [SiteRecord], awaiting: Set<String>, now: Date) -> SignInState {
+        let items = SignInDemand.items(
+            proposals: proposals,
+            sites: sites,
+            awaiting: awaiting,
+            now: now,
+            recognised: hostRecognition.recognised
+        )
+        let pending = SignInDemand.hostsAwaitingRecognition(
+            proposals: proposals,
+            sites: sites,
+            now: now,
+            recognised: hostRecognition.recognised
+        )
+        return SignInState(
+            items: items,
+            pending: pending,
+            awaitingRecognition: SignInDemand.requestIDs(forHosts: pending, in: proposals, now: now),
+            now: now
+        )
+    }
+
+    /// Publishes the items and the prompts drawn from them when they differ from the last ones,
+    /// passes on the prompts the person has not been told about, counts the held-back requests
+    /// whose host has been looked up, and arms the wait for the next request to expire.
+    private func publishSignInDemand(_ state: SignInState) {
+        if state.items != signInDemand {
+            signInDemand = state.items
+        }
+        postponements.prune(keeping: state.items)
+        let prompts = SignInDemand.prompts(in: state.items, postponed: postponements.hosts)
+        if prompts != signInPrompts {
+            signInPrompts = prompts
+        }
+        requestsAwaitingRecognition = state.awaitingRecognition
+        armDemandExpiry(now: state.now)
+        let fresh = signInAnnouncer.newItems(in: prompts, pending: state.pending)
+        if !fresh.isEmpty {
+            AppLog.notice(.provisor, "sign-in needed \(fresh.count)")
+            onSignInNeeded?(fresh)
+        }
+        announceReleased(now: state.now)
+    }
+
+    /// Arms the one wait for the soonest open site request to expire after `now`, replacing any
+    /// armed before; with no request that expires, nothing waits.
+    private func armDemandExpiry(now: Date) {
+        demandExpiryTask?.cancel()
+        demandExpiryTask = nil
+        guard isActive, let expiry = SignInDemand.nextExpiry(of: proposals, now: now) else { return }
+        demandExpiryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(0, expiry.timeIntervalSince(Date()))))
+            guard let self, !Task.isCancelled else { return }
+            self.demandExpiryTask = nil
+            self.refreshSignInDemand()
+        }
     }
 
     // MARK: - Reporting

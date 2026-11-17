@@ -28,7 +28,7 @@ final class ProVisorSiteWindow {
     /// Opens the window for the site proposal `proposalID` asked for: a granted site signs in
     /// again, and a new one is added with its address filled in only when `history` finds the
     /// host among the sites the user has visited (`SiteFormModel.requestedStart`). Saving it
-    /// settles the request (`ProVisorCenter.siteRequestSaved`); closing the window leaves the
+    /// settles the request (`SignInDemand.effectOfSaving`); closing the window leaves the
     /// proposal as it is.
     func showRequested(
         host: String,
@@ -47,9 +47,43 @@ final class ProVisorSiteWindow {
         }
     }
 
+    /// Which form a sign-in prompt opens.
+    enum SignInRoute: Equatable {
+        /// Signs in to a granted site again, settling the request that asked for it, if any.
+        case signingInAgain(siteID: String, requestedBy: String?)
+        /// Opens the site a proposal asked for (`showRequested`).
+        case requested(host: String, proposalID: String)
+    }
+
+    /// The form for `item`: a granted site signs in again, and a requested host opens as its
+    /// request. Nil for a requested host with no proposal, which no demand produces.
+    static func route(for item: SignInDemand.Item) -> SignInRoute? {
+        switch item.kind {
+        case .signedOut:
+            return .signingInAgain(siteID: item.host, requestedBy: item.proposalID)
+        case .requested:
+            guard let proposalID = item.proposalID else { return nil }
+            return .requested(host: item.host, proposalID: proposalID)
+        }
+    }
+
+    /// Opens the window for a sign-in prompt from the banner or the sheet.
+    func showSignIn(_ item: SignInDemand.Item, center: SiteAccessCenter = .shared) {
+        switch Self.route(for: item) {
+        case let .signingInAgain(siteID, proposalID):
+            showSigningInAgain(siteID, center: center, requestedBy: proposalID)
+        case let .requested(host, proposalID):
+            showRequested(host: host, proposalID: proposalID, center: center)
+        case nil:
+            AppLog.error(.provisor, "sign-in prompt for \(item.host) has no request")
+        }
+    }
+
     private func showSigningInAgain(_ siteID: String, center: SiteAccessCenter, requestedBy proposalID: String?) {
         guard let record = center.sites.first(where: { $0.id == siteID }) else {
-            showAdding(center: center)
+            present(.adding, center: center, requestID: proposalID) {
+                Self.formForRemovedSite(siteID, requestedBy: proposalID)
+            }
             return
         }
         guard let grant = center.storedGrant(for: siteID) else {
@@ -83,18 +117,20 @@ final class ProVisorSiteWindow {
             mode: mode,
             requestID: requestID
         ) {
-            let model = makeModel()
-            window.show(
-                center: center,
-                enrollment: center.makeEnrollment(),
-                model: model,
-                onSaved: Self.settling(model.request)
-            )
+            window.show(center: center, enrollment: center.makeEnrollment(), model: makeModel())
         }
         window.makeKeyAndOrderFront(nil)
         // An accessory app is never frontmost by itself, and a window in a background app
         // takes no typing.
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// The form for a saved site whose record is gone: a new site, whose address the person
+    /// types. When it was asked for by a proposal it keeps the request, so saving the site
+    /// still settles it.
+    static func formForRemovedSite(_ siteID: String, requestedBy proposalID: String?) -> SiteFormModel {
+        guard let proposalID else { return SiteFormModel() }
+        return SiteFormModel(requestedHost: siteID, proposalID: proposalID, prefilledAddress: nil)
     }
 
     /// Whether the form on screen already is the one asked for: the window shows a form in the
@@ -110,13 +146,6 @@ final class ProVisorSiteWindow {
         allowed && isVisible && shownMode == mode && shownRequestID == requestID
     }
 
-    /// What saving a form does beyond storing the site: one opened from a request settles it.
-    private static func settling(_ request: SiteFormModel.Request?) -> (SiteRecord) -> Void {
-        guard let request else { return { _ in } }
-        return { record in
-            ProVisorCenter.shared.siteRequestSaved(proposalID: request.proposalID, host: request.host, site: record)
-        }
-    }
 }
 
 /// The window a site is added in: the form on the left, the live page on the right.
@@ -156,14 +185,8 @@ final class SiteEnrollmentWindow: NSWindow {
         contentMinSize = Self.minimumContentSize
     }
 
-    /// Shows a fresh form for `enrollment`, ending any enrollment shown before. `onSaved` is
-    /// called with the record once the site is stored.
-    func show(
-        center: SiteAccessCenter,
-        enrollment: SiteEnrollment,
-        model: SiteFormModel,
-        onSaved: @escaping (SiteRecord) -> Void = { _ in }
-    ) {
+    /// Shows a fresh form for `enrollment`, ending any enrollment shown before.
+    func show(center: SiteAccessCenter, enrollment: SiteEnrollment, model: SiteFormModel) {
         let previous = self.enrollment
         self.enrollment = enrollment
         mode = model.mode
@@ -175,8 +198,7 @@ final class SiteEnrollmentWindow: NSWindow {
             ProVisorSiteView(
                 center: center,
                 enrollment: enrollment,
-                model: model,
-                onSaved: onSaved
+                model: model
             ) { [weak self, weak enrollment] in
                 guard let enrollment else { return }
                 self?.close(showing: enrollment)
@@ -212,7 +234,6 @@ struct ProVisorSiteView: View {
     @ObservedObject var center: SiteAccessCenter
     @ObservedObject var enrollment: SiteEnrollment
     @ObservedObject var model: SiteFormModel
-    var onSaved: (SiteRecord) -> Void = { _ in }
     let onClose: () -> Void
 
     @FocusState private var focus: SiteFormModel.Field?
@@ -524,8 +545,7 @@ struct ProVisorSiteView: View {
             switch await model.save(
                 using: enrollment,
                 into: center,
-                confirmingSignIn: confirmingSignIn,
-                onSaved: onSaved
+                confirmingSignIn: confirmingSignIn
             ) {
             case .notSaved:
                 break

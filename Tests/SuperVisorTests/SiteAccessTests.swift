@@ -17,6 +17,16 @@ private final class TestClock: @unchecked Sendable {
     }
 }
 
+/// The site ids a `SiteAccess` hook was called with, in order.
+@MainActor
+private final class SiteIDLog {
+    private(set) var siteIDs: [String] = []
+
+    func record(_ siteID: String) {
+        siteIDs.append(siteID)
+    }
+}
+
 private let usernameField = FieldKey(name: "username", id: "user", autocomplete: "username", type: "text")
 private let passwordField = FieldKey(name: "password", id: "pass", autocomplete: "current-password", type: "password")
 private let codeField = FieldKey(name: "otp", id: "otp", autocomplete: "one-time-code", type: "text")
@@ -35,6 +45,8 @@ struct SiteAccessTests {
         let dataStore = WKWebsiteDataStore.nonPersistent()
         let stub: CodeStub
         let access: SiteAccess
+        let personNeeded = SiteIDLog()
+        let opened = SiteIDLog()
         var vault: SiteVault { SiteVault(store: store) }
 
         let codeKind: SiteGrant.CodeKind
@@ -68,6 +80,8 @@ struct SiteAccessTests {
                 codeWaitLimit: codeWaitLimit,
                 now: { clock.now }
             )
+            access.onPersonNeeded = { [personNeeded] siteID in personNeeded.record(siteID) }
+            access.onOpened = { [opened] siteID in opened.record(siteID) }
             if granted { try grant() }
         }
 
@@ -109,6 +123,12 @@ struct SiteAccessTests {
         var stored: SiteRecord? {
             access.sites().first { $0.id == "example.com" }
         }
+
+        /// The registry file's identity, which changes with every write: the file is replaced
+        /// by renaming a new one over it.
+        var registryFileNumber: Int? {
+            (try? FileManager.default.attributesOfItem(atPath: registry.path))?[.systemFileNumber] as? Int
+        }
     }
 
     private func page(_ result: Result<PageSnapshot, SiteAccess.Failure>) -> PageSnapshot? {
@@ -140,6 +160,8 @@ struct SiteAccessTests {
         #expect(fixture.stored?.attemptCount == 0)
         #expect(fixture.stored?.attemptsDay == nil)
         #expect(fixture.access.currentPage(visit: "run") == opened)
+        #expect(fixture.personNeeded.siteIDs.isEmpty)
+        #expect(fixture.opened.siteIDs == ["example.com"])
     }
 
     @Test("A signed-out site signs in with its recorded steps, and the attempt is recorded", .timeLimit(.minutes(1)))
@@ -161,6 +183,8 @@ struct SiteAccessTests {
         #expect(record.attemptsDay == SignInAttempts.day(of: fixture.clock.now, in: .current))
         #expect(record.lastSignedIn == fixture.clock.now)
         #expect(!record.needsPerson)
+        #expect(fixture.opened.siteIDs == ["example.com"])
+        #expect(fixture.personNeeded.siteIDs.isEmpty)
     }
 
     @Test("A failed sign-in sets needsPerson, and the next open answers it without loading anything", .timeLimit(.minutes(1)))
@@ -175,6 +199,7 @@ struct SiteAccessTests {
         #expect(fixture.stored?.attemptCount == 1)
         #expect(fixture.bank.site.posts.count == 1)
         #expect(fixture.access.currentPage(visit: "run") == nil)
+        #expect(fixture.personNeeded.siteIDs == ["example.com"])
 
         fixture.bank.site.forgetRequests()
         let second = await fixture.access.open(siteID: "example.com", visit: "run")
@@ -203,6 +228,7 @@ struct SiteAccessTests {
         #expect(failure(result) == .needsPerson)
         #expect(fixture.bank.site.posts.isEmpty)
         #expect(fixture.stored?.needsPerson == true)
+        #expect(fixture.personNeeded.siteIDs == ["example.com"])
     }
 
     private func sessionGrant() -> SiteGrant {
@@ -266,6 +292,114 @@ struct SiteAccessTests {
         #expect(page(await fixture.access.open(siteID: "example.com", visit: "run"))?.title == "Account")
     }
 
+    @Test("A kept session that has ended flags the site and tells the hook", .timeLimit(.minutes(1)))
+    func hookForAnEndedSession() async throws {
+        let fixture = try Fixture(granted: false)
+        try fixture.access.add(grant: sessionGrant(), record: fixture.record())
+        defer { fixture.access.end(visit: "run") }
+
+        let result = await fixture.access.open(siteID: "example.com", visit: "run")
+
+        #expect(failure(result) == .needsPerson)
+        #expect(fixture.personNeeded.siteIDs == ["example.com"])
+        #expect(fixture.stored?.needsPerson == true)
+    }
+
+    @Test("A site already flagged tells the hook on every open and writes nothing", .timeLimit(.minutes(1)))
+    func hookForAnAlreadyFlaggedSite() async throws {
+        let fixture = try Fixture(granted: false)
+        try fixture.access.add(grant: sessionGrant(), record: fixture.record())
+        var flagged = try #require(fixture.stored)
+        flagged.needsPerson = true
+        try SiteRegistry.save([flagged], to: fixture.registry)
+        let writtenBefore = try #require(fixture.registryFileNumber)
+        defer { fixture.access.end(visit: "run") }
+
+        #expect(failure(await fixture.access.open(siteID: "example.com", visit: "run")) == .needsPerson)
+        #expect(failure(await fixture.access.open(siteID: "example.com", visit: "run")) == .needsPerson)
+
+        #expect(fixture.personNeeded.siteIDs == ["example.com", "example.com"])
+        #expect(fixture.stored == flagged)
+        #expect(fixture.registryFileNumber == writtenBefore)
+        #expect(fixture.bank.site.requests.isEmpty)
+    }
+
+    @Test("A refused open and a later open that reads the page each tell their own hook once", .timeLimit(.minutes(1)))
+    func hooksFollowEachAnswer() async throws {
+        let fixture = try Fixture(granted: false)
+        try fixture.access.add(grant: sessionGrant(), record: fixture.record())
+        defer { fixture.access.end(visit: "run") }
+
+        #expect(failure(await fixture.access.open(siteID: "example.com", visit: "run")) == .needsPerson)
+        #expect(fixture.opened.siteIDs.isEmpty)
+
+        fixture.bank.markSignedIn()
+        try fixture.access.add(grant: sessionGrant(), record: fixture.record())
+        #expect(page(await fixture.access.open(siteID: "example.com", visit: "run"))?.title == "Account")
+
+        #expect(fixture.personNeeded.siteIDs == ["example.com"])
+        #expect(fixture.opened.siteIDs == ["example.com"])
+    }
+
+    @Test("A visit that began before the person saved the site again reads nothing and tells neither hook", .timeLimit(.minutes(1)))
+    func answerAfterTheSiteWasReplacedTellsNoHook() async throws {
+        let fixture = try Fixture(granted: false)
+        try fixture.access.add(grant: sessionGrant(), record: fixture.record())
+        defer {
+            fixture.access.end(visit: "a")
+            fixture.access.end(visit: "b")
+        }
+        // Whichever visit's answer is announced first, the person saves the site again as it
+        // is heard, which replaces the grant and record the other visit began under.
+        let log = fixture.personNeeded
+        let resave = { try? fixture.access.add(grant: sessionGrant(), record: fixture.record()) }
+        fixture.access.onPersonNeeded = { siteID in
+            log.record(siteID)
+            if log.siteIDs.count == 1 { resave() }
+        }
+
+        async let first = fixture.access.open(siteID: "example.com", visit: "a")
+        async let second = fixture.access.open(siteID: "example.com", visit: "b")
+        let results = await [first, second]
+
+        // Saving a site again closes the visits open on it, so the other visit answers that
+        // the site needs the person or, when it was cut off while still loading, that the
+        // site could not be reached. Either way only the first answer was announced.
+        let failures = results.map(failure)
+        #expect(failures.contains(.needsPerson))
+        #expect(failures.allSatisfy { $0 == .needsPerson || $0 == .unavailable })
+        #expect(log.siteIDs == ["example.com"])
+        #expect(fixture.opened.siteIDs.isEmpty)
+    }
+
+    @Test("A visit that began before the person saved the site again tells no hook, whether it reads the page or is cut off", .timeLimit(.minutes(1)))
+    func pageReadAfterTheSiteWasReplacedTellsNoHook() async throws {
+        let fixture = try Fixture(granted: false)
+        try fixture.access.add(grant: sessionGrant(), record: fixture.record())
+        fixture.bank.markSignedIn()
+        defer {
+            fixture.access.end(visit: "a")
+            fixture.access.end(visit: "b")
+        }
+        let log = fixture.opened
+        let resave = { try? fixture.access.add(grant: sessionGrant(), record: fixture.record()) }
+        fixture.access.onOpened = { siteID in
+            log.record(siteID)
+            if log.siteIDs.count == 1 { resave() }
+        }
+
+        async let first = fixture.access.open(siteID: "example.com", visit: "a")
+        async let second = fixture.access.open(siteID: "example.com", visit: "b")
+        let results = await [first, second]
+
+        // Saving a site again closes the visits open on it, so the other visit either had the
+        // page already or answers that the site could not be reached.
+        #expect(results.contains { page($0)?.title == "Account" })
+        #expect(results.allSatisfy { page($0)?.title == "Account" || failure($0) == .unavailable })
+        #expect(log.siteIDs == ["example.com"])
+        #expect(fixture.personNeeded.siteIDs.isEmpty)
+    }
+
     @Test("A site kept by its session whose start page lacks the sign-out control seen at saving needs the person", .timeLimit(.minutes(1)))
     func sessionGrantWithoutSignOutControl() async throws {
         let fixture = try Fixture(granted: false)
@@ -306,18 +440,24 @@ struct SiteAccessTests {
         }
         #expect(fixture.bank.site.posts.count == 3)
         #expect(fixture.stored?.attemptCount == 3)
+        #expect(fixture.opened.siteIDs.count == 3)
 
         fixture.bank.signOut()
         let refused = await fixture.access.open(siteID: "example.com", visit: "run")
 
         #expect(failure(refused) == .needsPerson)
         #expect(fixture.bank.site.posts.count == 3)
-        // Running out of attempts is no failure of the site.
+        // Running out of attempts is no failure of the site, so it is not flagged, but the
+        // person is still told they are needed.
         #expect(fixture.stored?.needsPerson == false)
+        #expect(fixture.personNeeded.siteIDs == ["example.com"])
+
+        #expect(fixture.opened.siteIDs.count == 3)
 
         // A session that is still good is read even with no attempts left.
         fixture.bank.markSignedIn()
         #expect(page(await fixture.access.open(siteID: "example.com", visit: "run"))?.title == "Account")
+        #expect(fixture.opened.siteIDs.count == 4)
 
         fixture.clock.advance(days: 1)
         fixture.bank.signOut()
@@ -346,18 +486,38 @@ struct SiteAccessTests {
         #expect(fixture.access.currentPage(visit: "b")?.title == "Account")
     }
 
-    @Test("A site that sends the browser off its hosts needs a person, and no attempt is counted", .timeLimit(.minutes(1)))
+    @Test("A site that sends the browser off its hosts needs a person: the hook hears of it, and nothing is written", .timeLimit(.minutes(1)))
     func startPageLeavesTheSite() async throws {
         let fixture = try Fixture()
         fixture.bank.site.route("/account", page: TestPages.redirect(to: "https://evil.test/landing"))
+        let writtenBefore = try #require(fixture.registryFileNumber)
         defer { fixture.access.end(visit: "run") }
 
         let result = await fixture.access.open(siteID: "example.com", visit: "run")
 
         #expect(failure(result) == .needsPerson)
+        #expect(fixture.personNeeded.siteIDs == ["example.com"])
         #expect(fixture.stored?.attemptCount == 0)
         #expect(fixture.stored?.needsPerson == false)
+        #expect(fixture.registryFileNumber == writtenBefore)
         #expect(!fixture.bank.site.requests.contains { $0.host == "evil.test" })
+    }
+
+    @Test("A site kept by its session that sends the browser off its hosts also tells the hook and writes nothing", .timeLimit(.minutes(1)))
+    func sessionStartPageLeavesTheSite() async throws {
+        let fixture = try Fixture(granted: false)
+        try fixture.access.add(grant: sessionGrant(), record: fixture.record())
+        fixture.bank.markSignedIn()
+        fixture.bank.site.route("/account", page: TestPages.redirect(to: "https://evil.test/landing"))
+        let writtenBefore = try #require(fixture.registryFileNumber)
+        defer { fixture.access.end(visit: "run") }
+
+        let result = await fixture.access.open(siteID: "example.com", visit: "run")
+
+        #expect(failure(result) == .needsPerson)
+        #expect(fixture.personNeeded.siteIDs == ["example.com"])
+        #expect(fixture.stored?.needsPerson == false)
+        #expect(fixture.registryFileNumber == writtenBefore)
     }
 
     @Test("A site that cannot be reached is unavailable, and no attempt is counted", .timeLimit(.minutes(1)))
@@ -371,6 +531,7 @@ struct SiteAccessTests {
         #expect(failure(result) == .unavailable)
         #expect(fixture.stored?.attemptCount == 0)
         #expect(fixture.stored?.needsPerson == false)
+        #expect(fixture.personNeeded.siteIDs.isEmpty)
     }
 
     @Test("A site that is not granted is unknown, whatever the reason", .timeLimit(.minutes(1)))
@@ -518,10 +679,12 @@ struct SiteAccessTests {
         // Three a day, flagged or not.
         fixture.bank.signOut()
         #expect(fixture.stored?.attemptCount == 3)
+        #expect(fixture.personNeeded.siteIDs.isEmpty)
         #expect(failure(await fixture.access.open(siteID: "example.com", visit: "run")) == .needsPerson)
         #expect(fixture.stored?.attemptCount == 3)
         #expect(fixture.stored?.needsPerson == false)
         #expect(fixture.bank.site.posts.count == 3)
+        #expect(fixture.personNeeded.siteIDs == ["example.com"])
     }
 
     @Test("An attempt is counted before the sign-in starts, and a registry that cannot be written means no sign-in", .timeLimit(.minutes(1)))

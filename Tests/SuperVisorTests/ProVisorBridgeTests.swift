@@ -501,6 +501,32 @@ struct ProVisorBridgeTests {
         #expect(fixture.bridge.availableSiteNames(access: sealed).isEmpty)
     }
 
+    @Test("A site that is flagged, or that a run was turned away from, is named as waiting in what a pass is told")
+    func waitingSitesAreLabelled() throws {
+        let fixture = try BridgeFixture()
+        defer { fixture.tearDown() }
+        try fixture.grantSite()
+        try fixture.grantSite("power.example.org", name: "City Power")
+        try fixture.grantSite("water.example.net", name: "Water")
+        var flagged = try #require(fixture.center.access.sites().first { $0.id == "water.example.net" })
+        flagged.needsPerson = true
+        try SiteRegistry.save(
+            fixture.center.access.sites().map { $0.id == flagged.id ? flagged : $0 },
+            to: fixture.sites.registry
+        )
+        fixture.center.access.onPersonNeeded?("power.example.org")
+        let waiting = "; waiting for them to sign in again)"
+        let expected = [
+            "Bank (example.com)",
+            "City Power (power.example.org" + waiting,
+            "Water (water.example.net" + waiting,
+        ]
+
+        #expect(fixture.bridge.availableSiteNames(access: sealed) == expected)
+        let run = try fixture.prepared()
+        #expect(run.bridge.siteNames == expected)
+    }
+
     // MARK: Asking about the conditions
 
     @Test("Evaluating reports why the tools are off, makes no run, and clears the reason when they are on")

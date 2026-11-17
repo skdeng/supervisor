@@ -413,13 +413,15 @@ enum ProVisorCommand {
     }
 
     /// The pass that works through the checks a decision left owed. It has the scout's
-    /// confinement and a smaller allowance, and looks for nothing new.
+    /// confinement and a smaller allowance, and looks for nothing new. `justSignedIn` names the
+    /// granted sites the person signed in to since the last pass, each as `ProVisorTools.siteLabel` writes it.
     static func followUpArguments(
         brief: String,
         access: ProVisorAccess,
         standing: [StandingRule],
         now: Date,
         timeZone: TimeZone = .current,
+        justSignedIn: [String] = [],
         bridge: RunBridge? = nil,
         connectorHold: String? = nil
     ) -> [String] {
@@ -430,7 +432,8 @@ enum ProVisorCommand {
         out wrong or cannot be checked. Look for nothing new, and write no proposal except \
         what a follow-up turns up. \
         \(passContext(now: now, timeZone: timeZone, access: access, standing: standing))\
-        \(bridgeSentence(bridge))
+        \(bridgeSentence(bridge))\
+        \(justSignedInSentence(justSignedIn))
         """
         return arguments(
             prompt: prompt,
@@ -482,6 +485,14 @@ enum ProVisorCommand {
             "The \"Sites and texts\" section of your brief says how to use them and what never to do."
         )
         return " " + reach.joined(separator: " ")
+    }
+
+    /// The sentence, led by a space, that names the sites the person has just signed in to; empty
+    /// when there are none. It carries only labels the app wrote from its own registry.
+    private static func justSignedInSentence(_ labels: [String]) -> String {
+        guard !labels.isEmpty else { return "" }
+        return " They have just signed in to \(labels.joined(separator: ", ")); "
+            + "make the checks that were waiting on that."
     }
 
     /// What a scout is told about standing approvals: the rules in force with their ids, the
@@ -639,7 +650,8 @@ enum ProVisorCommand {
     ) -> String {
         let deferredToSites = siteNames.isEmpty ? "" : " A check that needs one of these sites "
             + "(\(siteNames.joined(separator: ", "))) is made by a later pass that can read them "
-            + "signed in, so write it as a follow-up note naming the site, not as an item."
+            + "signed in, so write it as a follow-up note naming the site, not as an item, with "
+            + "`Waits on: ` and that site's host as its third line."
         let unreachableSite = siteNames.isEmpty ? "a site" : "a site that is not one of those"
         return """
         Before you finish, deal with anything you would otherwise leave them to verify or look \
@@ -672,8 +684,9 @@ enum ProVisorCommand {
         (`"confirm"`), and `created` (the time now in UTC, like 2026-11-15T17:12:00Z). When \
         what stands between you and the check is a site you have not been given, add `site`, \
         naming that site. \(siteFieldSentence) They get a button that opens the site for them \
-        to sign in, so also write the follow-up note for the check, with `Check from: ` today, \
-        for the pass that follows their sign-in to make. SuperVisor puts the item in their \
+        to sign in, so also write the follow-up note for the check, with `Check from: ` today \
+        and `Waits on: ` followed by that site's host as its third line, for the pass that \
+        follows their sign-in to make. SuperVisor puts the item in their \
         queue, and they can also answer in their own words. Raise at most three.
         - Theirs alone (a payment, a signature, a judgment only they can make): say what it is.
 
