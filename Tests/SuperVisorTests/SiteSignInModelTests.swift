@@ -84,7 +84,9 @@ struct SiteSignInModelTests {
             record: record(),
             start: Start.decide(host: "example.com", record: record(), grant: nil) { _ in true },
             proposalID: "p",
-            needsPerson: true
+            needsPerson: true,
+            offersPasswords: false,
+            followUps: FollowUpHoldsStub()
         )
 
         await model.beginIfTrusted(using: enrollment)
@@ -135,17 +137,19 @@ struct SiteSignInModelTests {
             record: record(),
             start: .opensPage(loginURL),
             proposalID: "p",
-            needsPerson: true
+            needsPerson: true,
+            offersPasswords: false,
+            followUps: FollowUpHoldsStub()
         )
         #expect(signedOut.title == "Sign in to Bank")
         #expect(signedOut.sentence == "Bank needs you to sign in again.")
         #expect(!signedOut.sentenceIsCaution)
         #expect(!signedOut.asksForAddress)
 
-        let asked = SiteSignInModel(host: "example.com", record: record(), start: .opensPage(loginURL), proposalID: "p", needsPerson: false)
+        let asked = SiteSignInModel(host: "example.com", record: record(), start: .opensPage(loginURL), proposalID: "p", needsPerson: false, offersPasswords: false, followUps: FollowUpHoldsStub())
         #expect(asked.sentence == "ProVisor asked you to sign in to Bank again.")
 
-        let own = SiteSignInModel(host: "example.com", record: record(), start: .opensPage(loginURL), proposalID: nil, needsPerson: false)
+        let own = SiteSignInModel(host: "example.com", record: record(), start: .opensPage(loginURL), proposalID: nil, needsPerson: false, offersPasswords: false, followUps: FollowUpHoldsStub())
         #expect(own.sentence == nil)
     }
 
@@ -156,7 +160,9 @@ struct SiteSignInModelTests {
             record: nil,
             start: .opensPage(URL(string: "https://example.com")!),
             proposalID: "2026-11-17-check",
-            needsPerson: false
+            needsPerson: false,
+            offersPasswords: false,
+            followUps: FollowUpHoldsStub()
         )
         #expect(model.title == "Sign in to example.com")
         #expect(model.sentence == "ProVisor asked for this site. It matches a site in your browser history.")
@@ -171,7 +177,9 @@ struct SiteSignInModelTests {
             record: nil,
             start: .asksForAddress(host: "examp1e-login.com"),
             proposalID: "2026-11-17-check",
-            needsPerson: false
+            needsPerson: false,
+            offersPasswords: false,
+            followUps: FollowUpHoldsStub()
         )
         #expect(model.title == "Sign in")
         #expect(model.sentence == "ProVisor asked for examp1e-login.com. SuperVisor hasn't seen that address in your browser history, so type the site's address yourself.")
@@ -212,7 +220,9 @@ struct SiteSignInModelTests {
             record: nil,
             start: .opensPage(url),
             proposalID: proposalID,
-            needsPerson: false
+            needsPerson: false,
+            offersPasswords: false,
+            followUps: FollowUpHoldsStub()
         )
     }
 
@@ -266,7 +276,9 @@ struct SiteSignInModelTests {
             record: nil,
             start: .asksForAddress(host: "examp1e-login.com"),
             proposalID: "p",
-            needsPerson: false
+            needsPerson: false,
+            offersPasswords: false,
+            followUps: FollowUpHoldsStub()
         )
 
         await model.beginIfTrusted(using: enrollment)
@@ -496,7 +508,9 @@ struct SiteSignInModelTests {
             record: granted,
             start: .decide(host: "example.com", record: granted, grant: center.storedGrant(for: "example.com")) { _ in false },
             proposalID: nil,
-            needsPerson: granted.needsPerson
+            needsPerson: granted.needsPerson,
+            offersPasswords: false,
+            followUps: FollowUpHoldsStub()
         )
         #expect(model.sentence == "My Bank needs you to sign in again.")
         await model.beginIfTrusted(using: enrollment)
@@ -564,7 +578,9 @@ struct SiteSignInModelTests {
             record: nil,
             start: .asksForAddress(host: "examp1e-login.com"),
             proposalID: "p",
-            needsPerson: false
+            needsPerson: false,
+            offersPasswords: false,
+            followUps: FollowUpHoldsStub()
         )
         model.address = address
         return model
@@ -896,7 +912,9 @@ struct SiteSignInModelTests {
             record: nil,
             start: .asksForAddress(host: "example.com"),
             proposalID: "2026-11-17-check",
-            needsPerson: false
+            needsPerson: false,
+            offersPasswords: false,
+            followUps: FollowUpHoldsStub()
         )
         model.address = "login.example.com/login"
         await model.openTypedAddress(using: enrollment)

@@ -166,7 +166,9 @@ final class ProVisorSiteWindow {
                     // The history is read now, never taken from when the prompt was raised.
                     start: .decide(host: host, record: record, grant: grant, hasVisited: history.hasVisited),
                     proposalID: proposalID,
-                    needsPerson: record.map { $0.needsPerson || center.awaitingSignIn.contains($0.id) } ?? false
+                    needsPerson: record.map { $0.needsPerson || center.awaitingSignIn.contains($0.id) } ?? false,
+                    offersPasswords: center.offersPasswords,
+                    followUps: ProVisorCenter.shared
                 )
             }
         case let .signingInAgain(grant, record, proposalID):
@@ -211,9 +213,16 @@ final class ProVisorSiteWindow {
             content: .signIn(host: host),
             requestID: nil
         ) {
-            window.show(center: center, enrollment: center.makeEnrollment(), signIn: makeModel())
+            let model = makeModel()
+            window.show(center: center, enrollment: Self.signInEnrollment(for: model, center: center), signIn: model)
         }
         bringForward(window)
+    }
+
+    /// The enrollment a sign-in window starts with: one that records what the person types
+    /// only when the model may offer to keep a password (`SiteSignInModel.recordsCredentials`).
+    static func signInEnrollment(for model: SiteSignInModel, center: SiteAccessCenter) -> SiteEnrollment {
+        model.recordsCredentials ? center.makeRecordingEnrollment() : center.makeEnrollment()
     }
 
     private func reusableWindow() -> SiteEnrollmentWindow {
@@ -317,6 +326,11 @@ final class SiteEnrollmentWindow: NSWindow {
     /// the page at once when the model's start is an address the app vouches for.
     func show(center: SiteAccessCenter, enrollment: SiteEnrollment, signIn model: SiteSignInModel) {
         replace(with: enrollment, content: .signIn(host: model.host), requestID: model.proposalID)
+        // An enrollment that ends by itself, as an unanswered offer does, closes its window.
+        enrollment.whenEnded { [weak self, weak enrollment] in
+            guard let enrollment else { return }
+            self?.close(showing: enrollment)
+        }
         title = "Sign In"
         hosting.rootView = AnyView(
             ProVisorSignInView(

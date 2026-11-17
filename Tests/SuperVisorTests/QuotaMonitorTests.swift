@@ -18,6 +18,7 @@ struct QuotaMonitorTests {
         private var _status = 200
         private var _body = Data()
         private var _requests = 0
+        private var _requestTimes: [ContinuousClock.Instant] = []
 
         var status: Int {
             get { lock.lock(); defer { lock.unlock() }; return _status }
@@ -33,9 +34,15 @@ struct QuotaMonitorTests {
             lock.lock(); defer { lock.unlock() }; return _requests
         }
 
+        /// When each request arrived, in order.
+        var requestTimes: [ContinuousClock.Instant] {
+            lock.lock(); defer { lock.unlock() }; return _requestTimes
+        }
+
         func respond(to request: URLRequest) -> (Data, URLResponse) {
             lock.lock(); defer { lock.unlock() }
             _requests += 1
+            _requestTimes.append(.now)
             let response = HTTPURLResponse(
                 url: request.url!,
                 statusCode: _status,
@@ -387,19 +394,23 @@ struct QuotaMonitorTests {
     }
 
     @Test("Failed reads back off instead of retrying at a fixed rate")
-    func failuresBackOff() async {
+    func failuresBackOff() async throws {
         let h = Harness()
         defer { h.tearDown() }
         h.endpoint.status = 500
         h.writeSession(status: "busy")
         h.monitor.start()
 
-        // Retries at 0.2 s, 0.4 s, 0.4 s, … after the first read: by 1.1 s that is four
-        // reads at most, where a fixed 0.2 s cadence would have made six.
-        await waitUntil("first read") { h.endpoint.requests >= 1 }
-        try? await Task.sleep(for: .milliseconds(1_100))
-        #expect(h.endpoint.requests >= 3)
-        #expect(h.endpoint.requests <= 4)
+        // Retries wait 0.2 s, then 0.4 s, then 0.4 s: the gaps between reads grow, where a
+        // fixed cadence would keep them at 0.2 s. A busy machine only lengthens a gap, so the
+        // lower bounds hold under load.
+        await waitUntil("four reads") { h.endpoint.requests >= 4 }
+        let times = h.endpoint.requestTimes
+        let gaps = zip(times.dropFirst(), times).prefix(3).map { $0 - $1 }
+        try #require(gaps.count == 3)
+        #expect(gaps[0] >= .milliseconds(150))
+        #expect(gaps[1] >= .milliseconds(350))
+        #expect(gaps[2] >= .milliseconds(350))
         #expect(!h.monitor.showsRow)
     }
 

@@ -790,3 +790,58 @@ final class FollowUpNotesTests {
         #expect(!FollowUpNotes.hasDueNote(in: folder, on: today, readable: { _ in true }))
     }
 }
+
+@Suite("Follow-up holds")
+struct FollowUpHoldsTests {
+    @Test("Holds are counted: each lifts only its own, and the last one released says so")
+    func counted() {
+        var holds = FollowUpHolds()
+        #expect(!holds.isHeld)
+
+        let first = holds.take()
+        let second = holds.take()
+        #expect(holds.isHeld)
+
+        let lifted1 = holds.release(first)
+        #expect(!lifted1)
+        #expect(holds.isHeld)
+        // A token released twice lifts nothing the second time.
+        let lifted2 = holds.release(first)
+        #expect(!lifted2)
+        #expect(holds.isHeld)
+
+        let lifted3 = holds.release(second)
+        #expect(lifted3)
+        #expect(!holds.isHeld)
+        let lifted4 = holds.release(second)
+        #expect(!lifted4)
+    }
+
+    @Test("Releasing all lifts every hold, and tokens taken before it lift nothing afterwards")
+    func releaseAll() {
+        var holds = FollowUpHolds()
+        let early = holds.take()
+        holds.releaseAll()
+        #expect(!holds.isHeld)
+
+        let late = holds.take()
+        let lifted5 = holds.release(early)
+        #expect(!lifted5)
+        #expect(holds.isHeld)
+        let lifted6 = holds.release(late)
+        #expect(lifted6)
+    }
+
+    @Test("A site saved twice before a pass starts owes one pass, which answers both saves")
+    func secondSaveOwesNoSecondPass() {
+        var demand = FollowUpDemand()
+        demand.requestAfterGrant(site: "example.com")
+        demand.requestAfterGrant(site: "example.com")
+        #expect(demand.justSignedIn == ["example.com"])
+
+        demand.passStarted(told: demand.justSignedIn)
+
+        #expect(!demand.isOwedAfterGrant)
+        #expect(!demand.isOwed(hasDueNote: false))
+    }
+}

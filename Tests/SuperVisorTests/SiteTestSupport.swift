@@ -181,6 +181,11 @@ final class TestBank {
     var usernameAutocomplete = "username" {
         didSet { install() }
     }
+    /// The one-page login form shows the user name already filled in, as a site that remembers
+    /// it does, so only the password is typed.
+    var prefillsUsername = false {
+        didSet { install() }
+    }
     /// A signed-out start page is a public page with no sign-in form, as a site shows to a
     /// visitor who has not signed in.
     var startPageIsPublic = false {
@@ -237,7 +242,7 @@ final class TestBank {
 
     private var credentials: String {
         """
-        <input type="text" id="\(usernameFieldID)" name="\(usernameFieldName)" autocomplete="\(usernameAutocomplete)">
+        <input type="text" id="\(usernameFieldID)" name="\(usernameFieldName)" autocomplete="\(usernameAutocomplete)"\(prefillsUsername ? " value=\"\(username)\"" : "")>
         <input type="password" id="pass" name="password" autocomplete="current-password">
         """
     }
@@ -482,5 +487,24 @@ final class CodeStub: @unchecked Sendable {
                 return firstText
             }
         )
+    }
+}
+
+/// Counts the follow-up holds a sign-in window takes and releases.
+@MainActor
+final class FollowUpHoldsStub: FollowUpHolding {
+    private var holds = FollowUpHolds()
+    private(set) var taken = 0
+
+    /// Whether a hold taken is still standing.
+    var isHeld: Bool { holds.isHeld }
+
+    func holdFollowUps() -> FollowUpHolds.Token {
+        taken += 1
+        return holds.take()
+    }
+
+    func releaseFollowUps(_ token: FollowUpHolds.Token) {
+        holds.release(token)
     }
 }

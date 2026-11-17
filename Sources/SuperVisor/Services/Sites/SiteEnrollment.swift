@@ -55,6 +55,16 @@ import WebKit
 /// on a button press involves no typing either, so while a session is being kept the page is
 /// also probed every `recheckInterval`. What the probes find is published as `appearsSignedIn`,
 /// which only advises the window's look; `finishKeepingSession` decides on a fresh read.
+///
+/// **An enrollment made by `recordingCredentials` also records what the person types** into
+/// the user name and password fields of the main frame (`SiteBrowser.Observation`), and only
+/// while a session is being kept. The values live in one `CredentialCapture`, which every
+/// probe of the page on display also informs, and which `cancel()`, a fresh `begin`, and the
+/// end of a save wipe. A successful `finishKeepingSession` judges it once
+/// (`CredentialCapture.offer`) and keeps that judgement, `passwordOffer` or `offerRefusal`,
+/// until the enrollment is cancelled or begun afresh; `passwordGrant(upgrading:)` turns an
+/// offer into a grant that signs in by itself. Any other enrollment records nothing and never
+/// has an offer.
 @MainActor
 final class SiteEnrollment: ObservableObject {
     enum Failure: Error, Equatable {
@@ -127,6 +137,30 @@ final class SiteEnrollment: ObservableObject {
     /// Whether a page that shows no sign-out control is loaded as a visitor would load it. False
     /// for an enrollment on simulated pages that has no simulated visitor site.
     let checksVisitor: Bool
+    /// Whether the enrollment was made by `recordingCredentials`.
+    let recordsCredentials: Bool
+
+    /// What the person typed while the session being kept was signed in to.
+    private var capture = CredentialCapture()
+    /// The judgement of the capture made by the last successful `finishKeepingSession`, and the
+    /// grant that save returned, which only `passwordGrant(upgrading:)` of that same grant
+    /// builds on.
+    private var judgedOffer: (result: Result<PasswordOffer, OfferRefusal>, session: SiteGrant)?
+    private var endHandlers: [@MainActor () -> Void] = []
+
+    /// The offer to keep the password typed into the session's sign-in, from the last
+    /// successful `finishKeepingSession` of an enrollment that records credentials.
+    var passwordOffer: PasswordOffer? {
+        guard case let .success(offer)? = judgedOffer?.result else { return nil }
+        return offer
+    }
+
+    /// Why the last successful `finishKeepingSession` of an enrollment that records credentials
+    /// made no offer.
+    var offerRefusal: OfferRefusal? {
+        guard case let .failure(refusal)? = judgedOffer?.result else { return nil }
+        return refusal
+    }
 
     /// What the user typed. It carries secrets, so no rendering of it shows them.
     private struct Pending: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
@@ -175,7 +209,8 @@ final class SiteEnrollment: ObservableObject {
     /// Whether a pending observation waits for the page to settle before it probes.
     private var observeSettles = false
 
-    init(
+    /// An enrollment that records nothing the person types.
+    convenience init(
         dataStore: WKWebsiteDataStore = SiteBrowser.sharedStore,
         codes: SignInCodes,
         simulatedPages: SiteBrowser.SimulatedPages? = nil,
@@ -185,6 +220,56 @@ final class SiteEnrollment: ObservableObject {
         visitorPages: SiteBrowser.SimulatedPages? = nil,
         visitorRecheckDelay: Duration = VisitorCheck.standardRecheckDelay
     ) {
+        self.init(
+            observation: .typing,
+            dataStore: dataStore,
+            codes: codes,
+            simulatedPages: simulatedPages,
+            settling: settling,
+            codeWaitLimit: codeWaitLimit,
+            recheckInterval: recheckInterval,
+            visitorPages: visitorPages,
+            visitorRecheckDelay: visitorRecheckDelay
+        )
+    }
+
+    /// An enrollment that records the user name and password the person types while a session
+    /// is being kept (see the type's discussion).
+    static func recordingCredentials(
+        dataStore: WKWebsiteDataStore = SiteBrowser.sharedStore,
+        codes: SignInCodes,
+        simulatedPages: SiteBrowser.SimulatedPages? = nil,
+        settling: SiteBrowser.Settling = .standard,
+        codeWaitLimit: Duration = SignInBroker.standardCodeWaitLimit,
+        recheckInterval: Duration = SiteEnrollment.standardRecheckInterval,
+        visitorPages: SiteBrowser.SimulatedPages? = nil,
+        visitorRecheckDelay: Duration = VisitorCheck.standardRecheckDelay
+    ) -> SiteEnrollment {
+        SiteEnrollment(
+            observation: .typingAndCredentials,
+            dataStore: dataStore,
+            codes: codes,
+            simulatedPages: simulatedPages,
+            settling: settling,
+            codeWaitLimit: codeWaitLimit,
+            recheckInterval: recheckInterval,
+            visitorPages: visitorPages,
+            visitorRecheckDelay: visitorRecheckDelay
+        )
+    }
+
+    private init(
+        observation: SiteBrowser.Observation,
+        dataStore: WKWebsiteDataStore,
+        codes: SignInCodes,
+        simulatedPages: SiteBrowser.SimulatedPages?,
+        settling: SiteBrowser.Settling,
+        codeWaitLimit: Duration,
+        recheckInterval: Duration,
+        visitorPages: SiteBrowser.SimulatedPages?,
+        visitorRecheckDelay: Duration
+    ) {
+        recordsCredentials = observation == .typingAndCredentials
         self.codes = codes
         self.codeWaitLimit = codeWaitLimit
         self.recheckInterval = recheckInterval
@@ -199,8 +284,14 @@ final class SiteEnrollment: ObservableObject {
             dataStore: dataStore,
             simulatedPages: simulatedPages,
             settling: settling,
-            observesTyping: true
+            observation: observation
         )
+        if recordsCredentials {
+            browser.credentialObserver = { [weak self] credential in
+                guard let self, self.keptSessionURL != nil else { return }
+                self.capture.record(credential)
+            }
+        }
         browser.locationObserver = { [weak self] in
             self?.refreshLocation()
         }
@@ -219,6 +310,14 @@ final class SiteEnrollment: ObservableObject {
         browser.typedObserver = { [weak self] in
             if self?.keptSessionURL != nil { self?.requestObservation(settling: false) }
         }
+    }
+
+    /// An enrollment freed without being cancelled still ends, so nothing waiting on its end
+    /// (`whenEnded`) is left waiting.
+    isolated deinit {
+        let handlers = endHandlers
+        endHandlers = []
+        handlers.forEach { $0() }
     }
 
     /// The address as an `https` URL, or nil: a missing scheme becomes `https`, and anything
@@ -266,6 +365,7 @@ final class SiteEnrollment: ObservableObject {
         generation += 1
         stopAssisting()
         stopObserving()
+        forgetCredentials()
         keptSessionURL = nil
         appearsSignedIn = false
         pending = Pending(
@@ -325,6 +425,7 @@ final class SiteEnrollment: ObservableObject {
         generation += 1
         stopAssisting()
         stopObserving()
+        forgetCredentials()
         pending = nil
         session = nil
         keptSessionURL = url
@@ -520,6 +621,7 @@ final class SiteEnrollment: ObservableObject {
         guard let signInURL = keptSessionURL else { throw Failure.notSignedIn }
         let page = try await signedInPage(broker: broker)
         try ensureCurrent(generation)
+        noteCredentialPage(page.probe)
         guard let signInHost = signInURL.host(percentEncoded: false)?.lowercased() else {
             throw Failure.invalidGrant
         }
@@ -558,8 +660,44 @@ final class SiteEnrollment: ObservableObject {
         let label = Proposal.displayText(name, limit: SiteRecord.nameLimit) ?? signInHost
         var record = SiteRecord(id: signInHost, name: label, added: Date(), lastSignedIn: Date())
         record.keepsSessionOnly = true
+        if recordsCredentials {
+            let result = capture.offer(siteHost: signInHost, browseHosts: grant.browseHosts)
+            judgedOffer = (result, grant)
+            if case let .failure(refusal) = result {
+                AppLog.notice(.sites, "password offer withheld for \(signInHost): \(refusal.caseName)")
+            }
+        }
         wipe()
         return (grant, record)
+    }
+
+    /// A grant that signs in to the site by itself with the password the person typed: the
+    /// offer the last successful `finishKeepingSession` made (`PasswordOffer.grant(upgrading:)`),
+    /// built on `session`, the grant that save returned. Throws `invalidGrant` when there is no
+    /// offer, `session` is another grant, or the result is not a valid grant, and `cancelled`
+    /// once the enrollment is.
+    func passwordGrant(upgrading session: SiteGrant) throws -> SiteGrant {
+        guard !isCancelled else { throw Failure.cancelled }
+        guard let judgedOffer, judgedOffer.session == session,
+              case let .success(offer) = judgedOffer.result,
+              let grant = offer.grant(upgrading: session)
+        else { throw Failure.invalidGrant }
+        return grant
+    }
+
+    /// Forgets what the person typed and the judgement of it, the offer included.
+    func discardOffer() {
+        forgetCredentials()
+    }
+
+    /// Calls `handler` once the enrollment ends: when it is cancelled, or, for one dropped
+    /// without being cancelled, when it is freed. Called at once when it is already cancelled.
+    func whenEnded(_ handler: @escaping @MainActor () -> Void) {
+        guard !isCancelled else {
+            handler()
+            return
+        }
+        endHandlers.append(handler)
     }
 
     /// Throws `cancelled` when the enrollment has been cancelled, begun afresh, or wiped since
@@ -665,7 +803,11 @@ final class SiteEnrollment: ObservableObject {
         sessionReadTask?.cancel()
         stopAssisting()
         wipe()
+        forgetCredentials()
         browser.close()
+        let handlers = endHandlers
+        endHandlers = []
+        handlers.forEach { $0() }
     }
 
     /// Returns once the app has finished examining the pages loaded so far.
@@ -688,6 +830,19 @@ final class SiteEnrollment: ObservableObject {
         keptSessionURL = nil
         session = nil
         broker = nil
+        capture.wipe()
+    }
+
+    /// Forgets what the person typed and the judgement of it.
+    private func forgetCredentials() {
+        capture.wipe()
+        judgedOffer = nil
+    }
+
+    /// Lets the capture take a look at a probe of the page on display.
+    private func noteCredentialPage(_ page: PageProbe) {
+        guard recordsCredentials, keptSessionURL != nil else { return }
+        capture.notePage(page)
     }
 
     private func stopAssisting() {
@@ -783,6 +938,7 @@ final class SiteEnrollment: ObservableObject {
               let probe = try? await broker.probe(),
               !Task.isCancelled, keptSessionURL != nil
         else { return }
+        noteCredentialPage(probe)
         if SignInRules.asksForSignIn(probe) {
             keptSessionSawSignIn = true
         }

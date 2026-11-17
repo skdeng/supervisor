@@ -247,13 +247,20 @@ final class SiteBrowser: NSObject {
     /// connection.
     var locationObserver: (@MainActor () -> Void)?
     /// Called on the main actor each time the person types into a password field on the page.
-    /// Only a browser made with `observesTyping` calls it.
+    /// Only a browser whose `Observation` includes typing calls it.
     var passwordTypedObserver: (@MainActor () -> Void)?
     /// Called on the main actor each time the person types into any field on the page, a
-    /// password field included. Only a browser made with `observesTyping` calls it.
+    /// password field included. Only a browser whose `Observation` includes typing calls it.
     var typedObserver: (@MainActor () -> Void)?
+    /// Called on the main actor with each user name or password typed into a field of the main
+    /// frame, and each clear of such a field (`TypedCredential.Kind.cleared`). Only a browser
+    /// made with `typingAndCredentials` calls it.
+    var credentialObserver: (@MainActor (TypedCredential) -> Void)?
     /// Called on the main actor each time the main frame finishes a load.
     var pageFinishedObserver: (@MainActor () -> Void)?
+    /// Messages from the credential script that failed `TypedCredential`'s checks. Only the
+    /// count is kept.
+    private(set) var droppedCredentials = 0
 
     private let window: NSWindow
     private let simulatedPages: SimulatedPages?
@@ -270,10 +277,34 @@ final class SiteBrowser: NSObject {
     private var closeHandlers: [UUID: @MainActor () -> Void] = [:]
     private var pendingScripts: [ObjectIdentifier: PendingScript] = [:]
     private let typingRelay: TypingRelay?
+    private let credentialRelay: CredentialRelay?
 
     /// The message the typing script posts. Its body is one of `TypedField`'s raw values: which
     /// kind of field took the input, never what was typed.
     nonisolated static let typingMessage = "supervisorTyping"
+
+    /// The message the credential script posts: one report of what a person typed into a user
+    /// name or password field, in the shape `TypedCredential` reads.
+    nonisolated static let credentialMessage = "supervisorCredential"
+
+    /// What the browser reports of typing into the page. Every level reports only trusted input
+    /// events, so an event a script dispatches, the app's own fills among them, is never
+    /// reported. A trusted event is not proof that a person typed: a page's own script can
+    /// produce one through an editing command (`document.execCommand('insertText', …)`). A report
+    /// is therefore bound to the page's own origin and path and vouches for nothing more.
+    enum Observation: Equatable, Sendable {
+        /// Nothing.
+        case none
+        /// That the person typed into a field, and whether it was a password field; never what
+        /// was typed (see `typedObserver` and `passwordTypedObserver`).
+        case typing
+        /// Everything `typing` reports, and the user name or password typed into a field of the
+        /// main frame (see `credentialObserver`).
+        case typingAndCredentials
+
+        fileprivate var observesTyping: Bool { self != .none }
+        fileprivate var observesCredentials: Bool { self == .typingAndCredentials }
+    }
 
     enum TypedField: String {
         case password
@@ -288,16 +319,18 @@ final class SiteBrowser: NSObject {
         }
     }
 
-    /// With `observesTyping`, a script in the app's isolated content world reports each input
-    /// a person makes into a field of the page (see `typedObserver` and
-    /// `passwordTypedObserver`). Events a script dispatches, the app's own fills among them,
-    /// are not trusted and are not reported.
+    /// With an `observation` that includes typing, a script in the app's isolated content world
+    /// reports each trusted input into a field of the page (see `typedObserver` and
+    /// `passwordTypedObserver`); with `typingAndCredentials`, a second script, for the main
+    /// frame alone, reports a user name or password typed (see `credentialObserver`). The
+    /// scripts and their message handlers live in the isolated world, which the page's own
+    /// scripts cannot reach.
     init(
         policy: SiteNavigationPolicy,
         dataStore: WKWebsiteDataStore = SiteBrowser.sharedStore,
         simulatedPages: SimulatedPages? = nil,
         settling: Settling = .standard,
-        observesTyping: Bool = false
+        observation: Observation = .none
     ) {
         self.policy = policy
         self.simulatedPages = simulatedPages
@@ -309,7 +342,7 @@ final class SiteBrowser: NSObject {
         configuration.mediaTypesRequiringUserActionForPlayback = .all
         // Sites refuse the bare WebKit agent string as an unsupported browser.
         configuration.applicationNameForUserAgent = Self.agentSuffix
-        if observesTyping {
+        if observation.observesTyping {
             let relay = TypingRelay()
             configuration.userContentController.addUserScript(WKUserScript(
                 source: Scripts.typing,
@@ -325,6 +358,23 @@ final class SiteBrowser: NSObject {
             typingRelay = relay
         } else {
             typingRelay = nil
+        }
+        if observation.observesCredentials {
+            let relay = CredentialRelay()
+            configuration.userContentController.addUserScript(WKUserScript(
+                source: Scripts.credentials,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true,
+                in: .defaultClient
+            ))
+            configuration.userContentController.add(
+                relay,
+                contentWorld: .defaultClient,
+                name: Self.credentialMessage
+            )
+            credentialRelay = relay
+        } else {
+            credentialRelay = nil
         }
         webView = WKWebView(frame: Self.initialFrame, configuration: configuration)
 
@@ -344,6 +394,7 @@ final class SiteBrowser: NSObject {
         webView.navigationDelegate = self
         webView.uiDelegate = self
         typingRelay?.browser = self
+        credentialRelay?.browser = self
         secureContentObservation = webView.observe(\.hasOnlySecureContent, options: [.new]) { [weak self] _, _ in
             MainActor.assumeIsolated {
                 self?.locationObserver?()
@@ -373,6 +424,7 @@ final class SiteBrowser: NSObject {
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
         webView.configuration.userContentController.removeAllScriptMessageHandlers()
+        webView.configuration.userContentController.removeAllScriptMessageHandlers(from: .defaultClient)
         secureContentObservation?.invalidate()
         secureContentObservation = nil
         webView.removeFromSuperview()
@@ -381,6 +433,7 @@ final class SiteBrowser: NSObject {
         pageFinishedObserver = nil
         passwordTypedObserver = nil
         typedObserver = nil
+        credentialObserver = nil
         let handlers = closeHandlers.values
         closeHandlers.removeAll()
         handlers.forEach { $0() }
@@ -409,6 +462,37 @@ final class SiteBrowser: NSObject {
         guard !isClosed else { return }
         if field == .password { passwordTypedObserver?() }
         typedObserver?()
+    }
+
+    /// Reports a user name or password the person typed; `credentialObserver` is called with it
+    /// unless the browser is closed.
+    func noteCredential(_ credential: TypedCredential) {
+        guard !isClosed else { return }
+        credentialObserver?(credential)
+    }
+
+    /// Takes what the credential script's message handler received, with the facts about the
+    /// frame that sent it. A message that does not pass `TypedCredential`'s checks is counted in
+    /// `droppedCredentials` and nothing of it is kept or logged.
+    fileprivate func receiveCredentialMessage(
+        _ body: Any,
+        isMainFrame: Bool,
+        frameScheme: String?,
+        frameHost: String?,
+        framePort: Int?
+    ) {
+        guard !isClosed else { return }
+        guard let credential = TypedCredential(
+            messageBody: body,
+            isMainFrame: isMainFrame,
+            frameScheme: frameScheme,
+            frameHost: frameHost,
+            framePort: framePort
+        ) else {
+            droppedCredentials += 1
+            return
+        }
+        noteCredential(credential)
     }
 
     private func ensureOpen() throws {
@@ -511,9 +595,11 @@ final class SiteBrowser: NSObject {
     /// Values reach the script only through `arguments`, never in `body`.
     ///
     /// A script that has not answered when the browser closes ends with `Failure.closed`, and
-    /// one that has not answered within `settling.scriptTimeout` with `Failure.timedOut`.
-    func run(_ body: String, arguments: [String: Any] = [:]) async throws -> ScriptValue {
+    /// one that has not answered within `timeout` (by default `settling.scriptTimeout`) with
+    /// `Failure.timedOut`.
+    func run(_ body: String, arguments: [String: Any] = [:], timeout: Duration? = nil) async throws -> ScriptValue {
         try ensureOpen()
+        let limit = timeout ?? settling.scriptTimeout
         return try await withCheckedThrowingContinuation { continuation in
             let call = PendingScript(continuation)
             pendingScripts[ObjectIdentifier(call)] = call
@@ -529,7 +615,7 @@ final class SiteBrowser: NSObject {
                 }
             }
             call.timer = Task { @MainActor in
-                try? await Task.sleep(for: settling.scriptTimeout)
+                try? await Task.sleep(for: limit)
                 self.finish(call, .failure(Failure.timedOut))
             }
         }
@@ -647,14 +733,20 @@ final class SiteBrowser: NSObject {
         }
     }
 
+    /// The limit on one of the small scripts the settle loops poll with. A script sent while
+    /// the document it runs in is being replaced by a navigation can go unanswered, and each
+    /// poll that goes unanswered holds a settle loop for this long; its caller takes the timeout
+    /// as a sample that says nothing and looks again.
+    private var pollScriptTimeout: Duration { min(settling.scriptTimeout, .seconds(2)) }
+
     private func readiness() async throws -> (complete: Bool, length: Int)? {
-        let value = try await run(Scripts.readiness)
+        let value = try await run(Scripts.readiness, timeout: pollScriptTimeout)
         guard let state = value["ready"]?.string, let length = value["length"]?.int else { return nil }
         return (state == "complete", length)
     }
 
     private func signature() async throws -> String? {
-        try await run(Scripts.signature).string
+        try await run(Scripts.signature, timeout: pollScriptTimeout).string
     }
 
     private func readSnapshot() async throws -> PageSnapshot {
@@ -719,8 +811,9 @@ final class SiteBrowser: NSObject {
             """
 
         /// Runs in the isolated content world, where the page's scripts cannot reach the
-        /// listener or the message handler. Only a trusted event, which comes from the person,
-        /// is reported, and the message names the kind of field, never what was typed.
+        /// listener or the message handler. Only a trusted input event is reported (see
+        /// `Observation` for what that does not prove), and the message names the kind of field,
+        /// never what was typed.
         static let typing = """
             document.addEventListener('input', (event) => {
               if (!event.isTrusted) return;
@@ -732,6 +825,230 @@ final class SiteBrowser: NSObject {
               window.webkit.messageHandlers.\(SiteBrowser.typingMessage).postMessage(kind);
             }, true);
             """
+
+        /// The field rules and the report builder of the credential script: no listener, and no
+        /// effect beyond its definitions and a watch on `type` attributes.
+        ///
+        /// A field is a password when it is, or has been, a `password` input: the watch records
+        /// every input whose `type` attribute changes away from `password`, so one a show-password
+        /// toggle turns into a text input still counts, unless `SignInRules.isMaskedNonPassword`
+        /// sets it apart as a masked code, PIN, or answer, which is never reported. Any other
+        /// field is a user name when `SignInRules.showsUserNameField` would call it one. A code
+        /// field is never reported, and neither is a field that carries a password token or word,
+        /// whatever else its name says. Attributes are cut at 200 characters, past the length
+        /// `TypedCredential` accepts for a field key, so a cut attribute is refused there.
+        ///
+        /// `credentialMessage(element)` returns the report for one input: a clear, carrying no
+        /// value, when the field is empty; null when the field is not one to report or holds more
+        /// than 16,384 characters.
+        static let credentialHelpers = #"""
+            const getAttribute = Element.prototype.getAttribute;
+            const attribute = (element, name) => getAttribute.call(element, name) || '';
+            const getter = (prototype, name) => Object.getOwnPropertyDescriptor(prototype, name).get;
+            const readValue = getter(HTMLInputElement.prototype, 'value');
+            const readType = getter(HTMLInputElement.prototype, 'type');
+            const readForm = getter(HTMLInputElement.prototype, 'form');
+            const readDocumentURL = getter(Document.prototype, 'URL');
+            const readBaseURI = getter(Node.prototype, 'baseURI');
+            const allInputs = () => Document.prototype.querySelectorAll.call(document, 'input');
+
+            const usernamePattern = new RegExp('\#(SignInRules.usernamePattern)', 'i');
+            const codeWords = \#(javaScriptList(SignInRules.codeWords));
+            const notCodeWords = \#(javaScriptList(SignInRules.notCodeWords));
+            const notPasswordWords = \#(javaScriptList(SignInRules.notPasswordWords));
+            const passwordWords = ['password', 'passwd', 'pwd'];
+            const textTypes = ['', 'text', 'email', 'tel'];
+            const maximumValueLength = 16384;
+            const maximumPasswordFields = \#(TypedCredential.maximumPasswordFields);
+
+            const cut = (text) => text.slice(0, 200);
+            const isLetterOrNumber = (character) => /^[\p{L}\p{N}]$/u.test(character);
+            const isNumber = (character) => /^\p{N}$/u.test(character);
+            const wordsOf = (text, splittingDigits) => {
+              const words = [];
+              let current = '';
+              let previous = null;
+              for (const character of text) {
+                if (!isLetterOrNumber(character)) {
+                  if (current !== '') words.push(current);
+                  current = '';
+                  previous = null;
+                  continue;
+                }
+                if (previous !== null && current !== '') {
+                  const camelBoundary = /^\p{Ll}$/u.test(previous) && /^\p{Lu}$/u.test(character);
+                  const digitBoundary = splittingDigits && isNumber(previous) !== isNumber(character);
+                  if (camelBoundary || digitBoundary) {
+                    words.push(current);
+                    current = '';
+                  }
+                }
+                current += character;
+                previous = character;
+              }
+              if (current !== '') words.push(current);
+              return words.map((word) => word.toLowerCase());
+            };
+
+            const knownPasswordInputs = new WeakSet();
+            const isPasswordInput = (element) => {
+              if (readType.call(element) === 'password') {
+                knownPasswordInputs.add(element);
+                return true;
+              }
+              return knownPasswordInputs.has(element);
+            };
+            new MutationObserver((records) => {
+              for (const record of records) {
+                if (record.target instanceof HTMLInputElement
+                  && (record.oldValue || '').toLowerCase() === 'password') knownPasswordInputs.add(record.target);
+              }
+            }).observe(document, { subtree: true, attributes: true, attributeFilter: ['type'], attributeOldValue: true });
+
+            const factsOf = (element) => {
+              const maxLength = parseInt(attribute(element, 'maxlength'), 10);
+              return {
+                name: cut(attribute(element, 'name')),
+                id: cut(attribute(element, 'id')),
+                autocomplete: cut(attribute(element, 'autocomplete').toLowerCase()),
+                type: cut(attribute(element, 'type').toLowerCase()),
+                inputMode: cut(attribute(element, 'inputmode').toLowerCase()),
+                maxLength: Number.isFinite(maxLength) && maxLength >= 0 ? maxLength : null
+              };
+            };
+            const tokensOf = (autocomplete) => autocomplete.split(/\s+/);
+            const looksLikeUsername = (facts) => ['username', 'email'].includes(facts.autocomplete)
+              || facts.type === 'email' || usernamePattern.test(facts.name) || usernamePattern.test(facts.id);
+            const isCodeField = (facts) => {
+              if (facts.type === 'password') return false;
+              if (facts.autocomplete === 'one-time-code') return true;
+              const words = [facts.name, facts.id].flatMap((text) => wordsOf(text, true).concat(wordsOf(text, false)));
+              if (words.some((word) => notCodeWords.includes(word))) return false;
+              if (words.some((word) => codeWords.includes(word))) return true;
+              return facts.inputMode === 'numeric' && facts.maxLength !== null
+                && facts.maxLength >= 4 && facts.maxLength <= 8;
+            };
+            const looksLikePassword = (facts) => {
+              const tokens = tokensOf(facts.autocomplete);
+              return tokens.includes('current-password') || tokens.includes('new-password')
+                || [facts.name, facts.id].some((text) => wordsOf(text, true).some((word) => passwordWords.includes(word)));
+            };
+            const isMaskedNonPassword = (facts) => {
+              const words = [facts.name, facts.id].flatMap((text) => wordsOf(text, true).concat(wordsOf(text, false)));
+              if (words.some((word) => notCodeWords.includes(word))) return false;
+              return words.some((word) => codeWords.includes(word) || notPasswordWords.includes(word));
+            };
+            const kindOf = (element, facts) => {
+              if (tokensOf(facts.autocomplete).includes('one-time-code')) return null;
+              if (isPasswordInput(element)) return isMaskedNonPassword(facts) ? null : 'password';
+              if (!textTypes.includes(facts.type) || isCodeField(facts) || looksLikePassword(facts)) return null;
+              return looksLikeUsername(facts) ? 'username' : null;
+            };
+
+            const hasNewPasswordToken = (element) =>
+              tokensOf(attribute(element, 'autocomplete').toLowerCase()).includes('new-password');
+            const actionHostOf = (element) => {
+              const form = readForm.call(element);
+              if (!form) return '';
+              try {
+                const raw = attribute(form, 'action');
+                const url = new URL(raw === '' ? readDocumentURL.call(document) : raw, readBaseURI.call(document));
+                return url.protocol === 'https:' ? url.hostname.toLowerCase() : '';
+              } catch (error) {
+                return '';
+              }
+            };
+
+            const credentialMessage = (target) => {
+              const facts = factsOf(target);
+              const kind = kindOf(target, facts);
+              if (kind === null) return null;
+              const value = readValue.call(target);
+              if (value.length > maximumValueLength) return null;
+              if (value.length === 0) {
+                return {
+                  kind: 'clear',
+                  name: facts.name,
+                  id: facts.id,
+                  autocomplete: facts.autocomplete.trim(),
+                  type: kind === 'password' ? 'password' : facts.type,
+                  origin: location.origin,
+                  path: location.pathname
+                };
+              }
+              const passwords = Array.prototype.filter.call(allInputs(), isPasswordInput);
+              return {
+                kind: kind,
+                value: value,
+                name: facts.name,
+                id: facts.id,
+                autocomplete: facts.autocomplete.trim(),
+                type: kind === 'password' ? 'password' : facts.type,
+                origin: location.origin,
+                path: location.pathname,
+                actionHost: actionHostOf(target),
+                passwordFields: Math.min(passwords.length, maximumPasswordFields),
+                newPassword: hasNewPasswordToken(target) || passwords.some(hasNewPasswordToken)
+              };
+            };
+            """#
+
+        /// Runs in the isolated content world, in the main frame only, where the page's scripts
+        /// cannot reach the listener or the message handler. Only a trusted input event is
+        /// reported, and a page's own script can produce one through an editing command, so a
+        /// report is bound to the page's own origin and path and says nothing more about who
+        /// typed. A report is also made only while the page holds transient user activation
+        /// (`navigator.userActivation.isActive`, where the browser has it): that excludes an
+        /// editing command a page runs as it loads or from a timer with no person acting, and
+        /// does not exclude one it runs in the seconds after a click or key press. The path is
+        /// the page's own `location.pathname`: the frame's request address goes stale when the
+        /// page changes its address by script.
+        static let credentials = #"""
+            (() => {
+            \#(credentialHelpers)
+            const activation = navigator.userActivation;
+            document.addEventListener('input', (event) => {
+              if (!event.isTrusted) return;
+              if (activation && !activation.isActive) return;
+              const target = event.composedPath()[0];
+              if (!(target instanceof HTMLInputElement)) return;
+              const message = credentialMessage(target);
+              if (message === null) return;
+              window.webkit.messageHandlers.\#(SiteBrowser.credentialMessage).postMessage(message);
+            }, true);
+            })();
+            """#
+
+        /// A script array literal of `words`, which are lowercase letters and digits.
+        private static func javaScriptList(_ words: Set<String>) -> String {
+            "[" + words.sorted().map { "'\($0)'" }.joined(separator: ", ") + "]"
+        }
+    }
+
+    /// The text of the field rules and report builder the credential script is built from, for
+    /// a test to run against a page.
+    static var credentialHelpersScript: String { Scripts.credentialHelpers }
+}
+
+/// Receives the credential script's message for a browser, holding it weakly: the web view's
+/// content controller keeps its handlers alive for as long as the web view lives. The frame the
+/// message came from is read here, from the web view, and never from the message.
+@MainActor
+private final class CredentialRelay: NSObject, WKScriptMessageHandler {
+    weak var browser: SiteBrowser?
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        let frame = message.frameInfo
+        browser?.receiveCredentialMessage(
+            message.body,
+            isMainFrame: frame.isMainFrame,
+            frameScheme: frame.securityOrigin.protocol,
+            frameHost: frame.securityOrigin.host,
+            framePort: frame.securityOrigin.port
+        )
     }
 }
 

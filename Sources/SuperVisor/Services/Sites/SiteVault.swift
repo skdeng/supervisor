@@ -288,8 +288,15 @@ struct SiteGrant: Codable, Equatable, Sendable {
             && codeKind == .none && codeSender == nil && fillHosts.count == 1
     }
 
+    /// The user name may be empty only when the recorded steps fill a password and no user name:
+    /// a site that shows the user name already filled in, or remembers it, asks only for the
+    /// password.
     private var hasValidSecrets: Bool {
-        guard (1...Self.maximumUsernameLength).contains(username.count),
+        let kinds = Set(signInSteps.map(\.kind))
+        let usernameLengths = kinds.contains(.password) && !kinds.contains(.username)
+            ? 0...Self.maximumUsernameLength
+            : 1...Self.maximumUsernameLength
+        guard usernameLengths.contains(username.count),
               (1...Self.maximumPasswordLength).contains(password.count),
               areValidSteps
         else { return false }

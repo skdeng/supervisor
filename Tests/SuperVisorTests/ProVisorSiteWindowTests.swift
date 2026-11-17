@@ -220,7 +220,9 @@ struct ProVisorSiteWindowTests {
             record: nil,
             start: .opensPage(URL(string: "https://example.com/login")!),
             proposalID: "p",
-            needsPerson: false
+            needsPerson: false,
+            offersPasswords: false,
+            followUps: FollowUpHoldsStub()
         )
         let window = SiteEnrollmentWindow()
         window.alphaValue = 0
@@ -256,6 +258,120 @@ struct ProVisorSiteWindowTests {
         #expect(window.requestID == nil)
     }
 
+    @Test("The password panel replaces Done without resizing the window, and closing it ends the enrollment and its hold", .timeLimit(.minutes(1)))
+    func passwordPanelKeepsSize() async throws {
+        _ = NSApplication.shared
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        let bank = TestBank()
+        let holds = FollowUpHoldsStub()
+        let enrollment = SiteEnrollment.recordingCredentials(
+            dataStore: .nonPersistent(),
+            codes: CodeStub().codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast,
+            recheckInterval: .milliseconds(50)
+        )
+        let model = SiteSignInModel(
+            host: "example.com",
+            record: nil,
+            start: .opensPage(URL(string: "https://example.com/login")!),
+            proposalID: nil,
+            needsPerson: false,
+            offersPasswords: true,
+            followUps: holds
+        )
+        let window = SiteEnrollmentWindow()
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        defer { window.close() }
+
+        window.show(center: center, enrollment: enrollment, signIn: model)
+        window.orderFront(nil)
+        try await settle(window)
+        let frame = window.frame
+        try await waitFor { model.hasOpenedPage && !model.isWorking && enrollment.currentHost == "example.com" }
+
+        _ = try await enrollment.browser.run("""
+            document.getElementById('user').value = username;
+            document.getElementById('pass').value = password;
+            """, arguments: ["username": bank.username, "password": bank.password])
+        enrollment.browser.noteCredential(try #require(typedCredential([
+            "kind": "username", "value": bank.username, "name": "username", "id": "user",
+            "autocomplete": "username", "type": "text",
+        ])))
+        enrollment.browser.noteCredential(try #require(typedCredential(["value": bank.password, "name": "password", "id": "pass"])))
+        _ = try await enrollment.browser.run("HTMLFormElement.prototype.requestSubmit.call(document.forms[0]);")
+        try await waitFor { enrollment.appearsSignedIn }
+
+        #expect(await model.done(using: enrollment, into: center) == .savedAndAsking)
+        try await settle(window)
+
+        #expect(model.panel == .offer(siteName: "example.com", username: bank.username, host: "example.com"))
+        #expect(window.isVisible)
+        #expect(window.enrollment === enrollment)
+        #expect(window.frame == frame)
+        #expect(window.contentView?.frame.size == SiteEnrollmentWindow.initialContentSize)
+        #expect(holds.isHeld)
+
+        window.close()
+        #expect(enrollment.isCancelled)
+        #expect(enrollment.passwordOffer == nil)
+        #expect(!holds.isHeld)
+        #expect(center.storedGrant(for: "example.com")?.remembersPassword == false)
+    }
+
+    @Test("An offer left unanswered closes the window as Session Only does", .timeLimit(.minutes(1)))
+    func unansweredOfferClosesTheWindow() async throws {
+        _ = NSApplication.shared
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        let bank = TestBank()
+        let holds = FollowUpHoldsStub()
+        let enrollment = SiteEnrollment.recordingCredentials(
+            dataStore: .nonPersistent(),
+            codes: CodeStub().codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast,
+            recheckInterval: .milliseconds(50)
+        )
+        let model = SiteSignInModel(
+            host: "example.com",
+            record: nil,
+            start: .opensPage(URL(string: "https://example.com/login")!),
+            proposalID: nil,
+            needsPerson: false,
+            offersPasswords: true,
+            followUps: holds,
+            offerTimeout: .milliseconds(300)
+        )
+        let window = SiteEnrollmentWindow()
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        defer { window.close() }
+
+        window.show(center: center, enrollment: enrollment, signIn: model)
+        window.orderFront(nil)
+        try await waitFor { model.hasOpenedPage && !model.isWorking && enrollment.currentHost == "example.com" }
+        _ = try await enrollment.browser.run("""
+            document.getElementById('user').value = username;
+            document.getElementById('pass').value = password;
+            """, arguments: ["username": bank.username, "password": bank.password])
+        enrollment.browser.noteCredential(try #require(typedCredential(["value": bank.password, "name": "password", "id": "pass"])))
+        _ = try await enrollment.browser.run("HTMLFormElement.prototype.requestSubmit.call(document.forms[0]);")
+        try await waitFor { enrollment.appearsSignedIn }
+
+        #expect(await model.done(using: enrollment, into: center) == .savedAndAsking)
+        #expect(window.isVisible)
+        #expect(holds.isHeld)
+
+        try await waitFor { !window.isVisible }
+        #expect(window.enrollment == nil)
+        #expect(enrollment.isCancelled)
+        #expect(!holds.isHeld)
+        #expect(center.storedGrant(for: "example.com")?.remembersPassword == false)
+    }
+
     @Test("Showing the sign-in window ends an Add Site enrollment, and the reverse", .timeLimit(.minutes(1)))
     func signInAndAddSiteReplaceEachOther() async throws {
         _ = NSApplication.shared
@@ -281,7 +397,9 @@ struct ProVisorSiteWindowTests {
             record: nil,
             start: .asksForAddress(host: "example.com"),
             proposalID: nil,
-            needsPerson: false
+            needsPerson: false,
+            offersPasswords: false,
+            followUps: FollowUpHoldsStub()
         )
 
         window.show(center: center, enrollment: adding, model: SiteFormModel())

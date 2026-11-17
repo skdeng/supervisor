@@ -208,18 +208,39 @@ enum SignInRules {
         case stop(SignInOutcome.Reason?)
     }
 
-    private static let usernamePattern = #"user|email|login|member|account"#
+    /// The name or id pattern that marks a field as taking a user name. `SiteBrowser`'s credential
+    /// script restates `looksLikeUsername`, `isCodeField`, and `isMaskedNonPassword` in script
+    /// form, built from this pattern and the word lists below; a change to any of those rules
+    /// changes the script too, and a test holds their verdicts together.
+    static let usernamePattern = #"user|email|login|member|account"#
 
     /// Words in a field's name or id that mark it as asking for a code.
-    private static let codeWords: Set<String> = [
+    static let codeWords: Set<String> = [
         "otp", "code", "token", "pin", "passcode", "totp", "mfa", "2fa", "verification", "verify",
     ]
 
     /// Words that rule a field out as asking for a sign-in code.
-    private static let notCodeWords: Set<String> = [
+    static let notCodeWords: Set<String> = [
         "zip", "postal", "post", "promo", "coupon", "country", "area", "gift", "discount",
         "referral", "invite", "tracking", "csrf",
     ]
+
+    /// Words that, beside `codeWords`, mark a masked field as holding something other than the
+    /// account's password: a PIN, a card's security code, or the answer to a memorable or
+    /// security question.
+    static let notPasswordWords: Set<String> = ["pin", "cvv", "cvc", "memorable", "answer", "security"]
+
+    /// Whether a password-type field holds a secret other than the account's password: its name
+    /// or id holds, as a whole word, one of `codeWords` or `notPasswordWords`, and none of
+    /// `notCodeWords`. It is `isCodeField`'s word test applied to masked fields, and
+    /// `SiteBrowser`'s credential script restates it.
+    static func isMaskedNonPassword(_ key: FieldKey) -> Bool {
+        let words = Set([key.name, key.id].flatMap {
+            SiteNavigationPolicy.words(in: $0) + SiteNavigationPolicy.words(in: $0, splittingDigits: false)
+        })
+        guard words.isDisjoint(with: notCodeWords) else { return false }
+        return !words.isDisjoint(with: codeWords.union(notPasswordWords))
+    }
 
     // MARK: What to fill
 

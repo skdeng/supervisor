@@ -59,6 +59,11 @@ struct ProVisorSettingsView: View {
 
         siteList
 
+        Toggle("Offer to keep passwords", isOn: $settings.provisorOffersPasswords)
+        Text("After you sign in to a site yourself, SuperVisor can offer to keep the password you typed, in the Keychain, so it can sign in again by itself. It reads what you type into a site's user name and password fields while its sign-in window is open.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
         Toggle(
             "Read my texts",
             isOn: Binding(get: { sites.textsEnabled }, set: { sites.setTextsEnabled($0) })

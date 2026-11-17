@@ -221,7 +221,7 @@ struct SiteBrowserTests {
 
     @Test("Typing into a password field reaches both observers; into any other field, one")
     func typingObservers() {
-        let browser = SiteBrowser(policy: .anyHTTPSHost, dataStore: .nonPersistent(), observesTyping: true)
+        let browser = SiteBrowser(policy: .anyHTTPSHost, dataStore: .nonPersistent(), observation: .typing)
         defer { browser.close() }
         var passwords = 0
         var any = 0
@@ -236,6 +236,24 @@ struct SiteBrowserTests {
         browser.close()
         browser.noteTyped(into: .password)
         #expect((passwords, any) == (1, 2))
+    }
+
+    @Test("Typing observers also work in a browser that observes credentials")
+    func typingObserversWithCredentials() {
+        let browser = SiteBrowser(
+            policy: .anyHTTPSHost,
+            dataStore: .nonPersistent(),
+            observation: .typingAndCredentials
+        )
+        defer { browser.close() }
+        var passwords = 0
+        var any = 0
+        browser.passwordTypedObserver = { passwords += 1 }
+        browser.typedObserver = { any += 1 }
+
+        browser.noteTyped(into: .password)
+
+        #expect((passwords, any) == (1, 1))
     }
 
     @Test("The agent string carries the installed Safari's version, else the system's")
@@ -690,6 +708,21 @@ struct SiteBrowserTests {
         #expect([url("https://example.com/one"), url("https://example.com/two")].contains(browser.currentURL))
     }
 
+    @Test("A script that never answers ends at the limit its caller gives, and the browser goes on", .timeLimit(.minutes(1)))
+    func scriptLimit() async throws {
+        let site = TestSite()
+        site.route("/a", page: TestPages.page("A", "<p>a</p>"))
+        let browser = browser(site)
+        defer { browser.close() }
+        _ = try await browser.open(url("https://example.com/a"))
+
+        await #expect(throws: SiteBrowser.Failure.timedOut) {
+            _ = try await browser.run("await new Promise(() => {}); return 1;", timeout: .milliseconds(100))
+        }
+        #expect(browser.pendingScriptCount == 0)
+        #expect(try await browser.run("return 2;").int == 2)
+    }
+
     @Test("A snapshot reads the page as it is now", .timeLimit(.minutes(1)))
     func snapshotReadsNow() async throws {
         let site = TestSite()
@@ -719,5 +752,653 @@ struct SiteBrowserTests {
         #expect(page.text.unicodeScalars.allSatisfy { $0.value != 0x202E && $0.value != 0x1B })
         #expect(!page.text.contains("\n\n\n"))
         #expect(page.text.contains("Balance drowssap"))
+    }
+
+    // MARK: Credentials
+
+    private func credentialBrowser(
+        _ site: TestSite,
+        observation: SiteBrowser.Observation = .typingAndCredentials
+    ) -> SiteBrowser {
+        SiteBrowser(
+            policy: SiteNavigationPolicy(browseHosts: hosts),
+            dataStore: .nonPersistent(),
+            simulatedPages: site.answer,
+            settling: .fast,
+            observation: observation
+        )
+    }
+
+    private static let signInForm = """
+        <form id="f" method="post" action="https://example.com/session">
+        <input id="user" name="username" autocomplete="username" value="alice@example.com">
+        <input id="pass" type="password" name="password" autocomplete="current-password" value="s3cret-Value">
+        </form>
+        """
+
+    /// Waits up to five seconds for `condition`, which a message from the page makes true.
+    private func waitUntil(_ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !condition(), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    /// Runs the credential script's own report builder on the element with `id` and posts what it
+    /// returns to the message handler, the way the listener does once an event is trusted.
+    private func postReport(_ browser: SiteBrowser, element id: String, edit: String = "") async throws {
+        _ = try await browser.run(SiteBrowser.credentialHelpersScript + """
+
+            const message = credentialMessage(document.getElementById('\(id)'));
+            \(edit)
+            window.webkit.messageHandlers.\(SiteBrowser.credentialMessage).postMessage(message);
+            return 1;
+            """)
+    }
+
+    @Test("An input event a script dispatches is never reported as typed credentials", .timeLimit(.minutes(1)))
+    func untrustedInputIsNotReported() async throws {
+        let site = TestSite()
+        // The page's own script, which runs in the page's world, dispatches input events as the
+        // page loads.
+        site.route("/login", page: TestPages.page("Sign in", Self.signInForm, script: """
+            for (const id of ['user', 'pass']) {
+              const field = document.getElementById(id);
+              field.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+              field.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: 'x' }));
+            }
+            """))
+        let browser = credentialBrowser(site)
+        defer { browser.close() }
+        var received: [TypedCredential] = []
+        browser.credentialObserver = { received.append($0) }
+        _ = try await browser.open(url("https://example.com/login"))
+
+        // The isolated world, where the app's own fills run, dispatches too.
+        _ = try await browser.run("""
+            for (const id of ['user', 'pass']) {
+              const field = document.getElementById(id);
+              field.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+              field.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: 'x' }));
+            }
+            return 1;
+            """)
+        try await Task.sleep(for: .milliseconds(300))
+
+        #expect(received.isEmpty)
+        #expect(browser.droppedCredentials == 0)
+
+        // The channel is open: a report posted to the same handler reaches the observer, so
+        // silence above is the script's refusal and not a missing handler.
+        try await postReport(browser, element: "pass")
+        try await waitUntil { !received.isEmpty }
+        #expect(received.count == 1)
+        #expect(browser.droppedCredentials == 0)
+    }
+
+    @Test("A report posted from the main frame reaches the observer with what the page showed", .timeLimit(.minutes(1)))
+    func reportReachesObserver() async throws {
+        let site = TestSite()
+        site.route("/login", page: TestPages.page("Sign in", Self.signInForm))
+        let browser = credentialBrowser(site)
+        defer { browser.close() }
+        var received: [TypedCredential] = []
+        browser.credentialObserver = { received.append($0) }
+        _ = try await browser.open(url("https://example.com/login"))
+
+        try await postReport(browser, element: "user")
+        try await postReport(browser, element: "pass")
+        try await waitUntil { received.count == 2 }
+
+        try #require(received.count == 2)
+        let user = received[0]
+        #expect(user.kind == .username)
+        #expect(user.value == "alice@example.com")
+        #expect(user.field == FieldKey(name: "username", id: "user", autocomplete: "username", type: ""))
+        let pass = received[1]
+        #expect(pass.kind == .password)
+        #expect(pass.value == "s3cret-Value")
+        #expect(pass.field == FieldKey(
+            name: "password", id: "pass", autocomplete: "current-password", type: "password"
+        ))
+        for credential in received {
+            #expect(credential.origin == "https://example.com")
+            #expect(credential.path == "/login")
+            #expect(credential.actionHost == "example.com")
+            #expect(credential.passwordFields == 1)
+            #expect(credential.newPassword == false)
+        }
+        #expect(browser.droppedCredentials == 0)
+    }
+
+    @Test("A report that fails a check is counted and never reaches the observer", .timeLimit(.minutes(1)))
+    func failedReportIsDropped() async throws {
+        let site = TestSite()
+        site.route("/login", page: TestPages.page("Sign in", Self.signInForm))
+        let browser = credentialBrowser(site)
+        defer { browser.close() }
+        var received: [TypedCredential] = []
+        browser.credentialObserver = { received.append($0) }
+        _ = try await browser.open(url("https://example.com/login"))
+
+        // The origin the message claims is not the frame's.
+        try await postReport(browser, element: "pass", edit: "message.origin = 'https://evil.example.org';")
+        try await waitUntil { browser.droppedCredentials == 1 }
+        // A key a report does not have.
+        try await postReport(browser, element: "pass", edit: "message.extra = 'x';")
+        try await waitUntil { browser.droppedCredentials == 2 }
+        // A user name typed as a password.
+        try await postReport(browser, element: "user", edit: "message.kind = 'password';")
+        try await waitUntil { browser.droppedCredentials == 3 }
+
+        #expect(browser.droppedCredentials == 3)
+        #expect(received.isEmpty)
+
+        try await postReport(browser, element: "pass")
+        try await waitUntil { !received.isEmpty }
+        #expect(received.count == 1)
+        #expect(browser.droppedCredentials == 3)
+    }
+
+    @Test("A report posted after the browser closed is not delivered, and a closed browser takes none", .timeLimit(.minutes(1)))
+    func closedBrowserDeliversNothing() async throws {
+        let site = TestSite()
+        site.route("/login", page: TestPages.page("Sign in", Self.signInForm))
+        let browser = credentialBrowser(site)
+        var received: [TypedCredential] = []
+        browser.credentialObserver = { received.append($0) }
+        _ = try await browser.open(url("https://example.com/login"))
+        try await postReport(browser, element: "pass")
+        try await waitUntil { received.count == 1 }
+        #expect(received.count == 1)
+
+        browser.close()
+
+        #expect(browser.credentialObserver == nil)
+        let credential = try #require(typedCredential())
+        browser.noteCredential(credential)
+        #expect(received.count == 1)
+    }
+
+    @Test("A credential noted reaches the observer, and stops reaching it once the browser closes")
+    func noteCredential() throws {
+        let browser = SiteBrowser(
+            policy: .anyHTTPSHost,
+            dataStore: .nonPersistent(),
+            observation: .typingAndCredentials
+        )
+        defer { browser.close() }
+        var received: [TypedCredential] = []
+        browser.credentialObserver = { received.append($0) }
+        let credential = try #require(typedCredential())
+
+        browser.noteCredential(credential)
+        browser.noteCredential(credential)
+        #expect(received.count == 2)
+        #expect(received.first == credential)
+
+        browser.close()
+        browser.noteCredential(credential)
+        #expect(received.count == 2)
+        #expect(browser.credentialObserver == nil)
+    }
+
+    @Test("Only a browser made to observe credentials has the script and its handler", .timeLimit(.minutes(1)))
+    func observationLevels() async throws {
+        let site = TestSite()
+        site.route("/login", page: TestPages.page("Sign in", Self.signInForm))
+        let probe = """
+            const handlers = window.webkit && window.webkit.messageHandlers;
+            return {
+              credential: handlers ? typeof handlers.\(SiteBrowser.credentialMessage) : 'no handlers',
+              typing: handlers ? typeof handlers.\(SiteBrowser.typingMessage) : 'no handlers'
+            };
+            """
+
+        let levels: [(SiteBrowser.Observation, scripts: Int, credential: String, typing: String)] = [
+            (.none, 0, "no handlers", "no handlers"),
+            (.typing, 1, "undefined", "object"),
+            (.typingAndCredentials, 2, "object", "object"),
+        ]
+        for (observation, scripts, credential, typing) in levels {
+            let browser = credentialBrowser(site, observation: observation)
+            defer { browser.close() }
+            _ = try await browser.open(url("https://example.com/login"))
+
+            let installed = browser.webView.configuration.userContentController.userScripts
+            #expect(installed.count == scripts, "\(observation)")
+            let facts = try await browser.run(probe)
+            #expect(facts["credential"]?.string == credential, "\(observation)")
+            #expect(facts["typing"]?.string == typing, "\(observation)")
+
+            let credentialScripts = installed.filter { $0.source.contains(SiteBrowser.credentialMessage) }
+            #expect(credentialScripts.count == (observation == .typingAndCredentials ? 1 : 0), "\(observation)")
+            for script in credentialScripts {
+                #expect(script.isForMainFrameOnly)
+                #expect(script.injectionTime == .atDocumentStart)
+            }
+            for script in installed where !credentialScripts.contains(script) {
+                #expect(!script.isForMainFrameOnly)
+                #expect(script.injectionTime == .atDocumentStart)
+            }
+        }
+    }
+
+    @Test("The page's own world has no message handler to post to", .timeLimit(.minutes(1)))
+    func pageWorldHasNoHandler() async throws {
+        let site = TestSite()
+        site.route("/login", page: TestPages.page("Sign in", Self.signInForm))
+        let browser = credentialBrowser(site)
+        defer { browser.close() }
+        _ = try await browser.open(url("https://example.com/login"))
+
+        let reachable = try await browser.webView.evaluateJavaScript("""
+            typeof window.webkit === 'undefined' ? 'no webkit'
+              : typeof window.webkit.messageHandlers.\(SiteBrowser.credentialMessage)
+            """) as? String
+
+        // The page's world has no `window.webkit`, or has one with no such handler.
+        #expect(["no webkit", "undefined"].contains(reachable))
+    }
+
+    // MARK: The credential script's field rules
+
+    /// What the report builder returns for each element of `page`, by id, evaluated in the
+    /// isolated world the listener runs in. A field that is not reported is `null`.
+    private func reports(
+        for page: String,
+        script: String = ""
+    ) async throws -> (browser: SiteBrowser, kinds: [String: String]) {
+        let site = TestSite()
+        site.route("/login", page: TestPages.page("Sign in", page))
+        let browser = credentialBrowser(site)
+        _ = try await browser.open(url("https://example.com/login"))
+        let value = try await browser.run(SiteBrowser.credentialHelpersScript + """
+
+            \(script)
+            const kinds = {};
+            for (const input of document.querySelectorAll('input[id]')) {
+              const message = credentialMessage(input);
+              kinds[input.id] = message === null ? 'none' : message.kind;
+            }
+            return kinds;
+            """)
+        guard case let .object(object) = value else { return (browser, [:]) }
+        return (browser, object.compactMapValues { $0.string })
+    }
+
+    @Test("Only password fields and user name fields are reported, never a code field, a masked code or PIN, or any other", .timeLimit(.minutes(1)))
+    func fieldKinds() async throws {
+        let (browser, kinds) = try await reports(for: """
+            <input id="plain-user" name="username" value="u">
+            <input id="email-type" type="email" name="x" value="e@example.com">
+            <input id="password" type="password" name="p" value="p">
+            <input id="search" name="q" value="s">
+            <input id="code-by-token" name="user_code" autocomplete="one-time-code" value="123456">
+            <input id="code-by-word" name="userCode" value="123456">
+            <input id="masked-code" type="password" name="otp" autocomplete="one-time-code" value="123456">
+            <input id="masked-otp" type="password" name="otp" value="123456">
+            <input id="masked-pin" type="password" name="pin" value="1234">
+            <input id="masked-cvv" type="password" name="card_cvv" value="123">
+            <input id="masked-answer" type="password" name="securityAnswer" value="rex">
+            <input id="masked-memorable" type="password" name="memorableWord" value="word">
+            <input id="empty" name="username" value="">
+            <input id="empty-password" type="password" name="password" value="">
+            <input id="login-password" name="loginPassword" value="x">
+            <input id="current-password-text" name="user" autocomplete="current-password" value="x">
+            <input id="number-user" type="number" name="user" value="1">
+            <input id="checkbox-user" type="checkbox" name="user" value="1">
+            <input id="hidden-user" type="hidden" name="user" value="1">
+            """)
+        defer { browser.close() }
+
+        #expect(kinds == [
+            "plain-user": "username", "email-type": "username", "password": "password", "search": "none",
+            "code-by-token": "none", "code-by-word": "none", "masked-code": "none", "masked-otp": "none",
+            "masked-pin": "none", "masked-cvv": "none", "masked-answer": "none", "masked-memorable": "none",
+            "empty": "clear", "empty-password": "clear",
+            "login-password": "none", "current-password-text": "none", "number-user": "none",
+            "checkbox-user": "none", "hidden-user": "none",
+        ])
+    }
+
+    @Test("A password field that a toggle turned into a text input is still a password", .timeLimit(.minutes(1)))
+    func toggledPassword() async throws {
+        let site = TestSite()
+        site.route("/login", page: TestPages.page("Sign in", """
+            <input id="toggled" type="password" name="loginPassword" value="pw">
+            <input id="never-password" type="text" name="loginPassword" value="pw">
+            """))
+        let browser = credentialBrowser(site)
+        defer { browser.close() }
+        _ = try await browser.open(url("https://example.com/login"))
+
+        let reports = try await browser.run(SiteBrowser.credentialHelpersScript + """
+
+            document.getElementById('toggled').type = 'text';
+            await Promise.resolve();
+            return {
+              toggled: credentialMessage(document.getElementById('toggled')),
+              never: credentialMessage(document.getElementById('never-password'))
+            };
+            """)
+
+        #expect(reports["toggled"]?["kind"]?.string == "password")
+        #expect(reports["toggled"]?["type"]?.string == "password")
+        #expect(reports["toggled"]?["name"]?.string == "loginPassword")
+        #expect(reports["never"] == .null)
+    }
+
+    @Test("The report names the field as the page spells it, and counts the page's passwords", .timeLimit(.minutes(1)))
+    func reportFacts() async throws {
+        let site = TestSite()
+        site.route("/login", page: TestPages.page("Sign in", """
+            <form action="https://login.example.com/session" method="post">
+            <input id="user" name="user" autocomplete="  Section-Login USERNAME " value="alice">
+            <input id="current" type="password" name="current" value="old">
+            <input id="next" type="password" name="next" autocomplete="new-password" value="new">
+            <input name="action" value="clobber">
+            </form>
+            """))
+        let browser = credentialBrowser(site)
+        defer { browser.close() }
+        _ = try await browser.open(url("https://example.com/login"))
+
+        let user = try await browser.run(SiteBrowser.credentialHelpersScript
+            + "\nreturn credentialMessage(document.getElementById('user'));")
+        let current = try await browser.run(SiteBrowser.credentialHelpersScript
+            + "\nreturn credentialMessage(document.getElementById('current'));")
+
+        #expect(user["kind"]?.string == "username")
+        #expect(user["autocomplete"]?.string == "section-login username")
+        #expect(user["type"]?.string == "")
+        #expect(user["actionHost"]?.string == "login.example.com")
+        #expect(user["passwordFields"]?.int == 2)
+        #expect(user["newPassword"]?.bool == true)
+        #expect(current["kind"]?.string == "password")
+        #expect(current["autocomplete"]?.string == "")
+        #expect(current["newPassword"]?.bool == true)
+        // The named input `action` shadows the form's `action` property, not its attribute.
+        #expect(current["actionHost"]?.string == "login.example.com")
+    }
+
+    @Test("The action host is the host of the form's own https action, and empty otherwise", .timeLimit(.minutes(1)))
+    func actionHosts() async throws {
+        let cases: [(String, String)] = [
+            ("action=\"https://login.example.com/session\"", "login.example.com"),
+            ("action=\"/session\"", "example.com"),
+            ("", "example.com"),
+            ("action=\"http://example.com/session\"", ""),
+            ("action=\"javascript:void(0)\"", ""),
+            ("action=\"https://[bad\"", ""),
+        ]
+        for (attribute, expected) in cases {
+            let site = TestSite()
+            site.route("/login", page: TestPages.page("Sign in", """
+                <form \(attribute) method="post"><input id="pass" type="password" value="p"></form>
+                <input id="loose" type="password" value="q">
+                """))
+            let browser = credentialBrowser(site)
+            defer { browser.close() }
+            _ = try await browser.open(url("https://example.com/login"))
+
+            let inForm = try await browser.run(SiteBrowser.credentialHelpersScript
+                + "\nreturn credentialMessage(document.getElementById('pass'));")
+            let outside = try await browser.run(SiteBrowser.credentialHelpersScript
+                + "\nreturn credentialMessage(document.getElementById('loose'));")
+
+            #expect(inForm["actionHost"]?.string == expected, "\(attribute)")
+            #expect(outside["actionHost"]?.string == "", "a field with no form")
+        }
+    }
+
+    @Test("The path is the page's own, which a change of address by script moves", .timeLimit(.minutes(1)))
+    func pathFollowsThePage() async throws {
+        let site = TestSite()
+        site.route("/login", page: TestPages.page("Sign in", Self.signInForm))
+        let browser = credentialBrowser(site)
+        defer { browser.close() }
+        _ = try await browser.open(url("https://example.com/login"))
+
+        let message = try await browser.run(SiteBrowser.credentialHelpersScript + """
+
+            history.pushState(null, '', '/login/step-two?x=1#y');
+            return credentialMessage(document.getElementById('pass'));
+            """)
+
+        #expect(message["path"]?.string == "/login/step-two")
+        #expect(message["origin"]?.string == "https://example.com")
+    }
+
+    @Test("A page with more password inputs than a report counts reports the cap, and a long value is not reported", .timeLimit(.minutes(1)))
+    func capsAndLongValues() async throws {
+        let site = TestSite()
+        let passwords = (1...12).map { "<input id=\"p\($0)\" type=\"password\" value=\"x\">" }.joined()
+        site.route("/login", page: TestPages.page("Sign in", passwords))
+        let browser = credentialBrowser(site)
+        defer { browser.close() }
+        _ = try await browser.open(url("https://example.com/login"))
+
+        let message = try await browser.run(SiteBrowser.credentialHelpersScript
+            + "\nreturn credentialMessage(document.getElementById('p1'));")
+        #expect(message["passwordFields"]?.int == TypedCredential.maximumPasswordFields)
+
+        let lengths = try await browser.run(SiteBrowser.credentialHelpersScript + """
+
+            const field = document.getElementById('p1');
+            const results = [];
+            for (const length of [16384, 16385]) {
+              field.value = 'x'.repeat(length);
+              const message = credentialMessage(field);
+              results.push(message === null ? -1 : message.value.length);
+            }
+            return results;
+            """)
+        #expect(lengths.array?.compactMap { $0.int } == [16384, -1])
+    }
+
+    @Test("The script's user name and code rules reach the same verdicts as the rules the sign-in uses", .timeLimit(.minutes(1)))
+    func scriptAgreesWithSignInRules() async throws {
+        struct Hints {
+            var name = ""
+            var id = ""
+            var autocomplete = ""
+            var type = ""
+            var inputMode = ""
+            var maxLength: Int?
+        }
+        let rows: [Hints] = [
+            Hints(name: "username"),
+            Hints(id: "user-email"),
+            Hints(autocomplete: "email"),
+            Hints(autocomplete: "username"),
+            Hints(type: "email"),
+            Hints(name: "memberNumber"),
+            Hints(name: "accountId", type: "text"),
+            Hints(name: "LOGIN"),
+            Hints(name: "q"),
+            Hints(name: "user", type: "search"),
+            Hints(name: "user", type: "number"),
+            Hints(name: "user", type: "url"),
+            Hints(name: "user", type: "tel"),
+            Hints(name: "user_code"),
+            Hints(name: "userCode"),
+            Hints(name: "userPromoCode"),
+            Hints(name: "zip_code_user"),
+            Hints(name: "user", autocomplete: "one-time-code"),
+            Hints(name: "user", inputMode: "numeric", maxLength: 6),
+            Hints(name: "user", inputMode: "numeric", maxLength: 4),
+            Hints(name: "user", inputMode: "numeric", maxLength: 8),
+            Hints(name: "user", inputMode: "numeric", maxLength: 9),
+            Hints(name: "user", inputMode: "numeric", maxLength: 3),
+            Hints(name: "user", inputMode: "text", maxLength: 6),
+            Hints(name: "user_pin"),
+            Hints(name: "userpin"),
+            Hints(name: "2fa_user"),
+            Hints(name: "user", id: "mfa"),
+            Hints(name: "token_user"),
+            Hints(name: "verify-user"),
+            Hints(name: "verified_user"),
+            Hints(name: "user", id: "opinion"),
+            Hints(name: "shipping_email"),
+            Hints(name: "user_phone", type: "tel"),
+            Hints(name: "email", id: "referral"),
+            Hints(name: "x", type: "password"),
+            Hints(name: "user", type: "password"),
+            Hints(name: "password", type: "password"),
+            Hints(name: "otp", type: "password"),
+            Hints(id: "pin", type: "password"),
+            Hints(name: "user_pin", type: "password"),
+            Hints(name: "passcode", type: "password"),
+            Hints(name: "pass_code", type: "password"),
+            Hints(name: "cardCvv", type: "password"),
+            Hints(name: "cvc2", type: "password"),
+            Hints(name: "memorable-word", type: "password"),
+            Hints(name: "securityAnswer", type: "password"),
+            Hints(name: "answer", type: "password"),
+            Hints(name: "zip_pin", type: "password"),
+            Hints(name: "promo_code", type: "password"),
+            Hints(name: "opinion", type: "password"),
+            Hints(name: "secured", type: "password"),
+        ]
+        let site = TestSite()
+        site.route("/login", page: TestPages.page("Sign in", "<p>fields</p>"))
+        let browser = credentialBrowser(site)
+        defer { browser.close() }
+        _ = try await browser.open(url("https://example.com/login"))
+
+        let arguments: [[String: Any]] = rows.map { row in
+            [
+                "name": row.name, "id": row.id, "autocomplete": row.autocomplete, "type": row.type,
+                "inputmode": row.inputMode, "maxlength": row.maxLength.map(String.init) ?? "",
+            ]
+        }
+        let result = try await browser.run(SiteBrowser.credentialHelpersScript + """
+
+            const kinds = [];
+            for (const row of rows) {
+              const input = document.createElement('input');
+              for (const key of ['name', 'id', 'autocomplete', 'type', 'inputmode', 'maxlength']) {
+                if (row[key] !== '') input.setAttribute(key, row[key]);
+              }
+              input.value = '1';
+              document.body.appendChild(input);
+              const message = credentialMessage(input);
+              kinds.push(message === null ? 'none' : message.kind);
+            }
+            return kinds;
+            """, arguments: ["rows": arguments])
+        let kinds = try #require(result.array?.compactMap { $0.string })
+        try #require(kinds.count == rows.count)
+
+        for (row, kind) in zip(rows, kinds) {
+            let field = ProbedField(
+                key: FieldKey(name: row.name, id: row.id, autocomplete: row.autocomplete, type: row.type),
+                inputMode: row.inputMode,
+                maxLength: row.maxLength
+            )
+            let page = PageProbe(
+                origin: "https://example.com", path: "/login", isSecureTopFrame: true,
+                hasChallenge: false, fields: [field]
+            )
+            let expected: String
+            if row.type == "password" {
+                expected = SignInRules.isMaskedNonPassword(field.key) ? "none" : "password"
+            } else {
+                expected = SignInRules.showsUserNameField(page) ? "username" : "none"
+            }
+            #expect(kind == expected, "\(row)")
+        }
+        #expect(kinds.filter { $0 == "username" }.count >= 10)
+        #expect(kinds.filter { $0 == "none" }.count >= 10)
+        #expect(kinds.filter { $0 == "password" }.count >= 6)
+    }
+
+    @Test("An emptied field is reported as a clear that names the field and page and carries no value", .timeLimit(.minutes(1)))
+    func clearReport() async throws {
+        let site = TestSite()
+        site.route("/login", page: TestPages.page("Sign in", Self.signInForm))
+        let browser = credentialBrowser(site)
+        defer { browser.close() }
+        var received: [TypedCredential] = []
+        browser.credentialObserver = { received.append($0) }
+        _ = try await browser.open(url("https://example.com/login"))
+
+        try await postReport(browser, element: "pass")
+        try await waitUntil { !received.isEmpty }
+        #expect(received.first?.kind == .password)
+
+        let message = try await browser.run(SiteBrowser.credentialHelpersScript + """
+
+            const field = document.getElementById('pass');
+            field.value = '';
+            return credentialMessage(field);
+            """)
+        #expect(message["kind"]?.string == "clear")
+        #expect(message["value"] == nil)
+        #expect(message["type"]?.string == "password")
+        #expect(message["path"]?.string == "/login")
+
+        try await postReport(browser, element: "pass")
+        try await waitUntil { received.count == 2 }
+        #expect(received.last?.kind == .cleared)
+        #expect(received.last?.field == FieldKey(name: "password", id: "pass", autocomplete: "current-password", type: "password"))
+        #expect(browser.droppedCredentials == 0)
+    }
+
+    @Test("What the page's own scripts do to prototypes and form names leaves a report unchanged", .timeLimit(.minutes(1)))
+    func pageWorldTampering() async throws {
+        let site = TestSite()
+        site.route("/login", page: TestPages.page("Sign in", """
+            <form id="f" method="post" action="https://example.com/session">
+            <input id="user" name="username" autocomplete="username" value="alice@example.com">
+            <input id="pass" type="password" name="password" autocomplete="current-password" value="s3cret-Value">
+            <input name="action" value="https://evil.test/steal">
+            <input name="id" value="clobbered">
+            </form>
+            """, script: """
+            const valueDescriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+            Object.defineProperty(HTMLInputElement.prototype, 'value', {
+              get() { return 'patched-value'; },
+              set(v) { valueDescriptor.set.call(this, v); },
+              configurable: true
+            });
+            Object.defineProperty(HTMLInputElement.prototype, 'type', { get() { return 'text'; }, configurable: true });
+            Element.prototype.getAttribute = function () { return 'patched-attribute'; };
+            Document.prototype.querySelectorAll = function () { return []; };
+            Object.defineProperty(Document.prototype, 'URL', { get() { return 'https://evil.test/'; }, configurable: true });
+            try { window.webkit = { messageHandlers: {} }; } catch (error) {}
+            for (const id of ['user', 'pass']) {
+              const field = document.getElementById(id);
+              field.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            }
+            window.pageWorldPatched = true;
+            """))
+        let browser = credentialBrowser(site)
+        defer { browser.close() }
+        var received: [TypedCredential] = []
+        browser.credentialObserver = { received.append($0) }
+        _ = try await browser.open(url("https://example.com/login"))
+        let patched = try await browser.webView.evaluateJavaScript(
+            "document.getElementById('pass').value + '|' + (window.pageWorldPatched === true)"
+        ) as? String
+        #expect(patched == "patched-value|true")
+
+        let user = try await browser.run(SiteBrowser.credentialHelpersScript
+            + "\nreturn credentialMessage(document.getElementById('user'));")
+        let pass = try await browser.run(SiteBrowser.credentialHelpersScript
+            + "\nreturn credentialMessage(document.getElementById('pass'));")
+
+        #expect(user["kind"]?.string == "username")
+        #expect(user["value"]?.string == "alice@example.com")
+        #expect(user["name"]?.string == "username")
+        #expect(pass["kind"]?.string == "password")
+        #expect(pass["value"]?.string == "s3cret-Value")
+        #expect(pass["name"]?.string == "password")
+        #expect(pass["id"]?.string == "pass")
+        #expect(pass["actionHost"]?.string == "example.com")
+        #expect(pass["passwordFields"]?.int == 1)
+        #expect(received.isEmpty)
+        #expect(browser.droppedCredentials == 0)
     }
 }

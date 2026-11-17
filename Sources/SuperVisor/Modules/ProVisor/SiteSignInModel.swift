@@ -14,6 +14,21 @@ import Foundation
 ///
 /// Done saves through `SiteAccessCenter.save`, which is what settles a request for the site and
 /// owes the pass that was waiting on it; this model starts nothing else.
+///
+/// **A window may offer to keep the password the person typed** (`recordsCredentials`): only
+/// when the setting allows it and the page opened by itself at an address the app vouches for.
+/// A window that asks for the address never records and never offers. Such a window is given an
+/// enrollment that records (`SiteEnrollment.recordingCredentials`); Done saves the session as
+/// any window does, then, if the setting still allows it, shows the enrollment's offer or,
+/// unless nothing was typed, why there is none (`panel`), and the window stays open until the
+/// person answers. Keep Password stores a grant that signs in by itself (`keepPassword`). Every
+/// other way out ends the enrollment, which forgets what was typed, and leaves the session as
+/// saved; so does an offer left unanswered for `offerTimeout`. Whenever no offer is shown, the
+/// enrollment's judgement of what was typed is discarded at once.
+///
+/// While an offer shows, follow-up passes are held back (`FollowUpHolding`), since keeping the
+/// password saves the site again and a save closes the visits open on it; the hold lasts until
+/// the enrollment ends. A refusal is followed by no second save, so it holds nothing.
 @MainActor
 final class SiteSignInModel: ObservableObject {
     /// How the window starts.
@@ -59,7 +74,34 @@ final class SiteSignInModel: ObservableObject {
 
     enum DoneOutcome: Equatable {
         case notSaved
+        /// Saved, and nothing more to ask: the window closes.
         case saved
+        /// Saved, and the panel asks about the password: the window stays open.
+        case savedAndAsking
+    }
+
+    enum KeepOutcome: Equatable {
+        case notKept
+        case kept
+    }
+
+    /// What replaces the lower part of the window once the session is saved.
+    enum Panel: Equatable {
+        /// Asks whether to keep the password, showing the user name as typed (nil when none
+        /// was) and the host the password was typed on. The password itself is never shown.
+        case offer(siteName: String, username: String?, host: String)
+        /// Says why no password is offered.
+        case refused(OfferRefusal)
+
+        /// The panel for what the enrollment's save found, or nil when there is nothing to say:
+        /// no offer, and no password typed.
+        static func of(offer: PasswordOffer?, refusal: OfferRefusal?, siteName: String) -> Panel? {
+            if let offer {
+                return .offer(siteName: siteName, username: offer.usernameText, host: offer.passwordHost)
+            }
+            guard let refusal, refusal != .nothingTyped else { return nil }
+            return .refused(refusal)
+        }
     }
 
     /// The granted site a save would be stored as, if any.
@@ -98,6 +140,21 @@ final class SiteSignInModel: ObservableObject {
 
     static let instruction = "Sign in on the page, then press Done."
 
+    static let recordingCaption = "SuperVisor can offer to keep the password you type here."
+
+    static func offerQuestion(siteName: String) -> String {
+        "Keep your password in the Keychain so SuperVisor can sign in to \(siteName) by itself?"
+    }
+
+    static let noUsernameTyped = "No user name typed"
+
+    /// Whether a window that starts at `start` records what the person types: only when the
+    /// setting allows it and the page opens by itself at an address the app vouches for.
+    static func recordsCredentials(start: Start, offersPasswords: Bool) -> Bool {
+        guard offersPasswords, case .opensPage = start else { return false }
+        return true
+    }
+
     /// The site asked for: a granted site's id, or the host a request named.
     let host: String
     /// The proposal that asked for the site, if any.
@@ -108,6 +165,8 @@ final class SiteSignInModel: ObservableObject {
     let sentence: String?
     /// The sentence names a host the app cannot vouch for.
     let sentenceIsCaution: Bool
+    /// Whether the window records what the person types and may offer to keep the password.
+    let recordsCredentials: Bool
 
     /// The address field, shown only when the window asks for the address.
     @Published var address = ""
@@ -116,6 +175,9 @@ final class SiteSignInModel: ObservableObject {
     @Published private(set) var isWorking = false
     /// Whether a page has been opened for the person to sign in on.
     @Published private(set) var hasOpenedPage = false
+    /// Shown once the session is saved, in place of Done; nil before, and when there is
+    /// nothing to ask.
+    @Published private(set) var panel: Panel?
 
     /// The granted site's record, whose name a new sign-in is given.
     private let record: SiteRecord?
@@ -124,14 +186,37 @@ final class SiteSignInModel: ObservableObject {
     /// The grant and record `finishKeepingSession` returned, kept until they are stored so a
     /// failed save can be tried again without signing in again.
     private var finished: (grant: SiteGrant, record: SiteRecord)?
+    /// The session grant and record Done stored, which Keep Password builds on.
+    private var savedSession: (grant: SiteGrant, record: SiteRecord)?
+    private let followUps: any FollowUpHolding
+    private let offerTimeout: Duration
+    /// The wait for an answer to the offer on screen.
+    private var offerExpiry: Task<Void, Never>?
+
+    /// How long an offer waits for an answer before it ends as Session Only.
+    static let standardOfferTimeout: Duration = .seconds(300)
 
     /// `record` is the granted site's record, nil for a host that is not granted. `needsPerson`
     /// says the site is flagged as needing the person or a run was turned away from it.
-    init(host: String, record: SiteRecord?, start: Start, proposalID: String?, needsPerson: Bool) {
+    /// `offersPasswords` is the setting that allows an offer, and `followUps` what an offer on
+    /// screen holds back.
+    init(
+        host: String,
+        record: SiteRecord?,
+        start: Start,
+        proposalID: String?,
+        needsPerson: Bool,
+        offersPasswords: Bool,
+        followUps: any FollowUpHolding,
+        offerTimeout: Duration = SiteSignInModel.standardOfferTimeout
+    ) {
         self.host = host
         self.record = record
         self.start = start
         self.proposalID = proposalID
+        self.followUps = followUps
+        self.offerTimeout = offerTimeout
+        recordsCredentials = Self.recordsCredentials(start: start, offersPasswords: offersPasswords)
         if let record {
             title = "Sign in to \(record.name)"
             if needsPerson {
@@ -173,9 +258,10 @@ final class SiteSignInModel: ObservableObject {
         return SiteSaveProblem.invalidAddress.message
     }
 
-    /// Done can always be pressed once a page is open, except while a page opens or a save runs.
+    /// Done can always be pressed once a page is open, except while a page opens or a save
+    /// runs, and once the panel shows.
     var canPressDone: Bool {
-        hasOpenedPage && !isWorking
+        hasOpenedPage && !isWorking && panel == nil
     }
 
     /// Whether the page that opened by itself failed to load, which Try Again answers.
@@ -292,13 +378,90 @@ final class SiteSignInModel: ObservableObject {
             problem = .hasSavedPassword
             return .notSaved
         }
+
+        // The setting is read again here, so turning it off while the window is open stops an
+        // offer that has not been shown.
+        let panel = recordsCredentials && enrollment.recordsCredentials && center.offersPasswords
+            ? Panel.of(offer: enrollment.passwordOffer, refusal: enrollment.offerRefusal, siteName: result.record.name)
+            : nil
+        let offers = if case .offer = panel { true } else { false }
+        // The hold is taken before the save, which is what owes a follow-up pass.
+        let hold = offers ? holdFollowUps(until: enrollment) : nil
         do {
             try center.save(grant: result.grant, record: result.record)
         } catch {
+            if let hold { followUps.releaseFollowUps(hold) }
             problem = .notSaved
             return .notSaved
         }
         finished = nil
-        return .saved
+        if !offers { enrollment.discardOffer() }
+        guard let panel else { return .saved }
+        savedSession = result
+        self.panel = panel
+        if offers { expireOffer(after: offerTimeout, ending: enrollment) }
+        return .savedAndAsking
+    }
+
+    /// Ends `enrollment` as Session Only does once `timeout` passes with the offer unanswered.
+    /// The wait is called off when the enrollment ends any other way.
+    private func expireOffer(after timeout: Duration, ending enrollment: SiteEnrollment) {
+        offerExpiry?.cancel()
+        let expiry = Task { [weak self, weak enrollment] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled, let self, case .offer = self.panel, let enrollment, !enrollment.isCancelled
+            else { return }
+            AppLog.notice(.sites, "password offer unanswered for \(self.host); kept the session only")
+            enrollment.cancel()
+        }
+        offerExpiry = expiry
+        enrollment.whenEnded { expiry.cancel() }
+    }
+
+    // MARK: Keeping the password
+
+    /// Keep Password: stores a grant that signs in by itself with the password the person
+    /// typed (`SiteEnrollment.passwordGrant(upgrading:)`) in place of the session Done saved.
+    /// It stores nothing unless the panel offers the password, the enrollment is live, and the
+    /// site is still the kept session Done saved; a refusal or a failed save shows `notSaved`
+    /// and leaves the panel and the session as they were.
+    func keepPassword(using enrollment: SiteEnrollment, into center: SiteAccessCenter) -> KeepOutcome {
+        guard case .offer = panel, let savedSession, !isWorking, !enrollment.isCancelled else {
+            return .notKept
+        }
+        problem = nil
+        guard case let .keptSession(existing) = Destination.of(
+            savedSession.record.id,
+            sites: center.access.sites(),
+            grant: center.storedGrant
+        ),
+            let grant = try? enrollment.passwordGrant(upgrading: savedSession.grant)
+        else {
+            problem = .notSaved
+            return .notKept
+        }
+        var record = savedSession.record
+        record.name = existing.name
+        record.added = existing.added
+        record.keepsSessionOnly = false
+        do {
+            try center.save(grant: grant, record: record)
+        } catch {
+            problem = .notSaved
+            return .notKept
+        }
+        offerExpiry?.cancel()
+        offerExpiry = nil
+        AppLog.notice(.sites, "password kept for \(record.id)")
+        return .kept
+    }
+
+    /// Holds follow-up passes back until `enrollment` ends, however it ends.
+    private func holdFollowUps(until enrollment: SiteEnrollment) -> FollowUpHolds.Token {
+        let token = followUps.holdFollowUps()
+        enrollment.whenEnded { [followUps] in
+            followUps.releaseFollowUps(token)
+        }
+        return token
     }
 }

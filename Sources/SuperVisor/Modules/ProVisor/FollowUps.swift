@@ -132,6 +132,49 @@ struct FollowUpDemand: Equatable {
     }
 }
 
+/// Holds that keep follow-up passes from starting, counted, so that each holder lifts only its
+/// own. A pass owed while any hold stands waits for the last to be lifted.
+///
+/// The sign-in window holds them while it offers to keep a password, and only then: keeping it
+/// saves the site again, and a save closes every visit open on the site, which would cut off a
+/// pass already reading it.
+struct FollowUpHolds: Equatable {
+    struct Token: Hashable, Sendable {
+        fileprivate let id: Int
+    }
+
+    private var held: Set<Int> = []
+    private var next = 0
+
+    var isHeld: Bool { !held.isEmpty }
+
+    mutating func take() -> Token {
+        next += 1
+        held.insert(next)
+        return Token(id: next)
+    }
+
+    /// Lifts the hold `token` names, and returns whether that lifted the last one. A token
+    /// already released, or released by `releaseAll`, lifts nothing.
+    @discardableResult
+    mutating func release(_ token: Token) -> Bool {
+        guard held.remove(token.id) != nil else { return false }
+        return held.isEmpty
+    }
+
+    /// Lifts every hold. Tokens taken before it lift nothing afterwards.
+    mutating func releaseAll() {
+        held.removeAll()
+    }
+}
+
+/// What can hold follow-up passes back (`FollowUpHolds`).
+@MainActor
+protocol FollowUpHolding: AnyObject {
+    func holdFollowUps() -> FollowUpHolds.Token
+    func releaseFollowUps(_ token: FollowUpHolds.Token)
+}
+
 /// A calendar day in the user's time zone.
 struct LocalDay: Comparable, Equatable, Sendable {
     let year: Int

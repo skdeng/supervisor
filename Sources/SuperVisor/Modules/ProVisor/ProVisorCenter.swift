@@ -17,7 +17,7 @@ import Foundation
 /// A singleton because Settings needs the live state and reaches no module instance: the
 /// registry builds a second, never-activated set of modules just to list their names.
 @MainActor
-final class ProVisorCenter: ObservableObject {
+final class ProVisorCenter: ObservableObject, FollowUpHolding {
     static let shared = ProVisorCenter()
 
     /// How the most recent scouting pass ended.
@@ -80,6 +80,8 @@ final class ProVisorCenter: ObservableObject {
     private var followUpTask: Task<Void, Never>?
     private var followUpLedger: FollowUpLedger
     private var followUpDemand = FollowUpDemand()
+    /// While any hold stands, no follow-up pass starts (`holdFollowUps`).
+    private var followUpHolds = FollowUpHolds()
     /// Whether the follow-up pass in progress, or the last one, reached the point of starting
     /// its agent process.
     private var followUpLaunched = false
@@ -279,6 +281,7 @@ final class ProVisorCenter: ObservableObject {
         bridge.stop()
 
         followUpDemand = FollowUpDemand()
+        followUpHolds.releaseAll()
         pendingActs = []
         queuedIDs = []
         actingID = nil
@@ -497,16 +500,19 @@ final class ProVisorCenter: ObservableObject {
     // MARK: - Follow-up passes
 
     /// Arms the one timer for the next follow-up pass: it fires when a pass that is owed may
-    /// start, and is dropped when none is owed or a scouting or follow-up pass is running, whose
-    /// end arms it again. A pass is owed for a due note, or after the person signed in to a
+    /// start, and is dropped when none is owed, a scouting or follow-up pass is running, whose
+    /// end arms it again, or a hold stands (`holdFollowUps`), whose release does. A pass is owed for a due note, or after the person signed in to a
     /// site that something was waiting on (`FollowUpDemand`); the latter starts on its own
     /// schedule (`FollowUpSchedule.nextStartAfterGrant`). It is evaluated again whenever
     /// something that decides it changes: a reviewed run, a scouting pass, or a follow-up pass
-    /// finishes, a site is signed in to, the Mac wakes, or the center starts.
+    /// finishes, a site is signed in to, the last hold is released, the Mac wakes, or the center
+    /// starts.
     private func armFollowUp() {
         cancelFollowUp()
         let now = Date()
-        guard isActive, !isScouting, !isFollowingUp, isFollowUpOwed(now: now) else { return }
+        guard isActive, !isScouting, !isFollowingUp, !followUpHolds.isHeld, isFollowUpOwed(now: now) else {
+            return
+        }
         scheduleFollowUp(at: nextFollowUpStart(now: now), from: now)
     }
 
@@ -515,7 +521,9 @@ final class ProVisorCenter: ObservableObject {
     /// between passes, whichever schedule the pass was owed on.
     private func retryFollowUp(after attempt: Date) {
         cancelFollowUp()
-        guard isActive, !isScouting, !isFollowingUp, isFollowUpOwed(now: attempt) else { return }
+        guard isActive, !isScouting, !isFollowingUp, !followUpHolds.isHeld, isFollowUpOwed(now: attempt) else {
+            return
+        }
         let start = FollowUpSchedule.nextStart(
             now: attempt,
             last: attempt,
@@ -551,6 +559,21 @@ final class ProVisorCenter: ObservableObject {
                 readable: { FollowUpNotes.isReadable($0, granted: granted, awaiting: awaiting) }
             )
         )
+    }
+
+    /// Keeps follow-up passes from starting until the token is released (`FollowUpHolds`). A
+    /// pass already waiting to start is called off and armed again on release.
+    func holdFollowUps() -> FollowUpHolds.Token {
+        let token = followUpHolds.take()
+        cancelFollowUp()
+        return token
+    }
+
+    /// Lifts the hold `token` names; once none stands, a pass that is owed is armed.
+    func releaseFollowUps(_ token: FollowUpHolds.Token) {
+        if followUpHolds.release(token) {
+            armFollowUp()
+        }
     }
 
     /// Asks for a follow-up pass after the person signed in to `siteID`, which something was
@@ -637,7 +660,8 @@ final class ProVisorCenter: ObservableObject {
     /// running when the timer fires holds it back to a later time. The scouting report in
     /// Settings is left as it was.
     private func startFollowUp() {
-        guard isActive else { return }
+        // Releasing the last hold arms the timer again.
+        guard isActive, !followUpHolds.isHeld else { return }
         guard !isScouting, !isFollowingUp else {
             armFollowUp()
             return

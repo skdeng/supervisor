@@ -151,10 +151,21 @@ final class SiteAccessCenter: ObservableObject {
         if status != textsStatus { textsStatus = status }
     }
 
-    /// An enrollment for the Add Site window, signing in with this center's code sources.
+    /// An enrollment for the site window, signing in with this center's code sources. It
+    /// records nothing the person types.
     func makeEnrollment() -> SiteEnrollment {
         SiteEnrollment(dataStore: dataStore, codes: codes)
     }
+
+    /// An enrollment for the sign-in window that records the user name and password the person
+    /// types, so that a saved session can be offered a password
+    /// (`SiteEnrollment.recordingCredentials`).
+    func makeRecordingEnrollment() -> SiteEnrollment {
+        SiteEnrollment.recordingCredentials(dataStore: dataStore, codes: codes)
+    }
+
+    /// Whether the sign-in window may offer to keep a password the person typed.
+    var offersPasswords: Bool { settings.provisorOffersPasswords }
 
     /// The saved grant for a site, for signing in to it again. It holds the password.
     func storedGrant(for siteID: String) -> SiteGrant? {

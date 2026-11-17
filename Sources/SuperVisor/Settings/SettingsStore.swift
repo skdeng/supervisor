@@ -27,6 +27,7 @@ public final class SettingsStore: ObservableObject {
         static let swarmJumpHotKey = "swarm.jumpHotKey"
         static let provisorScoutHours = "provisor.scoutHours"
         static let provisorReadTexts = "provisor.readTexts"
+        static let provisorOfferPasswords = "provisor.offerPasswords"
     }
 
     /// Modules that stay off until the user turns them on. ProVisor reads the user's mail and
@@ -104,6 +105,13 @@ public final class SettingsStore: ObservableObject {
         didSet { defaults.set(provisorReadsTexts, forKey: Key.provisorReadTexts) }
     }
 
+    /// ProVisor: whether the sign-in window records what the person types into a site's user
+    /// name and password fields, so that after they sign in it can offer to keep the password
+    /// in the Keychain.
+    @Published public var provisorOffersPasswords: Bool {
+        didSet { defaults.set(provisorOffersPasswords, forKey: Key.provisorOfferPasswords) }
+    }
+
     /// Per-module enabled flags, keyed by `moduleID`. Absent ids default to enabled, except
     /// opt-in modules.
     @Published public private(set) var moduleEnabled: [String: Bool]
@@ -135,6 +143,8 @@ public final class SettingsStore: ObservableObject {
             .flatMap { Self.provisorScoutHourChoices.contains($0) ? $0 : nil } ?? 6
         self.provisorReadsTexts =
             (defaults.object(forKey: Key.provisorReadTexts) as? Bool) ?? false
+        self.provisorOffersPasswords =
+            (defaults.object(forKey: Key.provisorOfferPasswords) as? Bool) ?? true
 
         // Reconstruct the per-module map from any persisted keys.
         var map: [String: Bool] = [:]

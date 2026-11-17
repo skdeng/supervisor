@@ -516,13 +516,13 @@ sink. Preserve these guards when touching the relevant code:
   it) is taken back uncounted. A site gets three unattended attempts a local day, counted in
   `sites.json` *before* the sign-in starts so that one that cannot be recorded is never made,
   and one sign-in at a time across runs.
-- **Save stores only a sign-in the app filled itself** (`SiteEnrollment`, `SiteFormModel`). The
-  grant is built from the password handed to the sign-in, and `finish` refuses unless the app
+- **The Add Site form saves only a sign-in the app filled itself** (`SiteEnrollment`,
+  `SiteFormModel`). The grant is built from the password handed to the sign-in, and `finish` refuses unless the app
   filled that password (`passwordNotFilled`) and the sign-in then left the password form with no
   later page asking for it again and no typing by the person into a password field in the page
   (`passwordNotConfirmed`; an isolated-world listener reports each trusted input event, never
   one the app dispatched, as the kind of field it hit, password or other, and never what was
-  typed). Either way it saves
+  typed, in every window but the sign-in window described next). Either way it saves
   nothing, since it has no sign-in to replay or cannot tell which password worked, and the form
   asks for the working password. Save is open only while the form still shows exactly what the last Open Page or Sign
   In started with. The start page, browse hosts, and fill hosts are what the sign-in observed,
@@ -530,6 +530,50 @@ sink. Preserve these guards when touching the relevant code:
   the hosts recorded for that site**, into a form that sends to one of them; on any other host
   it stops (`unvettedHost`) and asks for the secret to be typed. A texted or emailed code the
   site never asked for is saved as no code, and the window says so.
+- **A password the person typed is kept only on their say, and only for the page it was typed
+  on** (`TypedCredential`, `CredentialCapture`, `PasswordOffer`). The sign-in window can offer
+  to keep the password typed into a site's own page, so the app can sign in again by itself.
+  This is the one place a secret travels from a page into the app, and the one stored sign-in
+  the app did not fill, so each step is bounded:
+  - **Recording is on only in the sign-in window, only for an address something vouched for**
+    (a granted site's saved address, or a host the browsing-history check recognised), and
+    only while `provisor.offerPasswords` is on (`SiteBrowser.Observation.typingAndCredentials`,
+    reached only through `SiteAccessCenter.makeRecordingEnrollment`). The Add Site form, Sign
+    In Again, a window that asks for a typed address, and every hidden browser never record.
+    The window says so before anything is typed.
+  - **The script** runs in the app's isolated world, in the main frame only, and reports a
+    trusted `input` event into a password field or a user-name field: the value, the field's
+    name, id, autocomplete token, and type, and the page's own origin and path (the path a
+    later fill is checked against; a frame's request address is stale after a `pushState`).
+    A field that asks for a code, a PIN, a card code, or an answer is never reported, masked
+    or not; an emptied field is reported as a clear, which drops what was held for it.
+    **A trusted event is not proof a person typed**: a page's own script can produce one with
+    an editing command. So a report is bound to the page's own origin and to nothing more,
+    and the worst a page can do is spoil or prevent its own offer.
+  - **`TypedCredential` exists only if the frame the app sees agrees**: main frame, `https`,
+    no port, a valid host, the reported origin equal to that frame's security origin, bounded
+    sizes. It, the capture, and the offer print as fixed placeholders, and only the code that
+    builds the grant can read the password.
+  - **No offer is made** (`OfferRefusal`, each with one fixed sentence) when the site asked
+    for the password again; when password-like values were typed into more than one field or
+    page without the form being left between them; on a change-password or sign-up form;
+    when a sign-in code was asked for; when a field has no name, id, or autocomplete token to
+    find it by; when anything was typed on a sign-in service whose password opens more than
+    one site (`SignInServices`: Google, Microsoft, Apple, AWS, Okta-style tenants, and the
+    like), whatever the site's family; or when anything was typed, or a form would send,
+    outside the site's family or the hosts this sign-in traversed (`SiteFamily.sameSite`:
+    equal hosts, a subdomain, or a shared registrable parent, judged without a public-suffix
+    list, where a false "different" only loses the offer and shared-hosting parents never
+    make two hosts one site). "Worked" means the person pressed Done on a page past the
+    sign-in after typing it; a wrong offer costs one failed submission, after which the site
+    waits for the person.
+  - **Done saves the session first; keeping the password is a second save the person asks
+    for** (`SiteEnrollment.passwordGrant`, built only on the session grant that was just
+    saved). The kept grant's steps are the fields the person typed into, its fill hosts those
+    pages and where their forms send, and its user name may be empty only when it has a
+    password step and no user-name step (a site that remembers the user name). The offer is
+    forgotten when the window closes, when Session Only is pressed, or after five minutes
+    unanswered.
 - **Signed-in sites: a run reads pages and follows offered links, and does nothing else**
   (`SiteAccess`, `ProVisorTools`). No tool types, presses a button, or takes an address:
   `open_site` names a granted site, `follow_link` a link by its number on the page the visit
@@ -1105,7 +1149,8 @@ names below are the code paths.
     browse hosts left, except what another granted site shares (data is kept per registrable
     domain). It also holds **Add Site…**, the **Read my texts** toggle with a Full Disk Access
     row that opens System Settings while a read fails, and a line naming the condition that
-    pauses site and text reading when one fails.
+    pauses site and text reading when one fails, and the **Offer to keep passwords** toggle
+    (`provisor.offerPasswords`, on by default).
   - **The site window** (`ProVisorSiteWindow`) is one reused window, the form on the left and
     the live page on the right. **Keep me signed in**, the default, asks for the address only:
     the user signs in on the page and the grant keeps the session and no secret; when the app
@@ -1138,7 +1183,13 @@ names below are the code paths.
     save would land on and refuses when that site's grant remembers a password
     (`SiteSignInModel.Destination`), which a typed address can otherwise reach; an existing
     kept-session site keeps its name and the date it was added. A page that fails to load
-    offers **Try Again**. A site with a saved password keeps the Sign In Again form.
+    offers **Try Again**. A site with a saved password keeps the Sign In Again form. After
+    Done, when a typed password can be kept (see Untrusted Input), the window stays open on
+    **Keep Password** / **Session Only**, showing the user name and the host it was typed on;
+    when one was typed but cannot be kept it shows why and a Close button. **Follow-up passes
+    are held while that offer is up** (`FollowUpHolds`): keeping the password saves the site a
+    second time, which closes the visits open on it and would cut off the pass the sign-in
+    just set off. The pass starts when the window closes.
 
 **`Modules/SystemHUD/`** (volume / brightness / keyboard-backlight HUD — `VolumeController`,
 `BrightnessController`, `KeyboardBacklightController`, `MediaKeyMonitor`) is present but **NOT wired
@@ -1264,7 +1315,9 @@ at runtime.
   own, on the person's store or as a visitor), and `SiteAccess`, the one writer of
   `sites.json` and what a run's tools call. **Closing a `SiteBrowser` answers every script call
   still waiting on it**, so a read bounded by a timer that closes the browser ends when the
-  timer does.
+  timer does. **A settle poll sent while a navigation replaces the page can go unanswered**,
+  so the two poll scripts wait at most 2 s (a lost poll counts as an empty sample); at the
+  full script limit one lost poll stalls a read for 10 s, which is all a hidden read has.
   `SiteBrowser` is a `WKWebView` in a window that is never ordered on screen (an enrollment
   moves the view into the site window for the user to watch), on a persistent data store of its
   own (`WKWebsiteDataStore(forIdentifier:)`, under `~/Library/WebKit/<bundle id>/WebsiteDataStore`)

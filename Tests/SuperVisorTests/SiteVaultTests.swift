@@ -670,10 +670,17 @@ struct SiteGrantTests {
         #expect(!filling(13).isValid(for: "h0.example.com"))
     }
 
-    @Test("A username holds 1 to 256 characters and a password 1 to 1,024")
+    @Test("A username holds 1 to 256 characters, or none when the steps fill a password and no user name, and a password 1 to 1,024")
     func credentialLengths() {
+        let passwordStep = makeStep(.password, name: "password", id: "pass", autocomplete: "current-password", type: "password")
+        let usernameStep = [makeStep(.username), passwordStep]
+        #expect(!makeGrant(username: "", steps: usernameStep).isValid(for: "example.com"))
+        #expect(makeGrant(username: "u", steps: usernameStep).isValid(for: "example.com"))
+        #expect(makeGrant(username: "", steps: [passwordStep]).isValid(for: "example.com"))
         #expect(!makeGrant(username: "").isValid(for: "example.com"))
+        #expect(!makeGrant(username: "", steps: [makeStep(.username)]).isValid(for: "example.com"))
         #expect(makeGrant(username: String(repeating: "u", count: 256)).isValid(for: "example.com"))
+        #expect(!makeGrant(username: String(repeating: "u", count: 257), steps: usernameStep).isValid(for: "example.com"))
         #expect(!makeGrant(username: String(repeating: "u", count: 257)).isValid(for: "example.com"))
         #expect(!makeGrant(password: "").isValid(for: "example.com"))
         #expect(makeGrant(password: String(repeating: "p", count: 1_024)).isValid(for: "example.com"))
