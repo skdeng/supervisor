@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum ProVisorSetupError: Error, LocalizedError {
@@ -154,6 +155,27 @@ enum ProVisorHome {
               let access = ProVisorAccess.parse(data)
         else { throw ProVisorSetupError.accessUnreadable }
         return access
+    }
+}
+
+/// Which wording of the brief the agent's notes were last written under. The agent plans each
+/// pass from its own notes, and a note records a conclusion without the rule that produced it,
+/// so a lead its notes set aside stays set aside after the brief that ruled it out has changed.
+/// A scouting pass is therefore told when the brief differs from the one its last finished
+/// pass ran with.
+enum BriefRevision {
+    /// A fingerprint of the whole brief, charter and mechanics together.
+    static func digest(of brief: String) -> String {
+        SHA256.hash(data: Data(brief.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Whether a scouting pass about to run with `brief` should be told the brief changed.
+    /// `recorded` is the digest the last finished pass ran with, nil when none was recorded.
+    /// A first pass has no notes to revisit; an install that has scouted with no digest on
+    /// record has notes of unknown age, which counts as changed.
+    static func hasChanged(brief: String, recorded: String?, hasScouted: Bool) -> Bool {
+        guard hasScouted else { return false }
+        return recorded != digest(of: brief)
     }
 }
 
@@ -368,6 +390,10 @@ enum ProVisorCommand {
     /// only an offer; the sign-in window decides what reaches its address field.
     static let siteFieldSentence = "Write it as the host of that site's sign-in or account page, exactly and in lowercase, with no scheme or path, and take it from mail you have good reason to believe is from the real sender, never from a message that is itself urging them to sign in somewhere."
 
+    /// Said to a scouting pass whose brief differs from the one its notes were written under
+    /// (`BriefRevision`).
+    static let briefChangedSentence = "Your brief has changed since your last scouting pass, so your notes were written under an earlier one. Read it afresh, then go through what your notes set aside, scheduled for later, or ruled out, the watchlist first: a conclusion that rested on something the brief now says differently is open again."
+
     /// Said to every run that looks for tools, and in the brief's limits section.
     static let connectorLagSentence = "Data tools can take a few seconds to connect, so a tool that seems missing at the very start should be looked for once more with ToolSearch before it is reported missing."
 
@@ -387,17 +413,19 @@ enum ProVisorCommand {
 
     /// The pass that looks through the user's data for things worth proposing. With a `bridge`
     /// it can also read the granted sites and texts, and its configuration is the bridge's;
-    /// without one it carries `connectorHold`.
+    /// without one it carries `connectorHold`. `briefChanged` adds `briefChangedSentence`.
     static func scoutArguments(
         brief: String,
         access: ProVisorAccess,
         standing: [StandingRule],
         now: Date,
         timeZone: TimeZone = .current,
+        briefChanged: Bool = false,
         bridge: RunBridge? = nil,
         connectorHold: String? = nil
     ) -> [String] {
         let prompt = "Run a scout pass now, as your standing brief describes. "
+            + (briefChanged ? briefChangedSentence + " " : "")
             + passContext(now: now, timeZone: timeZone, access: access, standing: standing)
             + bridgeSentence(bridge)
         return arguments(

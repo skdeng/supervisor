@@ -1024,7 +1024,15 @@ names below are the code paths.
     and never seeded: the proposal file format, how standing approvals work, the agent's
     limits. **A field the app parses is described in the protocol, never the charter** — a
     seeded charter is not updated when the app is, so a format described there would go stale
-    against the parser in every existing install.
+    against the parser in every existing install. **An edit to either document reaches a pass's
+    plan only because the pass is told of it** (`BriefRevision`): the agent plans from its own
+    notes, and a note holds a conclusion ("recheck Dec 1") without the rule that produced it,
+    so a pass given a changed brief and nothing else repeats what its notes scheduled. A
+    scouting pass whose brief differs from the one its last finished pass ran with
+    (`provisor.briefDigest`) is told to re-read it and reopen what its notes set aside. To see
+    what a wording change does before shipping it, run the CLI with `--tools ""`, the brief as
+    `--append-system-prompt`, and the three memory files pasted into the prompt, and ask for
+    the steps it would take.
   - **Data comes from the claude.ai connectors** Claude Code exposes locally
     (`mcp__claude_ai_<Server>__<tool>`); the default `access.json` reads Gmail and Google
     Calendar. Connectors load only for a Claude-account sign-in, not an API key. The connector

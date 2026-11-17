@@ -63,6 +63,8 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
     var onSignInNeeded: (([SignInDemand.Item]) -> Void)?
 
     private static let lastScoutKey = "provisor.lastScoutAt"
+    /// The `BriefRevision` digest of the brief the last finished scouting pass ran with.
+    private static let briefDigestKey = "provisor.briefDigest"
     private static let scoutTimeout: Duration = .seconds(20 * 60)
     private static let actTimeout: Duration = .seconds(10 * 60)
     private static let followUpTimeout: Duration = .seconds(10 * 60)
@@ -365,12 +367,18 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
             access: access,
             standing: standingRules,
             now: Date(),
+            briefChanged: BriefRevision.hasChanged(
+                brief: brief,
+                recorded: defaults.string(forKey: Self.briefDigestKey),
+                hasScouted: lastScoutDate != nil
+            ),
             bridge: prepared?.bridge,
             connectorHold: prepared == nil ? bridge.holdConfigurationPath() : nil
         )
         let service = AgentTaskService()
         scoutService = service
         let activation = self.activation
+        let briefDigest = BriefRevision.digest(of: brief)
         Task { [weak self] in
             guard let self else { return }
             let outcome = await self.runPass(
@@ -379,7 +387,7 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
                 timeout: ProVisorCenter.scoutTimeout,
                 prepared: prepared
             )
-            await self.finishScout(outcome, activation: activation)
+            await self.finishScout(outcome, briefDigest: briefDigest, activation: activation)
         }
     }
 
@@ -418,8 +426,11 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         }
     }
 
+    /// `briefDigest` is recorded only for a pass that finished: one that failed may not have
+    /// reached its notes, so the next pass is told of the change again.
     private func finishScout(
         _ outcome: Result<AgentTaskResult, any Error>,
+        briefDigest: String,
         activation: Int
     ) async {
         guard activation == self.activation else { return }
@@ -430,6 +441,7 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         switch outcome {
         case let .success(result):
             defaults.set(finished.timeIntervalSince1970, forKey: Self.lastScoutKey)
+            defaults.set(briefDigest, forKey: Self.briefDigestKey)
             lastScout = ScoutReport(
                 finished: finished,
                 text: Proposal.displayText(result.text, limit: 600) ?? "Finished.",

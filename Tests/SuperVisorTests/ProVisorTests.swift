@@ -736,6 +736,24 @@ struct ProVisorCommandTests {
         ])
     }
 
+    @Test("A scout whose brief changed is told so before anything else in its prompt")
+    func scoutToldTheBriefChanged() {
+        let prompt = ProVisorCommand.scoutArguments(
+            brief: "BRIEF",
+            access: access,
+            standing: [],
+            now: now,
+            timeZone: losAngeles,
+            briefChanged: true
+        )[1]
+
+        #expect(prompt.hasPrefix(
+            "Run a scout pass now, as your standing brief describes. "
+                + ProVisorCommand.briefChangedSentence
+                + " It is Sunday 2026-11-15 09:12"
+        ))
+    }
+
     @Test("A reviewed run's closing instructions, with no granted sites, name none and carry the full checking text")
     func closingInstructionsWithoutSites() {
         let expected = """
@@ -1259,6 +1277,37 @@ struct ProVisorCommandTests {
 
         #expect(ProVisorClock.preciseStamp(instant, timeZone: losAngeles) == "2026-11-15 09:12:34")
         #expect(ProVisorClock.preciseStamp(instant, timeZone: .gmt) == "2026-11-15 17:12:34")
+    }
+}
+
+@Suite("ProVisor brief revision")
+struct BriefRevisionTests {
+    @Test("A first pass has no notes to revisit, so it is told nothing")
+    func firstPass() {
+        #expect(!BriefRevision.hasChanged(brief: "A", recorded: nil, hasScouted: false))
+    }
+
+    @Test("A pass with the brief its last finished pass ran with is told nothing")
+    func sameBrief() {
+        let recorded = BriefRevision.digest(of: "CHARTER\n\nMECHANICS")
+        #expect(!BriefRevision.hasChanged(brief: "CHARTER\n\nMECHANICS", recorded: recorded, hasScouted: true))
+    }
+
+    @Test("A brief that differs by one character from the recorded one counts as changed")
+    func editedBrief() {
+        let recorded = BriefRevision.digest(of: "CHARTER\n\nMECHANICS")
+        #expect(BriefRevision.hasChanged(brief: "CHARTER\n\nMECHANICS.", recorded: recorded, hasScouted: true))
+    }
+
+    @Test("Notes written by passes that recorded no brief count as written under another one")
+    func scoutedWithNothingRecorded() {
+        #expect(BriefRevision.hasChanged(brief: "A", recorded: nil, hasScouted: true))
+    }
+
+    @Test("The digest is the SHA-256 of the brief's UTF-8 bytes, in lowercase hex")
+    func digest() {
+        #expect(BriefRevision.digest(of: "abc")
+            == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     }
 }
 
