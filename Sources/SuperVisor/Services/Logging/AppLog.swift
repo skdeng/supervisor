@@ -128,7 +128,13 @@ final class FileLogMirror: @unchecked Sendable {
         return formatter
     }()
 
+    /// Whether this process is the app itself. The log file is a record of the running app,
+    /// read when investigating a crash; the test runner exercises the same code, and its lines
+    /// (a failed sign-in on a made-up site, say) would read there as things the app did.
+    static let writesInThisProcess = Bundle.main.bundleIdentifier == AppLog.subsystem
+
     func append(level: String, category: AppLogCategory, message: String) {
+        guard Self.writesInThisProcess else { return }
         // Callers are often on the main actor; the disk write must never block them.
         queue.async { [self] in
             appendLocked(level: level, category: category, message: message)

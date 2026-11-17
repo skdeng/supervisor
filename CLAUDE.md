@@ -1077,7 +1077,9 @@ at runtime.
   events to the unified log while `FileLogMirror` keeps a plain rotating file for direct
   inspection. Callers log only names, states, counts, durations, and error descriptions — never
   file, OCR, clipboard, page, or message content, browsing history, or an address with a query
-  string — and logging failures never throw or crash the app.
+  string — and logging failures never throw or crash the app. **The file is written by the app
+  process alone** (`FileLogMirror.writesInThisProcess`): the test runner exercises the same
+  code, and its lines would read in the file as things the running app did.
 - **`Services/Attention/AttentionGlowCenter.swift`** — a module-agnostic one-shot attention signal
   read by the root view and cleared when the sheet opens.
 - **`Services/Hotkeys/GlobalHotKey.swift`** — a system-wide shortcut over Carbon's
