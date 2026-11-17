@@ -31,13 +31,15 @@ final class SiteAccessCenter: ObservableObject {
     enum SiteStatus: Equatable {
         case needsYou
         case signedIn(Date)
+        /// Signed in by the person on a site whose grant keeps the session alone.
+        case signedInKeepingSession(Date)
         case notSignedInYet
 
         init(_ record: SiteRecord) {
             if record.needsPerson {
                 self = .needsYou
             } else if let date = record.lastSignedIn {
-                self = .signedIn(date)
+                self = record.keepsSessionOnly ? .signedInKeepingSession(date) : .signedIn(date)
             } else {
                 self = .notSignedInYet
             }

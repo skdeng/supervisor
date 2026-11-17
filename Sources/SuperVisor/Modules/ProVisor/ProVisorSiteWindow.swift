@@ -2,10 +2,11 @@ import AppKit
 import SwiftUI
 import WebKit
 
-/// Opens the Add Site window, for a new site or to sign in to a saved one again.
+/// Opens the Add Site window, for a new site, to sign in to a saved one again, or for the site
+/// a ProVisor proposal asked for.
 ///
-/// One window is reused. Asking for the sign-in it already shows brings it forward; asking for
-/// another ends the one it shows.
+/// One window is reused. Asking for the sign-in it already shows, for the same request,
+/// brings it forward; asking for another ends the one it shows.
 @MainActor
 final class ProVisorSiteWindow {
     static let shared = ProVisorSiteWindow()
@@ -21,18 +22,44 @@ final class ProVisorSiteWindow {
     /// Opens the window on a saved site. A site whose grant cannot be read opens as a new one,
     /// saying so.
     func showSigningInAgain(_ siteID: String, center: SiteAccessCenter) {
+        showSigningInAgain(siteID, center: center, requestedBy: nil)
+    }
+
+    /// Opens the window for the site proposal `proposalID` asked for: a granted site signs in
+    /// again, and a new one is added with its address filled in only when `history` finds the
+    /// host among the sites the user has visited (`SiteFormModel.requestedStart`). Saving it
+    /// settles the request (`ProVisorCenter.siteRequestSaved`); closing the window leaves the
+    /// proposal as it is.
+    func showRequested(
+        host: String,
+        proposalID: String,
+        center: SiteAccessCenter = .shared,
+        history: BrowsingHistory = BrowsingHistory()
+    ) {
+        center.refresh()
+        switch SiteFormModel.requestedStart(host: host, grantedSites: center.sites, hasVisited: history.hasVisited) {
+        case let .signingInAgain(siteID):
+            showSigningInAgain(siteID, center: center, requestedBy: proposalID)
+        case let .adding(prefilledAddress):
+            present(.adding, center: center, requestID: proposalID) {
+                SiteFormModel(requestedHost: host, proposalID: proposalID, prefilledAddress: prefilledAddress)
+            }
+        }
+    }
+
+    private func showSigningInAgain(_ siteID: String, center: SiteAccessCenter, requestedBy proposalID: String?) {
         guard let record = center.sites.first(where: { $0.id == siteID }) else {
             showAdding(center: center)
             return
         }
         guard let grant = center.storedGrant(for: siteID) else {
-            present(.adding, center: center, reusesShownForm: false) {
-                SiteFormModel(unreadableSite: record)
+            present(.adding, center: center, reusesShownForm: false, requestID: proposalID) {
+                SiteFormModel(unreadableSite: record, requestedBy: proposalID)
             }
             return
         }
-        present(.signingInAgain(siteID: siteID), center: center) {
-            SiteFormModel(signingInAgain: grant, record: record)
+        present(.signingInAgain(siteID: siteID), center: center, requestID: proposalID) {
+            SiteFormModel(signingInAgain: grant, record: record, requestedBy: proposalID)
         }
     }
 
@@ -40,6 +67,7 @@ final class ProVisorSiteWindow {
         _ mode: SiteFormModel.Mode,
         center: SiteAccessCenter,
         reusesShownForm: Bool = true,
+        requestID: String? = nil,
         makeModel: () -> SiteFormModel
     ) {
         let window = self.window ?? SiteEnrollmentWindow()
@@ -47,13 +75,47 @@ final class ProVisorSiteWindow {
             window.center()
             self.window = window
         }
-        if !reusesShownForm || !window.isVisible || window.mode != mode {
-            window.show(center: center, enrollment: center.makeEnrollment(), model: makeModel())
+        if !Self.reusesShownForm(
+            allowed: reusesShownForm,
+            isVisible: window.isVisible,
+            shownMode: window.mode,
+            shownRequestID: window.requestID,
+            mode: mode,
+            requestID: requestID
+        ) {
+            let model = makeModel()
+            window.show(
+                center: center,
+                enrollment: center.makeEnrollment(),
+                model: model,
+                onSaved: Self.settling(model.request)
+            )
         }
         window.makeKeyAndOrderFront(nil)
         // An accessory app is never frontmost by itself, and a window in a background app
         // takes no typing.
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Whether the form on screen already is the one asked for: the window shows a form in the
+    /// same mode, opened for the same request or for none.
+    static func reusesShownForm(
+        allowed: Bool,
+        isVisible: Bool,
+        shownMode: SiteFormModel.Mode?,
+        shownRequestID: String?,
+        mode: SiteFormModel.Mode,
+        requestID: String?
+    ) -> Bool {
+        allowed && isVisible && shownMode == mode && shownRequestID == requestID
+    }
+
+    /// What saving a form does beyond storing the site: one opened from a request settles it.
+    private static func settling(_ request: SiteFormModel.Request?) -> (SiteRecord) -> Void {
+        guard let request else { return { _ in } }
+        return { record in
+            ProVisorCenter.shared.siteRequestSaved(proposalID: request.proposalID, host: request.host, site: record)
+        }
     }
 }
 
@@ -73,6 +135,8 @@ final class SiteEnrollmentWindow: NSWindow {
     private let hosting: NSHostingController<AnyView>
     private(set) var enrollment: SiteEnrollment?
     private(set) var mode: SiteFormModel.Mode?
+    /// The proposal the form shown was opened from.
+    private(set) var requestID: String?
 
     init() {
         hosting = NSHostingController(rootView: AnyView(EmptyView()))
@@ -92,16 +156,28 @@ final class SiteEnrollmentWindow: NSWindow {
         contentMinSize = Self.minimumContentSize
     }
 
-    /// Shows a fresh form for `enrollment`, ending any enrollment shown before.
-    func show(center: SiteAccessCenter, enrollment: SiteEnrollment, model: SiteFormModel) {
+    /// Shows a fresh form for `enrollment`, ending any enrollment shown before. `onSaved` is
+    /// called with the record once the site is stored.
+    func show(
+        center: SiteAccessCenter,
+        enrollment: SiteEnrollment,
+        model: SiteFormModel,
+        onSaved: @escaping (SiteRecord) -> Void = { _ in }
+    ) {
         let previous = self.enrollment
         self.enrollment = enrollment
         mode = model.mode
+        requestID = model.request?.proposalID
         previous?.cancel()
         model.follow(enrollment, center: center)
         title = model.isSigningInAgain ? "Sign In Again" : "Add a Site"
         hosting.rootView = AnyView(
-            ProVisorSiteView(center: center, enrollment: enrollment, model: model) { [weak self, weak enrollment] in
+            ProVisorSiteView(
+                center: center,
+                enrollment: enrollment,
+                model: model,
+                onSaved: onSaved
+            ) { [weak self, weak enrollment] in
                 guard let enrollment else { return }
                 self?.close(showing: enrollment)
             }
@@ -120,6 +196,7 @@ final class SiteEnrollmentWindow: NSWindow {
         let ending = enrollment
         enrollment = nil
         mode = nil
+        requestID = nil
         ending?.cancel()
         super.close()
         // A closed window keeps its root view alive; an empty one observes nothing.
@@ -135,6 +212,7 @@ struct ProVisorSiteView: View {
     @ObservedObject var center: SiteAccessCenter
     @ObservedObject var enrollment: SiteEnrollment
     @ObservedObject var model: SiteFormModel
+    var onSaved: (SiteRecord) -> Void = { _ in }
     let onClose: () -> Void
 
     @FocusState private var focus: SiteFormModel.Field?
@@ -188,12 +266,19 @@ struct ProVisorSiteView: View {
                     Text(model.isSigningInAgain ? "Sign in again" : "Add a site")
                         .font(.title3.weight(.semibold))
 
+                    if let request = model.request {
+                        requestLine(request)
+                    }
+
                     if let notice = model.notice {
                         Label(notice, systemImage: "exclamationmark.triangle.fill")
                             .font(.callout)
                             .foregroundStyle(.orange)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+
+                    methodChoice
+                        .disabled(model.isWorking || model.isSaving)
 
                     fields
                         .disabled(model.isWorking || model.isSaving)
@@ -221,6 +306,40 @@ struct ProVisorSiteView: View {
         }
     }
 
+    /// The line about the ProVisor proposal the form was opened from. The host in it is plain
+    /// text that cannot be selected, so it is never a link and never copied into the address.
+    private func requestLine(_ request: SiteFormModel.Request) -> some View {
+        Label(
+            request.message,
+            systemImage: request.isRecognised ? "checkmark.seal" : "exclamationmark.triangle.fill"
+        )
+        .font(.callout)
+        .foregroundStyle(request.isRecognised ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.orange))
+        .fixedSize(horizontal: false, vertical: true)
+        .textSelection(.disabled)
+    }
+
+    /// The two ways of keeping a site, each with what it means. A saved site keeps its own,
+    /// which is stated rather than offered.
+    @ViewBuilder
+    private var methodChoice: some View {
+        if model.canChooseMethod {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(SiteFormModel.methods, id: \.self) { method in
+                    SiteMethodRow(method: method, isSelected: model.method == method) {
+                        model.method = method
+                    }
+                }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.method.title)
+                    .font(.callout.weight(.medium))
+                caption(model.method.explanation)
+            }
+        }
+    }
+
     @ViewBuilder
     private var fields: some View {
         labelled("Sign-in page address", problem: model.addressProblem) {
@@ -237,6 +356,13 @@ struct ProVisorSiteView: View {
                 .focused($focus, equals: .name)
         }
 
+        if model.method == .signsInForMe {
+            credentialFields
+        }
+    }
+
+    @ViewBuilder
+    private var credentialFields: some View {
         labelled("User name") {
             TextField("", text: $model.username)
                 .textContentType(.username)
@@ -322,10 +448,18 @@ struct ProVisorSiteView: View {
     private var signInSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                Button("Sign In", action: signIn)
-                    .controlSize(.large)
-                    .disabled(!model.canSignIn)
-                    .help("Open the sign-in page and fill in what you typed")
+                switch model.method {
+                case .keepsSession:
+                    Button("Open Page", action: openPage)
+                        .controlSize(.large)
+                        .disabled(!model.canOpenPage)
+                        .help("Open the sign-in page for you to sign in on")
+                case .signsInForMe:
+                    Button("Sign In", action: signIn)
+                        .controlSize(.large)
+                        .disabled(!model.canSignIn)
+                        .help("Open the sign-in page and fill in what you typed")
+                }
                 if model.isWorking {
                     ProgressView()
                         .controlSize(.small)
@@ -371,9 +505,14 @@ struct ProVisorSiteView: View {
         Task { await model.signIn(using: enrollment) }
     }
 
+    private func openPage() {
+        focus = nil
+        Task { await model.openPage(using: enrollment) }
+    }
+
     private func save() {
         Task {
-            switch await model.save(using: enrollment, into: center) {
+            switch await model.save(using: enrollment, into: center, onSaved: onSaved) {
             case .notSaved:
                 break
             case .saved:
@@ -421,6 +560,36 @@ struct ProVisorSiteView: View {
             action()
                 .controlSize(.small)
         }
+    }
+}
+
+/// One way of keeping a site: a radio mark in the brand gradient, its name, and what it means.
+private struct SiteMethodRow: View {
+    let method: SiteFormModel.Method
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(
+                        isSelected ? AnyShapeStyle(NotchTheme.brandGradient) : AnyShapeStyle(.secondary)
+                    )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(method.title)
+                        .font(.callout.weight(.medium))
+                    Text(method.explanation)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 

@@ -18,6 +18,16 @@ import WebKit
 /// given to `begin`, so it refuses unless the app filled that password and the sign-in then
 /// left the password form, with no page asking for it again and no typing by the person into
 /// a password field on the page (`passwordIsConfirmed`).
+///
+/// `beginKeepingSession` and `finishKeepingSession` are the same enrollment with no secrets:
+/// the person signs in on the page themselves, the app fills nothing, and the grant keeps the
+/// browser session alone (`SiteGrant.remembersPassword == false`).
+///
+/// **A kept session must have crossed a sign-in.** A page with no password field reads as
+/// signed in to the probe, and a public home page has none. So while a session is being kept,
+/// each finished page is probed, and `finishKeepingSession` refuses (`signInNotSeen`) unless
+/// some page of this enrollment showed a password field, a code field, or a sign-in frame, or
+/// the person typed into a password field, before the signed-in page it saves.
 @MainActor
 final class SiteEnrollment: ObservableObject {
     enum Failure: Error, Equatable {
@@ -34,6 +44,8 @@ final class SiteEnrollment: ObservableObject {
         case passwordNotFilled
         /// The enrollment was cancelled while it finished.
         case cancelled
+        /// No page of a kept session asked for a sign-in, so nothing shows the person signed in.
+        case signInNotSeen
     }
 
     /// What the app says about where it stands.
@@ -41,6 +53,7 @@ final class SiteEnrollment: ObservableObject {
         static let signingIn = "Signing in for you."
         static let finishYourself = "Finish signing in in the page, then save the site."
         static let checkAndSave = "If the page shows you are signed in, save the site."
+        static let signInYourself = "Sign in on the page, then save the site."
     }
 
     @Published private(set) var isWorking = false
@@ -78,6 +91,8 @@ final class SiteEnrollment: ObservableObject {
     private let codes: SignInCodes
     private let codeWaitLimit: Duration
     private var pending: Pending?
+    /// The address `beginKeepingSession` loaded; nil otherwise.
+    private var keptSessionURL: URL?
     private var session: AssistedSignInSession?
     private var broker: SignInBroker?
     private var isBeginning = false
@@ -87,6 +102,10 @@ final class SiteEnrollment: ObservableObject {
     private var passwordTyped = false
     /// The hosts navigations went through up to the first page past the sign-in, once there.
     private var hostsAtSignIn: Set<String>?
+    /// Whether a page of the kept session asked for a sign-in, or the person typed a password.
+    private var keptSessionSawSignIn = false
+    private var observeTask: Task<Void, Never>?
+    private var observeRequested = false
 
     init(
         dataStore: WKWebsiteDataStore = SiteBrowser.sharedStore,
@@ -112,6 +131,7 @@ final class SiteEnrollment: ObservableObject {
         }
         browser.passwordTypedObserver = { [weak self] in
             self?.passwordTyped = true
+            if self?.keptSessionURL != nil { self?.keptSessionSawSignIn = true }
             self?.refreshPasswordConfirmation()
         }
     }
@@ -157,6 +177,8 @@ final class SiteEnrollment: ObservableObject {
     ) async throws {
         guard let url = Self.normalisedAddress(signInAddress) else { throw Failure.invalidAddress }
         stopAssisting()
+        stopObserving()
+        keptSessionURL = nil
         pending = Pending(
             signInURL: url,
             username: username,
@@ -205,13 +227,46 @@ final class SiteEnrollment: ObservableObject {
         await idle()
     }
 
+    /// Loads the sign-in page for the person to sign in on themselves. Nothing is filled and
+    /// no secret is held; the hosts the browser passes through are recorded as for `begin`.
+    func beginKeepingSession(signInAddress: String) async throws {
+        guard let url = Self.normalisedAddress(signInAddress) else { throw Failure.invalidAddress }
+        stopAssisting()
+        stopObserving()
+        pending = nil
+        session = nil
+        keptSessionURL = url
+        keptSessionSawSignIn = false
+        broker = SignInBroker(browser: browser, codeWaitLimit: codeWaitLimit)
+        hostsAtSignIn = nil
+        learnedCodeSender = nil
+        unvettedFill = nil
+        passwordTyped = false
+        passwordIsConfirmed = false
+        isBeginning = true
+        note = Notes.signInYourself
+        refreshWorking()
+        defer {
+            isBeginning = false
+            refreshWorking()
+        }
+
+        do {
+            _ = try await browser.open(url)
+        } catch SiteBrowser.Failure.notAllowed {
+            wipe()
+            throw Failure.invalidAddress
+        }
+        requestObservation()
+        await idle()
+    }
+
     /// The user says they are signed in: builds the grant from what was observed.
     ///
-    /// The page is read afresh, and must be an `https` page on a valid host that shows no
-    /// password field, no field that asks for a code, and no large sign-in frame. The start
-    /// page is that page without its query and fragment; the browse hosts are the hosts the
-    /// sign-in went through; the fill hosts are the sign-in host and the hosts the filled pages
-    /// and forms belong to. A refusal leaves the enrollment as it was.
+    /// The page is read afresh (`signedInPage`). The start page is that page without its query
+    /// and fragment; the browse hosts are the hosts the sign-in went through; the fill hosts
+    /// are the sign-in host and the hosts the filled pages and forms belong to. A refusal
+    /// leaves the enrollment as it was.
     ///
     /// A texted or emailed code with no sender known, on a sign-in that never showed a code
     /// field, is saved as no code: the site did not ask for one this time.
@@ -227,31 +282,16 @@ final class SiteEnrollment: ObservableObject {
             if !succeeded, self.pending != nil { isArmed = true }
         }
 
-        guard !browser.webView.isLoading,
-              let current = browser.currentURL,
-              current.scheme?.lowercased() == "https",
-              current.port == nil,
-              let currentComponents = URLComponents(url: current, resolvingAgainstBaseURL: false),
-              currentComponents.user == nil,
-              currentComponents.password == nil,
-              let startHost = current.host(percentEncoded: false)?.lowercased(),
-              SiteHost.isValid(startHost),
-              let probe = try? await broker.probe(),
-              probe.isSecureTopFrame,
-              SignInRules.isPastSignIn(probe)
-        else { throw isCancelled ? Failure.cancelled : Failure.notSignedIn }
-        guard !isCancelled else { throw Failure.cancelled }
+        let page = try await signedInPage(broker: broker)
         guard session.steps.contains(where: { $0.kind == .password }) else {
             throw Failure.passwordNotFilled
         }
         guard passwordIsConfirmed else { throw Failure.passwordNotConfirmed }
 
-        var startComponents = currentComponents
-        startComponents.query = nil
-        startComponents.fragment = nil
-        guard let startURL = startComponents.url,
-              let signInHost = pending.signInURL.host(percentEncoded: false)?.lowercased()
-        else { throw Failure.invalidGrant }
+        let (startURL, startHost, probe) = (page.startURL, page.startHost, page.probe)
+        guard let signInHost = pending.signInURL.host(percentEncoded: false)?.lowercased() else {
+            throw Failure.invalidGrant
+        }
 
         let steps = session.steps
         var fillHosts = [signInHost]
@@ -261,13 +301,7 @@ final class SiteEnrollment: ObservableObject {
         }
         guard fillHosts.allSatisfy(SiteHost.isValid) else { throw Failure.invalidGrant }
 
-        let required = Set(fillHosts).union([signInHost, startHost])
-        var browseHosts = required
-        let observed = (hostsAtSignIn ?? browser.traversedHosts.union(browser.visitedHosts))
-            .filter(SiteHost.isValid)
-        if required.union(observed).count <= SiteGrant.maximumHosts {
-            browseHosts.formUnion(observed)
-        }
+        let browseHosts = browseHosts(required: Set(fillHosts).union([signInHost, startHost]))
 
         var codeKind = pending.codeKind
         var codeSender: String? = switch pending.codeKind {
@@ -302,6 +336,82 @@ final class SiteEnrollment: ObservableObject {
         return (grant, record)
     }
 
+    /// The person says they are signed in: builds a grant that keeps the session and holds no
+    /// secret. The page must pass the check `finish` makes (`signedInPage`); the start page and
+    /// browse hosts are derived as `finish` derives them, and the only fill host is the
+    /// sign-in host. A refusal leaves the enrollment as it was.
+    func finishKeepingSession(name: String) async throws -> (grant: SiteGrant, record: SiteRecord) {
+        guard !isCancelled else { throw Failure.cancelled }
+        guard keptSessionURL != nil, let broker else { throw Failure.notSignedIn }
+        await idle()
+        // Read again: the enrollment may have been cancelled or begun afresh meanwhile.
+        guard !isCancelled else { throw Failure.cancelled }
+        guard let signInURL = keptSessionURL else { throw Failure.notSignedIn }
+        let page = try await signedInPage(broker: broker)
+        guard keptSessionSawSignIn else { throw Failure.signInNotSeen }
+        guard let signInHost = signInURL.host(percentEncoded: false)?.lowercased() else {
+            throw Failure.invalidGrant
+        }
+
+        let browseHosts = browseHosts(required: [signInHost, page.startHost])
+        let grant = SiteGrant(
+            username: "",
+            password: "",
+            authenticatorKey: nil,
+            signInURL: signInURL,
+            startURL: page.startURL,
+            fillHosts: [signInHost],
+            browseHosts: [signInHost] + browseHosts.subtracting([signInHost]).sorted(),
+            codeKind: .none,
+            codeSender: nil,
+            signInSteps: [],
+            signOutControlSeen: page.probe.hasSignOutControl,
+            remembersPassword: false
+        )
+        guard grant.isValid(for: signInHost) else { throw Failure.invalidGrant }
+
+        let label = Proposal.displayText(name, limit: SiteRecord.nameLimit) ?? signInHost
+        var record = SiteRecord(id: signInHost, name: label, added: Date(), lastSignedIn: Date())
+        record.keepsSessionOnly = true
+        wipe()
+        return (grant, record)
+    }
+
+    /// The page on display, read afresh, when it shows the user signed in: an `https` page on
+    /// a valid host, done loading, with no password field, no field that asks for a code, and
+    /// no large sign-in frame. Returns it as a start page, without its query and fragment.
+    private func signedInPage(
+        broker: SignInBroker
+    ) async throws -> (startURL: URL, startHost: String, probe: PageProbe) {
+        guard !browser.webView.isLoading,
+              let current = browser.currentURL,
+              current.scheme?.lowercased() == "https",
+              current.port == nil,
+              var components = URLComponents(url: current, resolvingAgainstBaseURL: false),
+              components.user == nil,
+              components.password == nil,
+              let startHost = current.host(percentEncoded: false)?.lowercased(),
+              SiteHost.isValid(startHost),
+              let probe = try? await broker.probe(),
+              probe.isSecureTopFrame,
+              SignInRules.isPastSignIn(probe)
+        else { throw isCancelled ? Failure.cancelled : Failure.notSignedIn }
+        guard !isCancelled else { throw Failure.cancelled }
+        components.query = nil
+        components.fragment = nil
+        guard let startURL = components.url else { throw Failure.invalidGrant }
+        return (startURL, startHost, probe)
+    }
+
+    /// `required` with the hosts the sign-in went through, unless together they would be more
+    /// than a grant may hold.
+    private func browseHosts(required: Set<String>) -> Set<String> {
+        let observed = (hostsAtSignIn ?? browser.traversedHosts.union(browser.visitedHosts))
+            .filter(SiteHost.isValid)
+        let all = required.union(observed)
+        return all.count <= SiteGrant.maximumHosts ? all : required
+    }
+
     /// Stops examining pages, forgets the secrets, and closes the browser. The enrollment is
     /// finished with.
     func cancel() {
@@ -313,7 +423,7 @@ final class SiteEnrollment: ObservableObject {
 
     /// Returns once the app has finished examining the pages loaded so far.
     func idle() async {
-        while let task = assistTask {
+        while let task = assistTask ?? observeTask {
             await task.value
         }
     }
@@ -321,9 +431,12 @@ final class SiteEnrollment: ObservableObject {
     // MARK: Examining pages
 
     private func wipe() {
+        stopObserving()
+        keptSessionSawSignIn = false
         isArmed = false
         assistRequested = false
         pending = nil
+        keptSessionURL = nil
         session = nil
         broker = nil
     }
@@ -335,8 +448,50 @@ final class SiteEnrollment: ObservableObject {
     }
 
     private func pageFinished() {
-        guard isArmed else { return }
-        requestAssist()
+        if isArmed {
+            requestAssist()
+        } else if keptSessionURL != nil {
+            requestObservation()
+        }
+    }
+
+    // MARK: Watching a kept session
+
+    private func stopObserving() {
+        observeRequested = false
+        observeTask?.cancel()
+    }
+
+    /// Asks for the open page of a kept session to be probed for a sign-in, once the page in
+    /// flight, if any, has been. A request made while one runs is met by one more probe.
+    private func requestObservation() {
+        observeRequested = true
+        guard observeTask == nil else { return }
+        observeTask = Task { [weak self] in
+            while let self, self.keptSessionURL != nil, self.observeRequested, !Task.isCancelled {
+                self.observeRequested = false
+                await self.observeCurrentPage()
+            }
+            self?.observeTask = nil
+        }
+    }
+
+    /// Notes whether the page on display asks for a sign-in: a password field, a code field,
+    /// or a sign-in frame. Only the noting is kept, never what the page holds.
+    private func observeCurrentPage() async {
+        guard let broker, keptSessionURL != nil else { return }
+        do {
+            try await browser.settleLoadedPage()
+        } catch {
+            return
+        }
+        guard !Task.isCancelled, keptSessionURL != nil,
+              let probe = try? await broker.probe(),
+              !Task.isCancelled, keptSessionURL != nil
+        else { return }
+        if probe.hasVisiblePassword || probe.hasCodeField || probe.hasLoginFrame {
+            keptSessionSawSignIn = true
+        }
     }
 
     /// Asks for the open page to be examined once the page in flight, if any, has been. A

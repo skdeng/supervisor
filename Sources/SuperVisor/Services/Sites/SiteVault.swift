@@ -190,6 +190,9 @@ struct SiteGrant: Codable, Equatable, Sendable {
     /// Whether the page the user ended the enrollment on showed a link or button that signs out.
     /// A start page that shows none is then not a signed-in page.
     let signOutControlSeen: Bool
+    /// False for a grant that keeps the browser session the person signed in to and holds no
+    /// password, key, or recorded fill: when that session ends, the person signs in again.
+    let remembersPassword: Bool
 
     init(
         username: String,
@@ -202,7 +205,8 @@ struct SiteGrant: Codable, Equatable, Sendable {
         codeKind: CodeKind,
         codeSender: String?,
         signInSteps: [SignInStep] = [],
-        signOutControlSeen: Bool = false
+        signOutControlSeen: Bool = false,
+        remembersPassword: Bool = true
     ) {
         self.username = username
         self.password = password
@@ -215,10 +219,11 @@ struct SiteGrant: Codable, Equatable, Sendable {
         self.codeSender = codeSender
         self.signInSteps = signInSteps
         self.signOutControlSeen = signOutControlSeen
+        self.remembersPassword = remembersPassword
     }
 
-    /// A stored grant without the `signInSteps` or `signOutControlSeen` key reads as one with
-    /// no steps and no sign-out control seen.
+    /// A stored grant without the `signInSteps`, `signOutControlSeen`, or `remembersPassword`
+    /// key reads as one with no steps, no sign-out control seen, and a remembered password.
     init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         username = try values.decode(String.self, forKey: .username)
@@ -232,6 +237,7 @@ struct SiteGrant: Codable, Equatable, Sendable {
         codeSender = try values.decodeIfPresent(String.self, forKey: .codeSender)
         signInSteps = try values.decodeIfPresent([SignInStep].self, forKey: .signInSteps) ?? []
         signOutControlSeen = try values.decodeIfPresent(Bool.self, forKey: .signOutControlSeen) ?? false
+        remembersPassword = try values.decodeIfPresent(Bool.self, forKey: .remembersPassword) ?? true
     }
 
     /// Whether this grant may be stored for, and used at, `siteID`.
@@ -241,7 +247,17 @@ struct SiteGrant: Codable, Equatable, Sendable {
     /// list, which lies within the browse list. Each recorded step names a fill host's origin,
     /// an absolute path, and bounded field attributes, and the steps use each kind once. A
     /// grant that fails any rule is never used.
+    ///
+    /// A grant that remembers no password carries no secret at all: an empty user name and
+    /// password, no authenticator key, no code, no recorded steps, and only the sign-in host
+    /// to fill on.
     func isValid(for siteID: String) -> Bool {
+        guard hasValidAddresses(for: siteID) else { return false }
+        return remembersPassword ? hasValidSecrets : carriesNoSecret
+    }
+
+    /// The URL and host rules every grant is held to.
+    private func hasValidAddresses(for siteID: String) -> Bool {
         guard SiteHost.isValid(siteID),
               let signInHost = Self.secureHost(of: signInURL),
               let startHost = Self.secureHost(of: startURL),
@@ -251,8 +267,20 @@ struct SiteGrant: Codable, Equatable, Sendable {
               browseHosts.contains(signInHost),
               browseHosts.contains(startHost),
               fillHosts.contains(signInHost),
-              fillHosts.allSatisfy(browseHosts.contains),
-              (1...Self.maximumUsernameLength).contains(username.count),
+              fillHosts.allSatisfy(browseHosts.contains)
+        else { return false }
+        return true
+    }
+
+    /// The address rules put the sign-in host in the fill list; nothing is filled for such a
+    /// grant, so the list holds that host alone.
+    private var carriesNoSecret: Bool {
+        username.isEmpty && password.isEmpty && authenticatorKey == nil && signInSteps.isEmpty
+            && codeKind == .none && codeSender == nil && fillHosts.count == 1
+    }
+
+    private var hasValidSecrets: Bool {
+        guard (1...Self.maximumUsernameLength).contains(username.count),
               (1...Self.maximumPasswordLength).contains(password.count),
               areValidSteps
         else { return false }

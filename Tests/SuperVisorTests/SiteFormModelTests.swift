@@ -9,6 +9,7 @@ import WebKit
 struct SiteFormModelTests {
     private func filled(_ kind: SiteGrant.CodeKind = .none) -> SiteFormModel {
         let model = SiteFormModel()
+        model.method = .signsInForMe
         model.address = "example.com/login"
         model.username = "alice@example.com"
         model.password = "correct horse"
@@ -49,6 +50,7 @@ struct SiteFormModelTests {
     @Test("Each code kind requires its own field on top of the address, user name, and password")
     func requiredFieldsPerKind() {
         let model = SiteFormModel()
+        model.method = .signsInForMe
         #expect(model.requiredFields == [.address, .username, .password])
         model.codeKind = .authenticator
         #expect(model.requiredFields == [.address, .username, .password, .authenticatorKey])
@@ -76,6 +78,7 @@ struct SiteFormModelTests {
     @Test("Sign In opens up once the address, user name, and password are in")
     func canSignInTransitions() {
         let model = SiteFormModel()
+        model.method = .signsInForMe
         #expect(!model.canSignIn)
         model.address = "example.com/login"
         #expect(!model.canSignIn)
@@ -308,6 +311,7 @@ struct SiteFormModelTests {
         defer { enrollment.cancel() }
 
         let model = SiteFormModel()
+        model.method = .signsInForMe
         model.address = "example.com/login"
         model.username = bank.username
         model.password = bank.password
@@ -420,6 +424,7 @@ struct SiteFormModelTests {
 
     private func form(for bank: TestBank, password: String? = nil) -> SiteFormModel {
         let model = SiteFormModel()
+        model.method = .signsInForMe
         model.address = "example.com/login"
         model.username = bank.username
         model.password = password ?? bank.password
@@ -473,7 +478,7 @@ struct SiteFormModelTests {
         center.setTextsEnabled(true)
         #expect(model.textsStatus == .on)
         await model.signIn(using: enrollment)
-        #expect(model.signedInWith != nil)
+        #expect(model.started != nil)
 
         center.setTextsEnabled(false)
         #expect(!model.canSignIn)
@@ -630,6 +635,419 @@ struct SiteFormModelTests {
             == "This site's sign-in page has moved to login.example.net. Type your password here to continue.")
         #expect(SiteFormModel.movedMessage(.init(host: "login.example.net", kind: .code))
             == "This site's sign-in page has moved to login.example.net. Type your setup key here to continue.")
+    }
+
+    // MARK: Keep me signed in
+
+    /// Signs in on the open page the way the person would, and waits for the signed-in page.
+    private func signInOnPage(_ enrollment: SiteEnrollment, _ bank: TestBank) async throws {
+        _ = try await enrollment.browser.run("""
+            document.getElementById('user').value = username;
+            document.getElementById('pass').value = password;
+            HTMLFormElement.prototype.requestSubmit.call(document.forms[0]);
+            """, arguments: ["username": bank.username, "password": bank.password])
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(bank.signedIn && enrollment.browser.currentURL?.path == "/home"), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        await enrollment.idle()
+    }
+
+    private func sessionGrant() -> SiteGrant {
+        SiteGrant(
+            username: "",
+            password: "",
+            authenticatorKey: nil,
+            signInURL: URL(string: "https://example.com/login")!,
+            startURL: URL(string: "https://example.com/account")!,
+            fillHosts: ["example.com"],
+            browseHosts: ["example.com"],
+            codeKind: .none,
+            codeSender: nil,
+            remembersPassword: false
+        )
+    }
+
+    @Test("A new form keeps the site signed in, and asks for the address alone")
+    func keepsSessionByDefault() {
+        let model = SiteFormModel()
+        #expect(model.method == .keepsSession)
+        #expect(model.canChooseMethod)
+        #expect(model.requiredFields == [.address])
+        #expect(!model.canOpenPage)
+        #expect(!model.canSignIn)
+
+        model.address = "example.com/login"
+        #expect(model.canOpenPage)
+        #expect(model.keptSessionAddress == "https://example.com/login")
+        #expect(!model.canSignIn)
+
+        model.method = .signsInForMe
+        #expect(!model.canOpenPage)
+        #expect(model.requiredFields == [.address, .username, .password])
+    }
+
+    @Test("The two ways of keeping a site are named and explained")
+    func methodSentences() {
+        #expect(SiteFormModel.methods == [.keepsSession, .signsInForMe])
+        #expect(SiteFormModel.Method.keepsSession.title == "Keep me signed in")
+        #expect(SiteFormModel.Method.keepsSession.explanation == "Sign in on the page yourself. SuperVisor saves no password and asks you again when the site signs you out.")
+        #expect(SiteFormModel.Method.signsInForMe.title == "Sign in for me")
+        #expect(SiteFormModel.Method.signsInForMe.explanation == "SuperVisor saves your user name and password in the Keychain and signs in by itself.")
+    }
+
+    @Test("Opening the page and saving stores a site that keeps the session and no password", .timeLimit(.minutes(1)))
+    func openPageAndSave() async throws {
+        let (fixture, center, bank, enrollment) = try flow()
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime(fixture) {}
+        }
+        let model = SiteFormModel()
+        model.address = "example.com/login"
+        model.follow(enrollment, center: center)
+        #expect(!model.canSave)
+
+        await model.openPage(using: enrollment)
+        #expect(model.problem == nil)
+        #expect(model.started == .keepingSession(address: "https://example.com/login"))
+        #expect(model.canSave)
+        try await signInOnPage(enrollment, bank)
+
+        var saved: [SiteRecord] = []
+        #expect(await model.save(using: enrollment, into: center) { saved.append($0) } == .saved)
+        #expect(saved.map(\.id) == ["example.com"])
+        let site = try #require(center.sites.first)
+        #expect(site.keepsSessionOnly)
+        #expect(SiteAccessCenter.SiteStatus(site) == .signedInKeepingSession(try #require(site.lastSignedIn)))
+        let grant = try #require(center.storedGrant(for: "example.com"))
+        #expect(!grant.remembersPassword)
+        #expect(grant.password.isEmpty)
+        #expect(bank.site.posts.count == 1)
+    }
+
+    @Test("Saving a public page that never asked for a sign-in says so and stores nothing", .timeLimit(.minutes(1)))
+    func keepSessionPublicPage() async throws {
+        let (fixture, center, bank, enrollment) = try flow { $0.startPageIsPublic = true }
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime((fixture, bank)) {}
+        }
+        let model = SiteFormModel()
+        model.address = "example.com/account"
+        await model.openPage(using: enrollment)
+
+        #expect(await model.save(using: enrollment, into: center) == .notSaved)
+        #expect(model.problem == .signInNotSeen)
+        #expect(model.problem?.message == "SuperVisor hasn't seen you sign in yet. Sign in on the page, then save.")
+        #expect(model.canSave)
+        #expect(center.sites.isEmpty)
+    }
+
+    @Test("Saving before the page shows the person signed in stores nothing", .timeLimit(.minutes(1)))
+    func keepSessionSaveBeforeSignedIn() async throws {
+        let (fixture, center, bank, enrollment) = try flow()
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime((fixture, bank)) {}
+        }
+        let model = SiteFormModel()
+        model.address = "example.com/login"
+        await model.openPage(using: enrollment)
+
+        var saved = 0
+        #expect(await model.save(using: enrollment, into: center) { _ in saved += 1 } == .notSaved)
+        #expect(model.problem == .notSignedIn)
+        #expect(saved == 0)
+        #expect(center.sites.isEmpty)
+        #expect(model.canSave)
+    }
+
+    @Test("Switching how the site is kept after opening the page closes Save until that way's button is pressed", .timeLimit(.minutes(1)))
+    func switchingMethodBlocksSave() async throws {
+        let (fixture, center, bank, enrollment) = try flow()
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime(fixture) {}
+        }
+        let model = SiteFormModel()
+        model.address = "example.com/login"
+        model.username = bank.username
+        model.password = bank.password
+        await model.openPage(using: enrollment)
+        try await signInOnPage(enrollment, bank)
+        #expect(model.canSave)
+
+        model.method = .signsInForMe
+        #expect(!model.canSave)
+        #expect(model.saveBlocker == SiteFormModel.detailsChangedMessage)
+        #expect(await model.save(using: enrollment, into: center) == .notSaved)
+        #expect(center.sites.isEmpty)
+
+        model.method = .keepsSession
+        #expect(model.canSave)
+        model.address = "example.com/account"
+        #expect(!model.canSave)
+        #expect(model.saveBlocker == "You changed the sign-in details. Press Open Page again before saving.")
+        bank.signOut()
+        await model.openPage(using: enrollment)
+        try await signInOnPage(enrollment, bank)
+        #expect(model.canSave)
+        #expect(await model.save(using: enrollment, into: center) == .saved)
+        #expect(center.storedGrant(for: "example.com")?.remembersPassword == false)
+    }
+
+    @Test("A refused address on Open Page leaves nothing to save")
+    func openPageRefusedAddress() async throws {
+        let (fixture, center, bank, enrollment) = try flow()
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime((fixture, bank)) {}
+        }
+        let model = SiteFormModel()
+        model.address = "http://example.com/login"
+        #expect(!model.canOpenPage)
+        await model.openPage(using: enrollment)
+        #expect(model.started == nil)
+        #expect(await model.save(using: enrollment, into: center) == .notSaved)
+    }
+
+    @Test("Signing in again to a site kept by its session opens in that way with the address fixed", .timeLimit(.minutes(1)))
+    func signInAgainKeepingSession() async throws {
+        let (fixture, center, bank, enrollment) = try flow()
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime(fixture) {}
+        }
+        let added = Date(timeIntervalSince1970: 1_700_000_000)
+        try center.save(grant: sessionGrant(), record: SiteRecord(id: "example.com", name: "Bank", added: added))
+        var stale = try #require(center.sites.first)
+        stale.needsPerson = true
+        try SiteRegistry.save([stale], to: fixture.registry)
+        center.refresh()
+
+        let model = SiteFormModel(signingInAgain: sessionGrant(), record: try #require(center.sites.first))
+        #expect(model.method == .keepsSession)
+        #expect(!model.canChooseMethod)
+        model.method = .signsInForMe
+        #expect(model.method == .keepsSession)
+        #expect(model.address == "https://example.com/login")
+        model.address = "evil.example.net/login"
+        #expect(model.address == "https://example.com/login")
+        #expect(model.requiredFields == [.address])
+        #expect(model.request == nil)
+
+        await model.openPage(using: enrollment)
+        try await signInOnPage(enrollment, bank)
+        #expect(await model.save(using: enrollment, into: center) == .saved)
+
+        let site = try #require(center.sites.first)
+        #expect(!site.needsPerson)
+        #expect(site.added == added)
+        #expect(site.keepsSessionOnly)
+        #expect(site.attemptCount == 0)
+    }
+
+    @Test("Signing in again to a site that signs in by itself stays that way")
+    func signInAgainWithPasswordKeepsMethod() {
+        let model = SiteFormModel(signingInAgain: savedGrant(), record: savedRecord())
+        #expect(model.method == .signsInForMe)
+        model.method = .keepsSession
+        #expect(model.method == .signsInForMe)
+    }
+
+    @Test("A site kept by its session whose saved sign-in cannot be read is added again the same way")
+    func unreadableSessionSite() {
+        var record = savedRecord()
+        record.keepsSessionOnly = true
+        let model = SiteFormModel(unreadableSite: record)
+        #expect(model.method == .keepsSession)
+        #expect(model.requiredFields == [.address])
+        #expect(SiteFormModel(unreadableSite: savedRecord()).method == .signsInForMe)
+    }
+
+    // MARK: Requests from ProVisor
+
+    @Test("A request for a host the user has visited fills in the address and says it matched")
+    func requestVisited() {
+        var asked: [String] = []
+        let start = SiteFormModel.requestedStart(host: "example.com", grantedSites: []) { host in
+            asked.append(host)
+            return true
+        }
+        #expect(start == .adding(prefilledAddress: "example.com"))
+        #expect(asked == ["example.com"])
+
+        let model = SiteFormModel(requestedHost: "example.com", proposalID: "2026-11-17-check", prefilledAddress: "example.com")
+        #expect(model.address == "example.com")
+        #expect(model.method == .keepsSession)
+        #expect(model.mode == .adding)
+        #expect(model.canOpenPage)
+        #expect(model.request == SiteFormModel.Request(
+            proposalID: "2026-11-17-check",
+            host: "example.com",
+            message: "ProVisor asked for this site. It matches a site in your browser history.",
+            isRecognised: true
+        ))
+    }
+
+    @Test("A request for a host the user has not visited leaves the address empty and says to type it")
+    func requestNotVisited() {
+        let start = SiteFormModel.requestedStart(host: "examp1e-login.com", grantedSites: []) { _ in false }
+        #expect(start == .adding(prefilledAddress: nil))
+
+        let model = SiteFormModel(requestedHost: "examp1e-login.com", proposalID: "2026-11-17-check", prefilledAddress: nil)
+        #expect(model.address.isEmpty)
+        #expect(model.name.isEmpty)
+        #expect(!model.canOpenPage)
+        #expect(model.request == SiteFormModel.Request(
+            proposalID: "2026-11-17-check",
+            host: "examp1e-login.com",
+            message: "ProVisor asked for examp1e-login.com. SuperVisor hasn't seen that address in your browser history, so type the site's address yourself.",
+            isRecognised: false
+        ))
+    }
+
+    @Test("A prefilled address other than the requested host is not taken")
+    func requestPrefillMustBeTheHost() {
+        let model = SiteFormModel(requestedHost: "example.com", proposalID: "p", prefilledAddress: "evil.example.net")
+        #expect(model.address.isEmpty)
+        #expect(model.request?.isRecognised == false)
+    }
+
+    @Test("A request for a granted site signs in to it again, without reading the history")
+    func requestGranted() {
+        let granted = SiteRecord(id: "example.com", name: "Bank", added: Date(timeIntervalSince1970: 0))
+        var asked = 0
+        let start = SiteFormModel.requestedStart(host: "example.com", grantedSites: [granted]) { _ in
+            asked += 1
+            return false
+        }
+        #expect(start == .signingInAgain(siteID: "example.com"))
+        #expect(asked == 0)
+
+        let model = SiteFormModel(signingInAgain: sessionGrant(), record: granted, requestedBy: "p")
+        #expect(model.request?.proposalID == "p")
+        #expect(model.request?.host == "example.com")
+        #expect(model.request?.message == "ProVisor asked you to sign in to Bank again.")
+    }
+
+    @Test("A requested host that is not a host name is never filled in")
+    func requestInvalidHost() {
+        var asked = 0
+        let start = SiteFormModel.requestedStart(host: "https://example.com/login", grantedSites: []) { _ in
+            asked += 1
+            return true
+        }
+        #expect(start == .adding(prefilledAddress: nil))
+        #expect(asked == 0)
+    }
+
+    @Test("Closing a requested form without saving reports no save", .timeLimit(.minutes(1)))
+    func requestCancelReportsNothing() async throws {
+        let (fixture, center, bank, enrollment) = try flow { $0.markSignedIn() }
+        defer { withExtendedLifetime((fixture, bank)) {} }
+        let model = SiteFormModel(requestedHost: "example.com", proposalID: "p", prefilledAddress: "example.com")
+        model.address = "example.com/account"
+        await model.openPage(using: enrollment)
+        enrollment.cancel()
+
+        var saved = 0
+        #expect(await model.save(using: enrollment, into: center) { _ in saved += 1 } == .notSaved)
+        #expect(saved == 0)
+        #expect(center.sites.isEmpty)
+    }
+
+    /// The proposals folder of a request for example.com, and a form opened from it.
+    private func requestFolder() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("site-form-request-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fields: [String: Any] = [
+            "title": "Confirm the renewal",
+            "action": "Record the answer in followups/x.md.",
+            "kind": "confirm",
+            "site": "example.com",
+        ]
+        try JSONSerialization.data(withJSONObject: fields)
+            .write(to: directory.appendingPathComponent("2026-11-17-check.json"))
+        return directory
+    }
+
+    /// What the window hands a save from a requested form, with the center's folder replaced.
+    private func settler(
+        _ request: SiteFormModel.Request?,
+        in directory: URL,
+        outcomes: @escaping (SiteRequests.Outcome) -> Void
+    ) -> (SiteRecord) -> Void {
+        { record in
+            guard let request else { return }
+            outcomes(SiteRequests.settle(
+                proposalID: request.proposalID,
+                host: request.host,
+                savedSiteID: record.id,
+                siteName: record.name,
+                in: directory,
+                isBusy: false
+            ))
+        }
+    }
+
+    @Test("Saving the requested site from the form settles the request on disk", .timeLimit(.minutes(1)))
+    func requestSettledOnSave() async throws {
+        let (fixture, center, bank, enrollment) = try flow()
+        let directory = try requestFolder()
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime((fixture, bank)) {}
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let model = SiteFormModel(requestedHost: "example.com", proposalID: "2026-11-17-check", prefilledAddress: "example.com")
+        model.address = "example.com/login"
+        model.name = "Example Club"
+        await model.openPage(using: enrollment)
+        try await signInOnPage(enrollment, bank)
+
+        var outcomes: [SiteRequests.Outcome] = []
+        let saved = await model.save(
+            using: enrollment,
+            into: center,
+            onSaved: settler(model.request, in: directory) { outcomes.append($0) }
+        )
+
+        #expect(saved == .saved)
+        #expect(outcomes == [.settled])
+        let proposal = try #require(ProposalStore.load(from: directory).first)
+        #expect(proposal.status == .done)
+        #expect(proposal.result == "Signed in to Example Club.")
+    }
+
+    @Test("Saving a site under another host from a requested form leaves the request open", .timeLimit(.minutes(1)))
+    func requestNotSettledForAnotherHost() async throws {
+        let (fixture, center, bank, enrollment) = try flow()
+        bank.site.route("/login", host: "login.example.com", page: TestPages.redirect(to: "https://example.com/login"))
+        let directory = try requestFolder()
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime((fixture, bank)) {}
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let model = SiteFormModel(requestedHost: "example.com", proposalID: "2026-11-17-check", prefilledAddress: nil)
+        model.address = "login.example.com/login"
+        await model.openPage(using: enrollment)
+        try await signInOnPage(enrollment, bank)
+
+        var outcomes: [SiteRequests.Outcome] = []
+        let saved = await model.save(
+            using: enrollment,
+            into: center,
+            onSaved: settler(model.request, in: directory) { outcomes.append($0) }
+        )
+
+        #expect(saved == .saved)
+        #expect(center.sites.map(\.id) == ["login.example.com"])
+        #expect(outcomes == [.otherSite])
+        #expect(ProposalStore.load(from: directory).first?.status == .proposed)
     }
 
     @Test("A site whose saved sign-in cannot be read opens as a new one, saying so")

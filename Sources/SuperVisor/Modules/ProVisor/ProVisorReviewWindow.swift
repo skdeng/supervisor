@@ -74,6 +74,15 @@ enum ProposalReview {
         return showsOffer ? "Just Once" : "Do It"
     }
 
+    /// The button a proposal asking for `host` shows: signing in again to a granted site by its
+    /// name, or signing in to the host.
+    static func siteButtonTitle(host: String, grantedSites: [SiteRecord]) -> String {
+        if let site = grantedSites.first(where: { $0.id == host }) {
+            return "Sign In Again to \(site.name)…"
+        }
+        return "Sign In to \(host)…"
+    }
+
     /// What to say in place of the choices when a proposal is past deciding.
     static func closedReason(_ proposal: Proposal, now: Date) -> String? {
         switch proposal.status {
@@ -103,8 +112,10 @@ final class ProVisorReviewWindow {
     private init() {}
 
     func show(_ id: String, center: ProVisorCenter) {
+        // The site button's title is decided from the granted sites as the review opens.
+        SiteAccessCenter.shared.refresh()
         let root = AnyView(
-            ProVisorReviewView(center: center, id: id) { [weak self] in
+            ProVisorReviewView(center: center, id: id, grantedSites: SiteAccessCenter.shared.sites) { [weak self] in
                 self?.close()
             }
             .id(UUID())
@@ -245,11 +256,18 @@ final class FittedWindow: NSWindow {
 /// Nothing read back from the file is ever offered for approval: a retry starts from the
 /// recommended option and an empty box, because a box pre-filled from a file the scout can
 /// rewrite would run the scout's words as the user's.
+///
+/// A proposal that asks for a site also offers a button that opens the sign-in window for it.
+/// The button decides nothing: the proposal is settled only when the site is saved there. Its
+/// title is decided when the review opens, or when the user asks for an update, and is one
+/// truncated line, so nothing published while the window is up changes the window's height.
 @MainActor
 struct ProVisorReviewView: View {
     @ObservedObject var center: ProVisorCenter
     let id: String
     let onClose: () -> Void
+    /// The granted sites as the review opened, which name the site button.
+    private let grantedSites: [SiteRecord]
 
     /// The text being reviewed, as it stood when the window opened or was last brought up to
     /// date by the user.
@@ -259,17 +277,29 @@ struct ProVisorReviewView: View {
     @State private var typed = ""
     /// Why the last tap ran nothing.
     @State private var notice: String?
+    /// The site button's title for the pinned text, when it asks for a site.
+    @State private var siteButtonTitle: String?
     @FocusState private var isTyping: Bool
 
     static let width: CGFloat = 460
 
-    init(center: ProVisorCenter, id: String, onClose: @escaping () -> Void) {
+    init(
+        center: ProVisorCenter,
+        id: String,
+        grantedSites: [SiteRecord] = [],
+        onClose: @escaping () -> Void
+    ) {
         self.center = center
         self.id = id
+        self.grantedSites = grantedSites
         self.onClose = onClose
-        _pinned = State(
-            initialValue: center.proposals.first { $0.id == id }.map(ReviewedText.init)
-        )
+        let pinned = center.proposals.first { $0.id == id }.map(ReviewedText.init)
+        _pinned = State(initialValue: pinned)
+        _siteButtonTitle = State(initialValue: Self.siteButtonTitle(for: pinned, grantedSites: grantedSites))
+    }
+
+    private static func siteButtonTitle(for text: ReviewedText?, grantedSites: [SiteRecord]) -> String? {
+        text?.site.map { ProposalReview.siteButtonTitle(host: $0, grantedSites: grantedSites) }
     }
 
     var body: some View {
@@ -278,7 +308,7 @@ struct ProVisorReviewView: View {
                 detail(proposal)
                     .onAppear {
                         if pinned == nil {
-                            pinned = ReviewedText(proposal)
+                            pin(ReviewedText(proposal))
                         }
                     }
             } else {
@@ -325,6 +355,9 @@ struct ProVisorReviewView: View {
                     staleNotice(current)
                 }
                 choices(text)
+                if let host = text.site, let title = siteButtonTitle {
+                    siteButton(title: title, host: host, proposalID: proposal.id)
+                }
             } else {
                 recorded(proposal, state: state)
             }
@@ -373,7 +406,7 @@ struct ProVisorReviewView: View {
             Spacer(minLength: 0)
 
             ProVisorCapsuleButton(title: "Show the Update") {
-                pinned = current
+                pin(current)
                 optionIndex = 0
                 notice = nil
             }
@@ -411,6 +444,21 @@ struct ProVisorReviewView: View {
                 action: offer.action,
                 basis: offer.basis
             )
+        }
+    }
+
+    private func pin(_ text: ReviewedText) {
+        pinned = text
+        siteButtonTitle = Self.siteButtonTitle(for: text, grantedSites: grantedSites)
+    }
+
+    private func siteButton(title: String, host: String, proposalID: String) -> some View {
+        HStack(spacing: 0) {
+            ProVisorCapsuleButton(title: title) {
+                ProVisorSiteWindow.shared.showRequested(host: host, proposalID: proposalID)
+            }
+            .layoutPriority(1)
+            Spacer(minLength: 0)
         }
     }
 
@@ -632,12 +680,14 @@ struct ReviewedText: Equatable {
     let why: String?
     let options: [ProposalOption]
     let standingOffer: StandingOffer?
+    let site: String?
 
     init(_ proposal: Proposal) {
         title = proposal.title
         why = proposal.why
         options = proposal.options
         standingOffer = proposal.standingOffer
+        site = proposal.site
     }
 }
 

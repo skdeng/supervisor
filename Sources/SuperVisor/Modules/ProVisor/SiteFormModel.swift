@@ -4,15 +4,26 @@ import Foundation
 /// The Add Site window's form: what the user typed, what it is missing, and what happens when
 /// they sign in and save. The window's view only lays this out.
 ///
-/// Signing in again starts from the site's saved grant: its address (fixed), user name, and
-/// code settings are filled in, and the password and authenticator key fields start empty and
-/// stand for the saved ones until something is typed. A saved secret goes only to the hosts
-/// the grant fills on (`SignInRequest.passwordHosts`). Those saved secrets live in this object
-/// for as long as the window shows it.
+/// A site is kept in one of two ways (`Method`). **Keep me signed in**, the default, asks only
+/// for the address: the person signs in on the page after Open Page, and the grant keeps that
+/// session and no secret. **Sign in for me** also takes the user name, password, and code
+/// settings, and the app signs in by itself.
 ///
-/// **Save stores what signed in.** The grant is built from the details the last Sign In
-/// started with, so Save is open only while the form still shows exactly those details, and
-/// only after a sign-in the enrollment confirms the password of (`SiteEnrollment`).
+/// Signing in again starts from the site's saved grant, in the way it was kept: its address
+/// (fixed), user name, and code settings are filled in, and the password and authenticator key
+/// fields start empty and stand for the saved ones until something is typed. A saved secret
+/// goes only to the hosts the grant fills on (`SignInRequest.passwordHosts`). Those saved
+/// secrets live in this object for as long as the window shows it.
+///
+/// **Save stores what signed in.** The grant is built from what the last Open Page or Sign In
+/// started with, so Save is open only while the form still shows exactly that — the same way
+/// of keeping the site and the same details — and, for Sign in for me, only after a sign-in the
+/// enrollment confirms the password of (`SiteEnrollment`).
+///
+/// **An address ProVisor asks for is filled in only when the user's own browsers know it.**
+/// The agent's request is model output shaped by mail from anyone, so a host it names goes
+/// into the address field only after `BrowsingHistory` finds the user has visited it;
+/// otherwise the field starts empty and the user types the address themselves.
 @MainActor
 final class SiteFormModel: ObservableObject {
     enum Mode: Equatable {
@@ -24,6 +35,54 @@ final class SiteFormModel: ObservableObject {
         case address, name, username, password, authenticatorKey, codeSender
     }
 
+    /// How the site is kept signed in.
+    enum Method: Hashable {
+        /// The person signs in on the page; the grant keeps the session and no secret.
+        case keepsSession
+        /// The app saves the user name and password in the Keychain and signs in by itself.
+        case signsInForMe
+
+        var title: String {
+            switch self {
+            case .keepsSession: "Keep me signed in"
+            case .signsInForMe: "Sign in for me"
+            }
+        }
+
+        var explanation: String {
+            switch self {
+            case .keepsSession:
+                "Sign in on the page yourself. SuperVisor saves no password and asks you again when the site signs you out."
+            case .signsInForMe:
+                "SuperVisor saves your user name and password in the Keychain and signs in by itself."
+            }
+        }
+    }
+
+    /// The ProVisor proposal a form was opened from, the host it asked for, and the line the
+    /// form shows about it. Only a site saved under `host` settles the proposal.
+    struct Request: Equatable {
+        let proposalID: String
+        let host: String
+        let message: String
+        /// The requested host matched the user's browsing history, or names a granted site.
+        let isRecognised: Bool
+    }
+
+    /// How a form opened from a ProVisor request for `host` starts.
+    enum RequestedStart: Equatable {
+        /// The host is a granted site: the form signs in to it again.
+        case signingInAgain(siteID: String)
+        /// A new site. The address is filled in only with a host the user's browsers know.
+        case adding(prefilledAddress: String?)
+    }
+
+    /// What the last Open Page or Sign In started with.
+    enum Start: Equatable {
+        case keepingSession(address: String)
+        case signingIn(SignInRequest)
+    }
+
     /// Why a sign-in or save did not go through, each shown as a fixed sentence.
     enum Problem: Equatable {
         case invalidAddress
@@ -32,6 +91,7 @@ final class SiteFormModel: ObservableObject {
         case invalidGrant
         case passwordNotConfirmed
         case passwordNotFilled
+        case signInNotSeen
         case notSaved
 
         var message: String {
@@ -48,6 +108,8 @@ final class SiteFormModel: ObservableObject {
                 "SuperVisor can't tell which password worked. Type the working password in the form here, then press Sign In again."
             case .passwordNotFilled:
                 "SuperVisor didn't fill the sign-in itself, so it couldn't record it. Press Sign In and let it fill the page."
+            case .signInNotSeen:
+                "SuperVisor hasn't seen you sign in yet. Sign in on the page, then save."
             case .notSaved:
                 "The site could not be saved to the Keychain."
             }
@@ -69,6 +131,7 @@ final class SiteFormModel: ObservableObject {
             case .invalidGrant?: .invalidGrant
             case .passwordNotConfirmed?: .passwordNotConfirmed
             case .passwordNotFilled?: .passwordNotFilled
+            case .signInNotSeen?: .signInNotSeen
             case .invalidAddress?, .notSignedIn?, nil: .notSignedIn
             }
         }
@@ -110,7 +173,31 @@ final class SiteFormModel: ObservableObject {
     }
 
     static let codeKinds: [SiteGrant.CodeKind] = [.none, .authenticator, .text, .email]
+    static let methods: [Method] = [.keepsSession, .signsInForMe]
     static let detailsChangedMessage = "You changed the sign-in details. Press Sign In again before saving."
+    static let openPageAgainMessage = "You changed the sign-in details. Press Open Page again before saving."
+
+    /// Where a request for `host` leads: a granted site signs in again, and a new one has its
+    /// address filled in only when `hasVisited` says the user's browsers know the host.
+    static func requestedStart(
+        host: String,
+        grantedSites: [SiteRecord],
+        hasVisited: (String) -> Bool
+    ) -> RequestedStart {
+        if grantedSites.contains(where: { $0.id == host }) { return .signingInAgain(siteID: host) }
+        guard SiteHost.isValid(host), hasVisited(host) else { return .adding(prefilledAddress: nil) }
+        return .adding(prefilledAddress: host)
+    }
+
+    static let recognisedRequestMessage = "ProVisor asked for this site. It matches a site in your browser history."
+
+    static func unrecognisedRequestMessage(host: String) -> String {
+        "ProVisor asked for \(host). SuperVisor hasn't seen that address in your browser history, so type the site's address yourself."
+    }
+
+    static func signInAgainRequestMessage(name: String) -> String {
+        "ProVisor asked you to sign in to \(name) again."
+    }
 
     static func title(of kind: SiteGrant.CodeKind) -> String {
         switch kind {
@@ -124,7 +211,10 @@ final class SiteFormModel: ObservableObject {
     let mode: Mode
     /// A line shown above the form.
     let notice: String?
+    /// Set when the form was opened from a ProVisor request.
+    let request: Request?
 
+    @Published private var chosenMethod: Method = .keepsSession
     @Published private var typedAddress = ""
     @Published var username = ""
     @Published var password = ""
@@ -139,9 +229,9 @@ final class SiteFormModel: ObservableObject {
 
     @Published private(set) var problem: Problem?
     @Published private(set) var isSaving = false
-    /// The details the last sign-in started with; nil before one, after a refused address, and
-    /// after a save refused for want of a new sign-in.
-    @Published private(set) var signedInWith: SignInRequest?
+    /// What the last Open Page or Sign In started with; nil before one, after a refused
+    /// address, and after a save refused for want of a new sign-in.
+    @Published private(set) var started: Start?
 
     private let saved: Saved?
     /// The grant and record `finish` returned, kept until they are stored so a failed save can
@@ -151,20 +241,66 @@ final class SiteFormModel: ObservableObject {
     init() {
         mode = .adding
         notice = nil
+        request = nil
         saved = nil
     }
 
-    /// A form for adding a site whose saved sign-in could not be read back.
-    init(unreadableSite record: SiteRecord) {
+    /// A form for adding a site whose saved sign-in could not be read back, in the way the
+    /// site was kept.
+    init(unreadableSite record: SiteRecord, requestedBy proposalID: String? = nil) {
         mode = .adding
+        chosenMethod = record.keepsSessionOnly ? .keepsSession : .signsInForMe
         notice = "\(record.name)'s saved sign-in couldn't be read. Add it again."
+        request = proposalID.map {
+            Request(
+                proposalID: $0,
+                host: record.id,
+                message: Self.signInAgainRequestMessage(name: record.name),
+                isRecognised: true
+            )
+        }
         saved = nil
         typedName = record.name
     }
 
-    init(signingInAgain grant: SiteGrant, record: SiteRecord) {
+    /// A form for adding the site a ProVisor proposal asked for, in Keep me signed in.
+    /// `prefilledAddress` is what `requestedStart` decided: the address starts as `host` only
+    /// when that is `host`, and is empty otherwise.
+    init(requestedHost host: String, proposalID: String, prefilledAddress: String?) {
+        mode = .adding
+        notice = nil
+        saved = nil
+        if let prefilledAddress, prefilledAddress == host, SiteHost.isValid(host) {
+            typedAddress = host
+            request = Request(
+                proposalID: proposalID,
+                host: host,
+                message: Self.recognisedRequestMessage,
+                isRecognised: true
+            )
+        } else {
+            request = Request(
+                proposalID: proposalID,
+                host: host,
+                message: Self.unrecognisedRequestMessage(host: host),
+                isRecognised: false
+            )
+        }
+    }
+
+    /// A form for signing in to a saved site again, in the way the site was kept.
+    init(signingInAgain grant: SiteGrant, record: SiteRecord, requestedBy proposalID: String? = nil) {
         mode = .signingInAgain(siteID: record.id)
         notice = nil
+        request = proposalID.map {
+            Request(
+                proposalID: $0,
+                host: record.id,
+                message: Self.signInAgainRequestMessage(name: record.name),
+                isRecognised: true
+            )
+        }
+        chosenMethod = grant.remembersPassword ? .signsInForMe : .keepsSession
         saved = Saved(
             password: grant.password,
             authenticatorKey: grant.authenticatorKey,
@@ -187,6 +323,17 @@ final class SiteFormModel: ObservableObject {
     }
 
     // MARK: Fields
+
+    /// How the site is kept. A saved site keeps its own way.
+    var method: Method {
+        get { chosenMethod }
+        set {
+            guard saved == nil else { return }
+            chosenMethod = newValue
+        }
+    }
+
+    var canChooseMethod: Bool { saved == nil }
 
     /// The sign-in address. A saved site keeps its own: the site is its sign-in host.
     var address: String {
@@ -226,6 +373,7 @@ final class SiteFormModel: ObservableObject {
     var hasSavedAuthenticatorKey: Bool { saved?.authenticatorKey != nil }
 
     var requiredFields: Set<Field> {
+        guard method == .signsInForMe else { return [.address] }
         var fields: Set<Field> = [.address, .username]
         if saved == nil { fields.insert(.password) }
         switch codeKind {
@@ -268,28 +416,49 @@ final class SiteFormModel: ObservableObject {
         codeKind == .text && textsStatus != .on
     }
 
+    /// Sign In, in Sign in for me.
     var canSignIn: Bool {
-        !isWorking && !isSaving && signInRequest != nil
+        method == .signsInForMe && !isWorking && !isSaving && signInRequest != nil
     }
 
-    /// The form shows other details than the ones the last sign-in started with.
+    /// Open Page, in Keep me signed in.
+    var canOpenPage: Bool {
+        method == .keepsSession && !isWorking && !isSaving && keptSessionAddress != nil
+    }
+
+    /// The form shows another way of keeping the site, or other details, than the last Open
+    /// Page or Sign In started with.
     var detailsChanged: Bool {
-        guard let signedInWith else { return false }
-        return currentDetails != signedInWith
+        guard let started else { return false }
+        return currentStart != started
     }
 
     /// Why Save is closed after a sign-in, when the reason is the form itself.
     var saveBlocker: String? {
-        detailsChanged ? Self.detailsChangedMessage : nil
+        guard detailsChanged else { return nil }
+        return method == .keepsSession ? Self.openPageAgainMessage : Self.detailsChangedMessage
     }
 
     var canSave: Bool {
-        signedInWith != nil && !detailsChanged && !isSaving
+        started != nil && !detailsChanged && !isSaving
     }
 
     /// What Sign In passes to `begin`, or nil while something required is missing or invalid.
     var signInRequest: SignInRequest? {
         textsBlockSignIn ? nil : currentDetails
+    }
+
+    /// What Open Page passes to `beginKeepingSession`, or nil for an address that is not one.
+    var keptSessionAddress: String? {
+        SiteEnrollment.normalisedAddress(address)?.absoluteString
+    }
+
+    /// What the button for the current method would start with now, whatever the texts status.
+    private var currentStart: Start? {
+        switch method {
+        case .keepsSession: keptSessionAddress.map(Start.keepingSession)
+        case .signsInForMe: currentDetails.map(Start.signingIn)
+        }
     }
 
     /// What the fields say, valid and complete, whatever the texts status.
@@ -382,11 +551,26 @@ final class SiteFormModel: ObservableObject {
 
     // MARK: Signing in and saving
 
+    /// Opens the page for the person to sign in on themselves.
+    func openPage(using enrollment: SiteEnrollment) async {
+        guard canOpenPage, let address = keptSessionAddress else { return }
+        problem = nil
+        finished = nil
+        started = .keepingSession(address: address)
+        do {
+            try await enrollment.beginKeepingSession(signInAddress: address)
+        } catch {
+            let problem = Problem.ofSignIn(error)
+            self.problem = problem
+            if problem == .invalidAddress { started = nil }
+        }
+    }
+
     func signIn(using enrollment: SiteEnrollment) async {
         guard canSignIn, let request = signInRequest else { return }
         problem = nil
         finished = nil
-        signedInWith = request
+        started = .signingIn(request)
         do {
             try await enrollment.begin(
                 signInAddress: request.address,
@@ -402,14 +586,19 @@ final class SiteFormModel: ObservableObject {
             let problem = Problem.ofSignIn(error)
             self.problem = problem
             // A refused address leaves nothing for `finish` to build on.
-            if problem == .invalidAddress { signedInWith = nil }
+            if problem == .invalidAddress { started = nil }
         }
     }
 
-    /// Builds the grant from the page the user is on and stores it. Nothing is stored once the
-    /// enrollment has been cancelled, however far the save had got.
-    func save(using enrollment: SiteEnrollment, into center: SiteAccessCenter) async -> SaveOutcome {
-        guard canSave, let request = signedInWith else { return .notSaved }
+    /// Builds the grant from the page the user is on and stores it, then hands the saved
+    /// record to `onSaved`. Nothing is stored once the enrollment has been cancelled, however
+    /// far the save had got.
+    func save(
+        using enrollment: SiteEnrollment,
+        into center: SiteAccessCenter,
+        onSaved: (SiteRecord) -> Void = { _ in }
+    ) async -> SaveOutcome {
+        guard canSave, let started else { return .notSaved }
         isSaving = true
         defer { isSaving = false }
         problem = nil
@@ -418,16 +607,23 @@ final class SiteFormModel: ObservableObject {
         if let finished {
             result = finished
         } else {
+            let made: (grant: SiteGrant, record: SiteRecord)
             do {
-                var made = try await enrollment.finish(name: resolvedName)
-                if let saved { made.record.added = saved.record.added }
-                result = made
-                finished = made
+                switch started {
+                case .keepingSession:
+                    made = try await enrollment.finishKeepingSession(name: resolvedName)
+                case .signingIn:
+                    made = try await enrollment.finish(name: resolvedName)
+                }
             } catch {
                 problem = Problem.ofFinish(error)
-                if problem?.needsNewSignIn == true { signedInWith = nil }
+                if problem?.needsNewSignIn == true { self.started = nil }
                 return .notSaved
             }
+            var kept = made
+            if let saved { kept.record.added = saved.record.added }
+            result = kept
+            finished = kept
         }
 
         guard !enrollment.isCancelled else { return .notSaved }
@@ -438,11 +634,13 @@ final class SiteFormModel: ObservableObject {
             return .notSaved
         }
         finished = nil
-        if let notice = Self.noticeAfterSaving(
-            requested: request.codeKind,
-            saved: result.grant.codeKind,
-            name: result.record.name
-        ) {
+        onSaved(result.record)
+        if case let .signingIn(request) = started,
+           let notice = Self.noticeAfterSaving(
+               requested: request.codeKind,
+               saved: result.grant.codeKind,
+               name: result.record.name
+           ) {
             return .savedWithNotice(notice)
         }
         return .saved

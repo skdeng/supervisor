@@ -201,6 +201,18 @@ struct SiteAccessCenterTests {
         #expect(SiteAccessCenter.SiteStatus(site) == .needsYou)
     }
 
+    @Test("A site kept by its session reads as signed in that way, and needs you once its session ends")
+    func sessionSiteStatus() {
+        var site = record()
+        site.keepsSessionOnly = true
+        #expect(SiteAccessCenter.SiteStatus(site) == .notSignedInYet)
+        let date = Date(timeIntervalSince1970: 1_800_000_000)
+        site.lastSignedIn = date
+        #expect(SiteAccessCenter.SiteStatus(site) == .signedInKeepingSession(date))
+        site.needsPerson = true
+        #expect(SiteAccessCenter.SiteStatus(site) == .needsYou)
+    }
+
     // MARK: Texts
 
     @Test("Texts are off while the setting is, even with a readable database")

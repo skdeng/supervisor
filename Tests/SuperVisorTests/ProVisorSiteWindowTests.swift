@@ -34,6 +34,7 @@ struct ProVisorSiteWindowTests {
             settling: .fast
         )
         let model = SiteFormModel()
+        model.method = .signsInForMe
         let window = SiteEnrollmentWindow()
         window.alphaValue = 0
         window.ignoresMouseEvents = true
@@ -73,6 +74,48 @@ struct ProVisorSiteWindowTests {
         #expect(window.frame == frame)
         #expect(content.frame.size == SiteEnrollmentWindow.initialContentSize)
         #expect(webView.window === window)
+    }
+
+    @Test("Switching how the site is kept, and opening the page, leave the window's size alone", .timeLimit(.minutes(1)))
+    func methodChangesKeepSize() async throws {
+        _ = NSApplication.shared
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        let bank = TestBank()
+        let enrollment = SiteEnrollment(
+            dataStore: .nonPersistent(),
+            codes: CodeStub().codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast
+        )
+        let model = SiteFormModel(requestedHost: "example.com", proposalID: "p", prefilledAddress: nil)
+        let window = SiteEnrollmentWindow()
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        defer { window.close() }
+
+        window.show(center: center, enrollment: enrollment, model: model)
+        #expect(window.requestID == "p")
+        window.orderFront(nil)
+        try await settle(window)
+        let frame = window.frame
+
+        model.method = .signsInForMe
+        model.codeKind = .authenticator
+        try await settle(window)
+        model.method = .keepsSession
+        try await settle(window)
+        model.address = "example.com/login"
+        await model.openPage(using: enrollment)
+        try await settle(window)
+
+        #expect(enrollment.currentHost == "example.com")
+        #expect(bank.site.posts.isEmpty)
+        #expect(window.frame == frame)
+        #expect(window.contentView?.frame.size == SiteEnrollmentWindow.initialContentSize)
+
+        window.close()
+        #expect(window.requestID == nil)
     }
 
     @Test("Closing the window ends the enrollment and takes the page out of it", .timeLimit(.minutes(1)))

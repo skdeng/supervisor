@@ -109,6 +109,11 @@ enum TestPages {
 /// A bank-like site on `example.com` with several kinds of sign-in, switched by its properties.
 ///
 /// The start page is `/account`; signed out it sends the browser to `/login`.
+///
+/// Its routes hold it `unowned`, so a test keeps the instance alive for as long as a browser
+/// may load from its site: one dropped early, as by binding it to `_` when destructuring a
+/// fixture tuple, crashes the run at the next page load with "Attempted to read an unowned
+/// reference".
 @MainActor
 final class TestBank {
     enum Flow {

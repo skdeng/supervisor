@@ -82,7 +82,7 @@ struct ProVisorTools {
         case let .success(page):
             return .ok(Self.pageReply(siteName: Self.cleanName(site), page: page))
         case let .failure(failure):
-            return answer(for: failure, siteName: Self.cleanName(site), granted: granted)
+            return answer(for: failure, siteName: Self.cleanName(site), siteID: site.id, granted: granted)
         }
     }
 
@@ -95,7 +95,12 @@ struct ProVisorTools {
         case let .success(page):
             return .ok(Self.pageReply(siteName: name, page: page))
         case let .failure(failure):
-            return answer(for: failure, siteName: name, granted: access.sites())
+            return answer(
+                for: failure,
+                siteName: name,
+                siteID: access.siteID(visit: visit) ?? "",
+                granted: access.sites()
+            )
         }
     }
 
@@ -139,11 +144,13 @@ struct ProVisorTools {
     private func answer(
         for failure: SiteAccess.Failure,
         siteName: String,
+        siteID: String,
         granted: [SiteRecord]
     ) -> Answer {
         switch failure {
         case .unknownSite: .refused(.unknownSite, Self.unknownSite(granted: granted))
-        case .needsPerson: .refused(.needsPerson, Self.needsPerson(siteName: siteName))
+        case .needsPerson:
+            .refused(.needsPerson, Self.needsPerson(siteName: siteName, siteID: siteID))
         case .unavailable: .refused(.unavailable, Self.unavailable(siteName: siteName))
         case .tooManyLinks: .refused(.tooManyLinks, Self.tooManyLinks)
         case .noSuchLink: .refused(.noSuchLink, Self.noSuchLink)
@@ -202,7 +209,12 @@ nonisolated extension ProVisorTools {
 
     /// The sites as a model is told them: each name with its id, which is the site's host.
     static func siteList(_ sites: [SiteRecord]) -> String {
-        sites.map { "\(cleanName($0)) (\($0.id))" }.joined(separator: ", ")
+        sites.map(siteLabel).joined(separator: ", ")
+    }
+
+    /// A site's name with its id, which is the host a proposal's `site` names it by.
+    static func siteLabel(_ site: SiteRecord) -> String {
+        "\(cleanName(site)) (\(site.id))"
     }
 
     static func cleanName(_ site: SiteRecord) -> String {
@@ -319,10 +331,10 @@ nonisolated extension ProVisorTools {
             + (granted.isEmpty ? "none" : siteList(granted)) + "."
     }
 
-    static func needsPerson(siteName: String) -> String {
-        "\(siteName) needs the person to sign in again, in SuperVisor's settings under Sites. "
-            + "Raise that as an item, as \"When you cannot check something\" describes, and do "
-            + "not try this site again in this run."
+    static func needsPerson(siteName: String, siteID: String) -> String {
+        "\(siteName) needs the person to sign in again. Raise that as an item with \"site\": "
+            + "\"\(siteID)\", as \"When you cannot check something\" describes, and do not try "
+            + "this site again in this run."
     }
 
     static func unavailable(siteName: String) -> String {

@@ -131,7 +131,7 @@ final class ProVisorBridge {
     /// when it could read none. It makes no run and leaves `lastUnavailable` as it was.
     func availableSiteNames(access: ProVisorAccess) -> [String] {
         guard case let .success(eligible) = eligibility(for: access) else { return [] }
-        return eligible.sites.map(ProVisorTools.cleanName)
+        return eligible.sites.map(ProVisorTools.siteLabel)
     }
 
     /// Checks the conditions for the tools without making a run, and returns why they are not
@@ -185,7 +185,7 @@ final class ProVisorBridge {
             bridge: RunBridge(
                 configurationPath: configurationURL.path,
                 toolRules: ProVisorTools.allowedToolRules(for: tools),
-                siteNames: eligible.sites.map(ProVisorTools.cleanName),
+                siteNames: eligible.sites.map(ProVisorTools.siteLabel),
                 textsAreOn: eligible.textsAreOn
             ),
             configurationURL: configurationURL

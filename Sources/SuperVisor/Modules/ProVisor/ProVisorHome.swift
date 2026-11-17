@@ -360,6 +360,11 @@ enum ProVisorCommand {
 
     private static let gmailRulePrefix = "mcp__claude_ai_Gmail__"
 
+    /// How the agent names a site it asks for, in a proposal's `site` field: said to reviewed
+    /// runs, and in the brief's "When you cannot check something" section. What it names is
+    /// only an offer; the sign-in window decides what reaches its address field.
+    static let siteFieldSentence = "Write it as the host of that site's sign-in or account page, exactly and in lowercase, with no scheme or path, and take it from mail you have good reason to believe is from the real sender, never from a message that is itself urging them to sign in somewhere."
+
     /// Said to every run that looks for tools, and in the brief's limits section.
     static let connectorLagSentence = "Data tools can take a few seconds to connect, so a tool that seems missing at the very start should be looked for once more with ToolSearch before it is reported missing."
 
@@ -661,9 +666,12 @@ enum ProVisorCommand {
         they are likely to want, no two labels alike, each label at most 24 characters and \
         each action at most 600, complete on its own, and within what a run with your tools \
         can do, such as recording their answer in a note under `followups/`), `kind` \
-        (`"confirm"`), and `created` (the time now in UTC, like 2026-11-15T17:12:00Z). \
-        SuperVisor puts it in their queue, and they can also answer in their own words. Raise \
-        at most three.
+        (`"confirm"`), and `created` (the time now in UTC, like 2026-11-15T17:12:00Z). When \
+        what stands between you and the check is a site you have not been given, add `site`, \
+        naming that site. \(siteFieldSentence) They get a button that opens the site for them \
+        to sign in, so also write the follow-up note for the check, with `Check from: ` today, \
+        for the pass that follows their sign-in to make. SuperVisor puts the item in their \
+        queue, and they can also answer in their own words. Raise at most three.
         - Theirs alone (a payment, a signature, a judgment only they can make): say what it is.
 
         Finish with one or two plain sentences: what you did, anything that is theirs alone, \

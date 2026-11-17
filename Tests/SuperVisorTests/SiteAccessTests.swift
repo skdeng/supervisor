@@ -205,6 +205,95 @@ struct SiteAccessTests {
         #expect(fixture.stored?.needsPerson == true)
     }
 
+    private func sessionGrant() -> SiteGrant {
+        SiteGrant(
+            username: "",
+            password: "",
+            authenticatorKey: nil,
+            signInURL: URL(string: "https://example.com/login")!,
+            startURL: URL(string: "https://example.com/account")!,
+            fillHosts: ["example.com"],
+            browseHosts: ["example.com"],
+            codeKind: .none,
+            codeSender: nil,
+            signOutControlSeen: true,
+            remembersPassword: false
+        )
+    }
+
+    @Test("A site kept by its session opens while the session holds, and is marked so in the registry", .timeLimit(.minutes(1)))
+    func sessionGrantOpens() async throws {
+        let fixture = try Fixture(granted: false)
+        try fixture.access.add(grant: sessionGrant(), record: fixture.record())
+        fixture.bank.markSignedIn()
+        defer { fixture.access.end(visit: "run") }
+
+        #expect(fixture.stored?.keepsSessionOnly == true)
+        let result = await fixture.access.open(siteID: "example.com", visit: "run")
+
+        #expect(page(result)?.title == "Account")
+        #expect(fixture.bank.site.posts.isEmpty)
+        #expect(fixture.stored?.attemptCount == 0)
+        #expect(fixture.stored?.needsPerson == false)
+    }
+
+    @Test("A site kept by its session needs the person once the session ends, with no sign-in tried and no attempt counted", .timeLimit(.minutes(1)))
+    func sessionGrantEnded() async throws {
+        let fixture = try Fixture(granted: false)
+        try fixture.access.add(grant: sessionGrant(), record: fixture.record())
+        defer { fixture.access.end(visit: "run") }
+
+        let first = await fixture.access.open(siteID: "example.com", visit: "run")
+
+        #expect(failure(first) == .needsPerson)
+        #expect(fixture.bank.site.posts.isEmpty)
+        #expect(!fixture.bank.site.requests.contains { $0.path == "/login" && $0.isPost })
+        let record = try #require(fixture.stored)
+        #expect(record.needsPerson)
+        #expect(record.attemptCount == 0)
+        #expect(record.attemptsDay == nil)
+        #expect(record.keepsSessionOnly)
+
+        fixture.bank.site.forgetRequests()
+        let second = await fixture.access.open(siteID: "example.com", visit: "run")
+        #expect(failure(second) == .needsPerson)
+        #expect(fixture.bank.site.requests.isEmpty)
+
+        // The person signing in again, which is what adding the site records, ends it.
+        fixture.bank.markSignedIn()
+        try fixture.access.add(grant: sessionGrant(), record: fixture.record())
+        #expect(fixture.stored?.needsPerson == false)
+        #expect(page(await fixture.access.open(siteID: "example.com", visit: "run"))?.title == "Account")
+    }
+
+    @Test("A site kept by its session whose start page lacks the sign-out control seen at saving needs the person", .timeLimit(.minutes(1)))
+    func sessionGrantWithoutSignOutControl() async throws {
+        let fixture = try Fixture(granted: false)
+        try fixture.access.add(grant: sessionGrant(), record: fixture.record())
+        fixture.bank.markSignedIn()
+        // The start page answers without a sign-out control, as a site does once it has
+        // signed the visitor out and shows a public page in its place.
+        fixture.bank.site.route("/account", page: TestPages.page("Account", "<h1>Welcome</h1><a href=\"/cards\">Cards</a>"))
+        defer { fixture.access.end(visit: "run") }
+
+        let result = await fixture.access.open(siteID: "example.com", visit: "run")
+
+        #expect(failure(result) == .needsPerson)
+        #expect(fixture.bank.site.posts.isEmpty)
+        #expect(fixture.stored?.needsPerson == true)
+        #expect(fixture.stored?.attemptCount == 0)
+    }
+
+    @Test("A site saved with a password is not marked as kept by its session", .timeLimit(.minutes(1)))
+    func passwordGrantIsNotSessionOnly() async throws {
+        let fixture = try Fixture()
+        var claimed = fixture.record()
+        claimed.keepsSessionOnly = true
+        try fixture.access.add(grant: fixture.makeGrant(), record: claimed)
+
+        #expect(fixture.stored?.keepsSessionOnly == false)
+    }
+
     @Test("Three sign-ins are allowed a day and the fourth is refused until the next day", .timeLimit(.minutes(2)))
     func fourthAttemptRefused() async throws {
         let fixture = try Fixture()

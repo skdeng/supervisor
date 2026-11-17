@@ -160,7 +160,7 @@ struct SiteRegistryTests {
         }
     }
 
-    @Test("The file holds nothing but the display fields and the attempt bookkeeping")
+    @Test("The file holds nothing but the display fields, the attempt bookkeeping, and how the site is kept")
     func fileHoldsNoDestinations() throws {
         try withTemporaryDirectory { directory in
             let file = directory.appendingPathComponent("sites.json")
@@ -169,11 +169,11 @@ struct SiteRegistryTests {
                 JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [[String: Any]]
             )
 
-            #expect(Set(object[0].keys) == ["id", "name", "added", "attemptCount", "needsPerson"])
+            #expect(Set(object[0].keys) == ["id", "name", "added", "attemptCount", "needsPerson", "keepsSessionOnly"])
         }
     }
 
-    @Test("A file written before the attempt keys existed loads with no attempts")
+    @Test("A file without the attempt keys or keepsSessionOnly loads with no attempts, as a site that signs in by itself")
     func fileWithoutAttemptKeys() throws {
         try withTemporaryDirectory { directory in
             let file = directory.appendingPathComponent("sites.json")
@@ -190,7 +190,23 @@ struct SiteRegistryTests {
             #expect(loaded.attemptsDay == nil)
             #expect(loaded.attemptCount == 0)
             #expect(!loaded.needsPerson)
+            #expect(!loaded.keepsSessionOnly)
             #expect(loaded.lastSignedIn == Date(timeIntervalSince1970: 1_700_003_600))
+        }
+    }
+
+    @Test("A site kept signed in by its session is recorded so through the file")
+    func keepsSessionOnlyRoundTrips() throws {
+        try withTemporaryDirectory { directory in
+            let file = directory.appendingPathComponent("sites.json")
+            var kept = SiteRecord(id: "example.com", name: "Example", added: Date(timeIntervalSince1970: 1_700_000_000))
+            kept.keepsSessionOnly = true
+            let other = SiteRecord(id: "other.example", name: "Other", added: Date(timeIntervalSince1970: 1_700_000_000))
+            try SiteRegistry.save([kept, other], to: file)
+
+            let loaded = SiteRegistry.load(from: file)
+
+            #expect(loaded.map(\.keepsSessionOnly) == [true, false])
         }
     }
 

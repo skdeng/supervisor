@@ -34,6 +34,8 @@ enum SelfCheck {
             finish(keychain(), report: report)
         case "messages":
             finish(messages(), report: report)
+        case "history":
+            finish(history(), report: report)
         case "disclaimed-exec":
             finish(disclaimedExec(), report: report)
         case "webkit":
@@ -142,6 +144,23 @@ enum SelfCheck {
             "foundEarlierItem": earlier != nil,
             "earlierItem": earlier ?? "",
             "addStatus": Int(addStatus),
+        ]
+    }
+
+    // MARK: Browsing history
+
+    /// Whether the browsing-history check can open the user's history files and finds the
+    /// tables and columns it reads. It reports counts and flags only: no address, title, or
+    /// date is read into the report.
+    private static func history() -> [String: Any] {
+        let report = BrowsingHistory().schemaReport()
+        return [
+            "check": "history",
+            "chromiumProfilesRead": report.chromiumProfilesRead,
+            "chromiumSchemaOK": report.chromiumSchemaOK,
+            "safariReadable": report.safariReadable,
+            "safariSchemaOK": report.safariSchemaOK,
+            "canReadProtectedData": report.canReadProtectedData,
         ]
     }
 

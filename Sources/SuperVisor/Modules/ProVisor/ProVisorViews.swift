@@ -273,8 +273,11 @@ struct ProVisorCapsuleButton: View {
 
     var body: some View {
         Button(action: action) {
+            // One line whatever the title, so a button never grows its window taller.
             Text(title)
                 .font(.system(size: 12, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .background(Capsule().fill(fill))

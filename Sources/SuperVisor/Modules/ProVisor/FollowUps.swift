@@ -41,6 +41,25 @@ enum FollowUpSchedule {
     }
 }
 
+/// Whether a follow-up pass is owed: for a note that is due, or once after the user granted a
+/// site a proposal asked for, so the check waiting on that site is made with it. One request
+/// is held at a time, and starting a pass answers it.
+struct FollowUpDemand: Equatable {
+    private(set) var siteGranted = false
+
+    func isOwed(hasDueNote: Bool) -> Bool {
+        hasDueNote || siteGranted
+    }
+
+    mutating func requestAfterGrant() {
+        siteGranted = true
+    }
+
+    mutating func passStarted() {
+        siteGranted = false
+    }
+}
+
 /// A calendar day in the user's time zone.
 struct LocalDay: Comparable, Equatable, Sendable {
     let year: Int

@@ -922,3 +922,119 @@ struct SecretReplacementTests {
         #expect(fake.log == ["read", "delete"])
     }
 }
+
+/// A grant that keeps the session holds no secret, so what is under test is that nothing that
+/// could be filled or replayed gets in under it.
+@Suite("Site grants that keep the session")
+struct SessionGrantTests {
+    private func sessionGrant(
+        username: String = "",
+        password: String = "",
+        key: String? = nil,
+        signIn: String = "https://example.com/login",
+        start: String = "https://www.example.com/home",
+        fill: [String] = ["example.com"],
+        browse: [String] = ["example.com", "www.example.com"],
+        kind: SiteGrant.CodeKind = .none,
+        sender: String? = nil,
+        steps: [SignInStep] = []
+    ) -> SiteGrant {
+        SiteGrant(
+            username: username,
+            password: password,
+            authenticatorKey: key,
+            signInURL: URL(string: signIn)!,
+            startURL: URL(string: start)!,
+            fillHosts: fill,
+            browseHosts: browse,
+            codeKind: kind,
+            codeSender: sender,
+            signInSteps: steps,
+            signOutControlSeen: true,
+            remembersPassword: false
+        )
+    }
+
+    @Test("A grant with no secret and the sign-in host as its only fill host is valid")
+    func valid() {
+        #expect(sessionGrant().isValid(for: "example.com"))
+        #expect(!sessionGrant().remembersPassword)
+    }
+
+    @Test("Any secret, code, or recorded step makes it invalid")
+    func carriesNothing() {
+        #expect(!sessionGrant(username: "alice@example.com").isValid(for: "example.com"))
+        #expect(!sessionGrant(password: samplePassword).isValid(for: "example.com"))
+        #expect(!sessionGrant(key: sampleKey).isValid(for: "example.com"))
+        #expect(!sessionGrant(key: sampleKey, kind: .authenticator).isValid(for: "example.com"))
+        #expect(!sessionGrant(kind: .text, sender: "24273").isValid(for: "example.com"))
+        #expect(!sessionGrant(kind: .email, sender: "codes@example.com").isValid(for: "example.com"))
+        #expect(!sessionGrant(sender: "24273").isValid(for: "example.com"))
+        #expect(!sessionGrant(steps: [makeStep()]).isValid(for: "example.com"))
+    }
+
+    @Test("The fill list holds the sign-in host alone")
+    func fillHostIsTheSignInHost() {
+        #expect(!sessionGrant(fill: ["example.com", "www.example.com"]).isValid(for: "example.com"))
+        #expect(!sessionGrant(fill: ["www.example.com"]).isValid(for: "example.com"))
+    }
+
+    @Test("The address and host rules are those of every grant")
+    func addressRules() {
+        #expect(!sessionGrant(signIn: "http://example.com/login").isValid(for: "example.com"))
+        #expect(!sessionGrant(start: "https://example.com:8443/home").isValid(for: "example.com"))
+        #expect(!sessionGrant(start: "https://other.example/home").isValid(for: "example.com"))
+        #expect(!sessionGrant(browse: ["www.example.com"]).isValid(for: "example.com"))
+        #expect(!sessionGrant().isValid(for: "www.example.com"))
+    }
+
+    @Test("A grant that remembers its password is held to the password rules")
+    func passwordGrantRulesHold() {
+        #expect(makeGrant().remembersPassword)
+        #expect(!makeGrant(username: "").isValid(for: "example.com"))
+        #expect(!makeGrant(password: "").isValid(for: "example.com"))
+    }
+
+    @Test("It reads back whole, and a grant stored without the key reads as one that remembers its password")
+    func storage() throws {
+        let store = InMemorySecretStore()
+        let vault = SiteVault(store: store)
+        try vault.save(sessionGrant(), for: "example.com")
+        #expect(try vault.grant(for: "example.com") == sessionGrant())
+
+        try vault.save(makeGrant(), for: "example.com")
+        let stored = try #require(try store.read(account: "example.com"))
+        var object = try #require(JSONSerialization.jsonObject(with: stored) as? [String: Any])
+        #expect(object["remembersPassword"] as? Bool == true)
+        object["remembersPassword"] = nil
+        try store.write(try JSONSerialization.data(withJSONObject: object), account: "example.com")
+
+        let read = try #require(try vault.grant(for: "example.com"))
+        #expect(read.remembersPassword)
+        #expect(read == makeGrant())
+    }
+
+    @Test("A stored session grant that has a password written into it reads as absent")
+    func tamperedSessionGrant() throws {
+        let store = InMemorySecretStore()
+        let vault = SiteVault(store: store)
+        try vault.save(sessionGrant(), for: "example.com")
+        let stored = try #require(try store.read(account: "example.com"))
+        var object = try #require(JSONSerialization.jsonObject(with: stored) as? [String: Any])
+        object["password"] = samplePassword
+        try store.write(try JSONSerialization.data(withJSONObject: object), account: "example.com")
+
+        #expect(try vault.grant(for: "example.com") == nil)
+    }
+
+    @Test("It prints as a fixed placeholder")
+    func redaction() {
+        let grant = sessionGrant()
+        var dumped = ""
+        dump(grant, to: &dumped)
+        for rendering in [grant.description, String(reflecting: grant), dumped] {
+            #expect(rendering.contains("redacted"))
+            #expect(!rendering.contains("example.com"))
+        }
+    }
+}

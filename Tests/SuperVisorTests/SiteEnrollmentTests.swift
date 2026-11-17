@@ -564,6 +564,212 @@ struct SiteEnrollmentTests {
         #expect(session.learnedCodeSender == "24273")
     }
 
+    // MARK: Keeping the session
+
+    /// Signs in on the open page the way a person would, by submitting the form with the
+    /// bank's own details, and waits for the signed-in page.
+    private func signInByHand(_ session: SiteEnrollment, _ bank: TestBank) async throws {
+        _ = try await session.browser.run("""
+            document.getElementById('user').value = username;
+            document.getElementById('pass').value = password;
+            HTMLFormElement.prototype.requestSubmit.call(document.forms[0]);
+            """, arguments: ["username": bank.username, "password": bank.password])
+        try await waitFor { bank.signedIn && session.browser.currentURL?.path == "/home" }
+    }
+
+    @Test("Keeping the session fills nothing, and the sign-in the person makes becomes a grant with no secret", .timeLimit(.minutes(1)))
+    func keepingTheSession() async throws {
+        let bank = TestBank()
+        bank.postLoginLocation = "https://app.example.com/overview?welcome=1#top"
+        bank.site.route("/overview", host: "app.example.com", page: TestPages.page("Overview", """
+            <p>Welcome back</p><a href="/logout">Sign out</a>
+            """))
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/login")
+
+        #expect(!session.isWorking)
+        #expect(session.note == SiteEnrollment.Notes.signInYourself)
+        #expect(session.currentHost == "example.com")
+        #expect(bank.site.posts.isEmpty)
+        let typed = try await session.browser.run(
+            "return document.getElementById('user').value + document.getElementById('pass').value;"
+        )
+        #expect(typed.string == "")
+
+        _ = try await session.browser.run("""
+            document.getElementById('user').value = username;
+            document.getElementById('pass').value = password;
+            HTMLFormElement.prototype.requestSubmit.call(document.forms[0]);
+            """, arguments: ["username": bank.username, "password": bank.password])
+        try await waitFor { bank.signedIn && session.browser.currentURL?.host == "app.example.com" }
+        #expect(!session.passwordIsConfirmed)
+
+        let (grant, record) = try await session.finishKeepingSession(name: "  My   Bank  ")
+
+        #expect(!grant.remembersPassword)
+        #expect(grant.isValid(for: "example.com"))
+        #expect(grant.username.isEmpty && grant.password.isEmpty)
+        #expect(grant.authenticatorKey == nil)
+        #expect(grant.codeKind == .none && grant.codeSender == nil)
+        #expect(grant.signInSteps.isEmpty)
+        #expect(grant.signInURL == url("https://example.com/login"))
+        #expect(grant.startURL == url("https://app.example.com/overview"))
+        #expect(grant.fillHosts == ["example.com"])
+        #expect(grant.browseHosts == ["example.com", "app.example.com"])
+        #expect(grant.signOutControlSeen)
+        #expect(record.id == "example.com")
+        #expect(record.name == "My Bank")
+        #expect(record.keepsSessionOnly)
+        #expect(record.lastSignedIn != nil)
+        #expect(record.isValid)
+        #expect(bank.site.posts.count == 1)
+    }
+
+    @Test("Keeping the session is refused on a page that still asks for a sign-in, and goes through once the person signs in", .timeLimit(.minutes(1)))
+    func keepingTheSessionNeedsASignedInPage() async throws {
+        let bank = TestBank()
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "https://example.com/login")
+        await #expect(throws: SiteEnrollment.Failure.notSignedIn) {
+            _ = try await session.finishKeepingSession(name: "Bank")
+        }
+
+        try await signInByHand(session, bank)
+        let (grant, _) = try await session.finishKeepingSession(name: "Bank")
+        #expect(grant.startURL == url("https://example.com/home"))
+        #expect(!grant.remembersPassword)
+    }
+
+    @Test("A page that shows no sign-out control is recorded as such when keeping the session", .timeLimit(.minutes(1)))
+    func keepingTheSessionRecordsTheSignOutControl() async throws {
+        let bank = TestBank()
+        bank.site.route("/home", page: TestPages.page("Home", "<p>Welcome back</p><a href=\"/cards\">Cards</a>"))
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/login")
+        try await signInByHand(session, bank)
+        let (grant, _) = try await session.finishKeepingSession(name: "Bank")
+
+        #expect(!grant.signOutControlSeen)
+        #expect(grant.isValid(for: "example.com"))
+    }
+
+    @Test("Saving a public page that never asked for a sign-in is refused", .timeLimit(.minutes(1)))
+    func keepingTheSessionNeedsASignIn() async throws {
+        let bank = TestBank()
+        bank.startPageIsPublic = true
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/account")
+        #expect(session.browser.currentURL?.path == "/account")
+        await #expect(throws: SiteEnrollment.Failure.signInNotSeen) {
+            _ = try await session.finishKeepingSession(name: "Bank")
+        }
+
+        // Following the page's own link to the sign-in page and signing in there is a sign-in.
+        _ = try await session.browser.open(url("https://example.com/login"))
+        await session.idle()
+        try await signInByHand(session, bank)
+        let (grant, _) = try await session.finishKeepingSession(name: "Bank")
+        #expect(grant.startURL == url("https://example.com/home"))
+    }
+
+    @Test("A password typed into the page counts as seeing the sign-in", .timeLimit(.minutes(1)))
+    func typedPasswordIsASignIn() async throws {
+        let bank = TestBank()
+        bank.startPageIsPublic = true
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/account")
+        session.browser.passwordTypedObserver?()
+
+        let (grant, _) = try await session.finishKeepingSession(name: "Bank")
+        #expect(!grant.remembersPassword)
+    }
+
+    @Test("A sign-in seen in an earlier kept session does not carry into the next", .timeLimit(.minutes(1)))
+    func sightingDoesNotCarryOver() async throws {
+        let bank = TestBank()
+        bank.startPageIsPublic = true
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/login")
+        try await session.beginKeepingSession(signInAddress: "example.com/account")
+
+        await #expect(throws: SiteEnrollment.Failure.signInNotSeen) {
+            _ = try await session.finishKeepingSession(name: "Bank")
+        }
+    }
+
+    @Test("Each finish answers only its own begin", .timeLimit(.minutes(1)))
+    func finishesDoNotCross() async throws {
+        let bank = TestBank()
+        let kept = enrollment(bank)
+        defer { kept.cancel() }
+        try await kept.beginKeepingSession(signInAddress: "example.com/login")
+        try await signInByHand(kept, bank)
+        await #expect(throws: SiteEnrollment.Failure.notSignedIn) { _ = try await kept.finish(name: "Bank") }
+
+        let other = TestBank()
+        let assisted = enrollment(other)
+        defer { assisted.cancel() }
+        try await begin(assisted, other)
+        await #expect(throws: SiteEnrollment.Failure.notSignedIn) {
+            _ = try await assisted.finishKeepingSession(name: "Bank")
+        }
+        // A begin of the other kind replaces the first.
+        other.signOut()
+        try await assisted.beginKeepingSession(signInAddress: "example.com/login")
+        try await signInByHand(assisted, other)
+        let (grant, _) = try await assisted.finishKeepingSession(name: "Bank")
+        #expect(!grant.remembersPassword)
+        await #expect(throws: SiteEnrollment.Failure.notSignedIn) { _ = try await assisted.finish(name: "Bank") }
+    }
+
+    @Test("Keeping the session refuses an address that is not one, loading nothing", .timeLimit(.minutes(1)))
+    func keepingTheSessionRefusesAddresses() async throws {
+        let bank = TestBank()
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        for address in ["http://example.com/login", "example.com:8443/login", "user@example.com", ""] {
+            await #expect(throws: SiteEnrollment.Failure.invalidAddress, "\(address)") {
+                try await session.beginKeepingSession(signInAddress: address)
+            }
+        }
+
+        #expect(bank.site.requests.isEmpty)
+        await #expect(throws: SiteEnrollment.Failure.notSignedIn) {
+            _ = try await session.finishKeepingSession(name: "Bank")
+        }
+    }
+
+    @Test("A kept session cannot be finished twice, nor once cancelled", .timeLimit(.minutes(1)))
+    func keepingTheSessionFinishesOnce() async throws {
+        let bank = TestBank()
+        let session = enrollment(bank)
+        try await session.beginKeepingSession(signInAddress: "example.com/login")
+        try await signInByHand(session, bank)
+        _ = try await session.finishKeepingSession(name: "Bank")
+        await #expect(throws: SiteEnrollment.Failure.notSignedIn) {
+            _ = try await session.finishKeepingSession(name: "Bank")
+        }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/account")
+        session.cancel()
+        await #expect(throws: SiteEnrollment.Failure.cancelled) {
+            _ = try await session.finishKeepingSession(name: "Bank")
+        }
+    }
+
     // MARK: Addresses
 
     @Test(

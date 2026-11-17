@@ -92,19 +92,19 @@ final class SiteAccess {
 
     /// Stores the grant in the vault and the record in the registry, replacing any earlier
     /// ones for the site. A person has just signed in, so attempts start over, and a sign-in
-    /// under way for the site is cut off.
+    /// under way for the site is cut off. The record's `keepsSessionOnly` is taken from the
+    /// grant.
     func add(grant: SiteGrant, record: SiteRecord) throws {
         guard record.isValid, grant.isValid(for: record.id) else {
             throw SiteVault.Failure.invalidGrant
         }
+        var stored = SignInAttempts.recordingPersonSignedIn(record, now: now())
+        stored.keepsSessionOnly = !grant.remembersPassword
         let earlier = try? vault.grant(for: record.id)
         try vault.save(grant, for: record.id)
         let others = sites().filter { $0.id != record.id }
         do {
-            try SiteRegistry.save(
-                others + [SignInAttempts.recordingPersonSignedIn(record, now: now())],
-                to: registryURL
-            )
+            try SiteRegistry.save(others + [stored], to: registryURL)
         } catch {
             if let earlier {
                 try? vault.save(earlier, for: record.id)
@@ -139,6 +139,9 @@ final class SiteAccess {
     /// Opens a granted site's start page for a visit, signing in first when the session has
     /// ended. A visit that has another site open closes it. A site that is not granted gets no
     /// visit.
+    ///
+    /// A grant that remembers no password is never signed in to here: once its session has
+    /// ended the site needs the person, and no attempt is counted.
     func open(siteID: String, visit visitID: String) async -> Result<PageSnapshot, Failure> {
         guard !visitID.isEmpty, visitID.count <= Self.maximumVisitIDLength else {
             return .failure(.unavailable)
@@ -226,6 +229,7 @@ final class SiteAccess {
         }
         if site.needsPerson { return .failure(.needsPerson) }
 
+        let epoch = recordEpochs[siteID, default: 0]
         let finishedAtStart = signInsFinished[siteID, default: 0]
         if visit.siteID != siteID {
             visit.browser?.close()
@@ -251,6 +255,10 @@ final class SiteAccess {
             return .failure(Self.failure(for: error, refused: .needsPerson))
         }
 
+        guard grant.remembersPassword else {
+            markNeedsPerson(siteID: siteID, epoch: epoch)
+            return .failure(.needsPerson)
+        }
         if case let .failure(failure) = await signIn(
             siteID: siteID,
             grant: grant,
@@ -339,6 +347,18 @@ final class SiteAccess {
         }
         if !store(updated) {
             AppLog.error(.sites, "the outcome of an attempt for \(siteID) could not be recorded")
+        }
+    }
+
+    /// Flags the site as needing the person, unless its grant and record were replaced or
+    /// removed since `epoch`.
+    private func markNeedsPerson(siteID: String, epoch: Int) {
+        guard recordEpochs[siteID, default: 0] == epoch, var current = record(siteID) else { return }
+        current.needsPerson = true
+        if store(current) {
+            AppLog.notice(.sites, "session for \(siteID) ended; it needs the person")
+        } else {
+            AppLog.error(.sites, "the ended session for \(siteID) could not be recorded")
         }
     }
 

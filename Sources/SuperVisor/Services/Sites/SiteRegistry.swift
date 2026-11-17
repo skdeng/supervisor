@@ -43,6 +43,9 @@ struct SiteRecord: Codable, Identifiable, Equatable, Sendable {
     var attemptCount = 0
     /// Set when an unattended sign-in failed; cleared when the person signs in again.
     var needsPerson = false
+    /// Mirrors the grant's `remembersPassword == false`, so the site can be described without
+    /// reading the Keychain. Nothing decides where a secret goes from it.
+    var keepsSessionOnly = false
 
     /// The id is a valid host and the name holds 1 to 60 characters once cleaned.
     var isValid: Bool {
@@ -71,7 +74,8 @@ struct SiteRecord: Codable, Identifiable, Equatable, Sendable {
 }
 
 extension SiteRecord {
-    /// A stored record without the attempt keys reads as one with no attempts.
+    /// A stored record without the attempt keys reads as one with no attempts, and one without
+    /// `keepsSessionOnly` as a site that signs in by itself.
     init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(String.self, forKey: .id)
@@ -81,6 +85,7 @@ extension SiteRecord {
         attemptsDay = try values.decodeIfPresent(String.self, forKey: .attemptsDay)
         attemptCount = try values.decodeIfPresent(Int.self, forKey: .attemptCount) ?? 0
         needsPerson = try values.decodeIfPresent(Bool.self, forKey: .needsPerson) ?? false
+        keepsSessionOnly = try values.decodeIfPresent(Bool.self, forKey: .keepsSessionOnly) ?? false
     }
 }
 

@@ -89,7 +89,7 @@ struct ProVisorSettingsView: View {
             Text("Sites")
                 .font(.caption.weight(.medium))
 
-            Text("ProVisor can read pages on these sites signed in, and only read. Passwords stay in your Keychain, and SuperVisor fills them in itself.")
+            Text("ProVisor can read pages on these sites signed in, and only read. A site kept signed in holds no password and asks you to sign in again when it signs you out; for a site SuperVisor signs in to, the password stays in your Keychain and SuperVisor fills it in itself.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -209,6 +209,9 @@ struct ProVisorSettingsView: View {
                 .foregroundStyle(.orange)
         case let .signedIn(date):
             Text("Signed in \(date.formatted(.relative(presentation: .named)))")
+                .foregroundStyle(.secondary)
+        case let .signedInKeepingSession(date):
+            Text("Signed in \(date.formatted(.relative(presentation: .named))) · asks you when it signs you out")
                 .foregroundStyle(.secondary)
         case .notSignedInYet:
             Text("Not signed in yet")

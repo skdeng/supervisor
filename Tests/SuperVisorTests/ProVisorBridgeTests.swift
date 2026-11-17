@@ -273,7 +273,7 @@ struct ProVisorBridgeTests {
             "mcp__supervisor__follow_link",
             "mcp__supervisor__read_more",
         ])
-        #expect(sitesOnly.bridge.siteNames == ["Bank", "City Power"])
+        #expect(sitesOnly.bridge.siteNames == ["Bank (example.com)", "City Power (power.example.org)"])
         #expect(!sitesOnly.bridge.textsAreOn)
         #expect(sitesOnly.bridge.configurationPath == sitesOnly.configurationURL.path)
 
@@ -492,7 +492,7 @@ struct ProVisorBridgeTests {
         try fixture.grantSite("power.example.org", name: "City Power")
 
         #expect(fixture.bridge.prepare(access: unsealed) == .failure(.accessNotSealed))
-        #expect(fixture.bridge.availableSiteNames(access: sealed) == ["Bank", "City Power"])
+        #expect(fixture.bridge.availableSiteNames(access: sealed) == ["Bank (example.com)", "City Power (power.example.org)"])
 
         #expect(fixture.bridge.lastUnavailable == .accessNotSealed)
         #expect(!FileManager.default.fileExists(atPath: fixture.runs.path))

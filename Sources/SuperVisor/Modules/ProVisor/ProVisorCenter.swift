@@ -69,6 +69,7 @@ final class ProVisorCenter: ObservableObject {
     /// Waits until the next time a follow-up pass may start (`FollowUpSchedule.nextStart`).
     private var followUpTask: Task<Void, Never>?
     private var followUpLedger: FollowUpLedger
+    private var followUpDemand = FollowUpDemand()
     private var accessWatcher: FileChangeWatcher?
     /// The emailed-code lookups under way, held so stopping can end them.
     private var lookupServices: [UUID: AgentTaskService] = [:]
@@ -248,6 +249,7 @@ final class ProVisorCenter: ObservableObject {
         // sure none outlives the center.
         bridge.stop()
 
+        followUpDemand = FollowUpDemand()
         pendingActs = []
         queuedIDs = []
         actingID = nil
@@ -438,19 +440,15 @@ final class ProVisorCenter: ObservableObject {
 
     // MARK: - Follow-up passes
 
-    /// Arms the one timer for the next follow-up pass: it fires when a pass owed for a due note
-    /// may start (`FollowUpSchedule.nextStart`), and is dropped when no note is due. It is
-    /// evaluated again whenever something that decides it changes: a reviewed run, a scouting
-    /// pass, or a follow-up pass finishes, the Mac wakes, or the center starts.
+    /// Arms the one timer for the next follow-up pass: it fires when a pass that is owed may
+    /// start (`FollowUpSchedule.nextStart`), and is dropped when none is owed. A pass is owed
+    /// for a due note, or after a site was granted (`FollowUpDemand`). It is evaluated again
+    /// whenever something that decides it changes: a reviewed run, a scouting pass, or a
+    /// follow-up pass finishes, a site is granted, the Mac wakes, or the center starts.
     private func armFollowUp() {
         cancelFollowUp()
         let now = Date()
-        guard isActive,
-              FollowUpNotes.hasDueNote(
-                  in: ProVisorHome.followUpsURL,
-                  on: LocalDay(now, timeZone: .current)
-              )
-        else { return }
+        guard isActive, isFollowUpOwed(now: now) else { return }
         let start = FollowUpSchedule.nextStart(
             now: now,
             last: followUpLedger.last,
@@ -468,6 +466,47 @@ final class ProVisorCenter: ObservableObject {
     private func cancelFollowUp() {
         followUpTask?.cancel()
         followUpTask = nil
+    }
+
+    private func isFollowUpOwed(now: Date) -> Bool {
+        followUpDemand.isOwed(
+            hasDueNote: FollowUpNotes.hasDueNote(
+                in: ProVisorHome.followUpsURL,
+                on: LocalDay(now, timeZone: .current)
+            )
+        )
+    }
+
+    /// Asks for a follow-up pass after the user granted a site, so a check that waited on it is
+    /// made with it. The pass keeps the follow-up schedule's limits, and one request
+    /// stands at a time.
+    func siteWasGranted() {
+        guard isActive else { return }
+        followUpDemand.requestAfterGrant()
+        armFollowUp()
+    }
+
+    /// The user saved a site from the window opened for proposal `proposalID`'s request for
+    /// `host`. The proposal is recorded done when the saved site is `host` and the file still
+    /// asks for it (`SiteRequests.settle`); either way a site was granted, so a follow-up pass
+    /// is asked for.
+    func siteRequestSaved(proposalID: String, host: String, site: SiteRecord) {
+        guard isActive else { return }
+        let outcome = SiteRequests.settle(
+            proposalID: proposalID,
+            host: host,
+            savedSiteID: site.id,
+            siteName: site.name,
+            in: ProVisorHome.proposalsURL,
+            isBusy: actingID == proposalID || queuedIDs.contains(proposalID)
+        )
+        if outcome == .settled {
+            AppLog.notice(.provisor, "site request settled")
+            reloadSoon()
+        } else {
+            AppLog.notice(.provisor, "site request left open: \(outcome.logName)")
+        }
+        siteWasGranted()
     }
 
     private func mayStartFollowUp(now: Date) -> Bool {
@@ -489,10 +528,7 @@ final class ProVisorCenter: ObservableObject {
             return
         }
         let now = Date()
-        guard FollowUpNotes.hasDueNote(
-            in: ProVisorHome.followUpsURL,
-            on: LocalDay(now, timeZone: .current)
-        ) else { return }
+        guard isFollowUpOwed(now: now) else { return }
         guard mayStartFollowUp(now: now) else {
             armFollowUp()
             return
@@ -511,6 +547,7 @@ final class ProVisorCenter: ObservableObject {
         }
 
         isFollowingUp = true
+        followUpDemand.passStarted()
         followUpLedger = followUpLedger.recordingStart(now: now, timeZone: .current)
         followUpLedger.save(to: defaults)
         AppLog.notice(.provisor, "follow-up started")

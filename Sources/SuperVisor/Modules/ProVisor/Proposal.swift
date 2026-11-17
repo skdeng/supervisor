@@ -64,6 +64,10 @@ struct Proposal: Identifiable, Equatable, Sendable {
     /// What the user last had carried out, as recorded in the file. It is read for display
     /// only: a run is instructed from the choice captured at the tap.
     var choice: ProposalChoice?
+    /// The host of a site the agent asks the user to sign in to. It is the agent's word, shaped
+    /// by mail: it offers a sign-in and never grants one, and the sign-in window puts it in the
+    /// address field only when the user's own browsers know it (`SiteFormModel`).
+    var site: String?
 
     /// Whether the proposal still awaits a decision — a failed one can be approved again.
     var isOpen: Bool { status == .proposed || status == .failed }
@@ -150,8 +154,21 @@ extension Proposal {
             under: (fields["under"] as? String).flatMap { StandingRule.isValidID($0) ? $0 : nil },
             isAutomatic: fields["automatic"] as? Bool ?? false,
             decided: date(fields["decided"]),
-            choice: parsedChoice(fields, optionCount: options.count)
+            choice: parsedChoice(fields, optionCount: options.count),
+            site: parsedSite(fields["site"])
         )
+    }
+
+    /// The `site` field lowercased, when it is a plain host name; nil otherwise. A bad value
+    /// drops the field and keeps the proposal. Only ASCII is lowercased: Unicode case mapping
+    /// would turn a look-alike such as the Kelvin sign into a real letter.
+    static func parsedSite(_ value: Any?) -> String? {
+        guard let text = value as? String,
+              text.utf8.count <= 253,
+              text.unicodeScalars.allSatisfy(\.isASCII)
+        else { return nil }
+        let host = text.lowercased()
+        return SiteHost.isValid(host) ? host : nil
     }
 
     /// The proposal's options: the `options` list when the file has one, else its single
@@ -269,9 +286,12 @@ enum ProposalQueue {
     /// carried out and not yet cleared. Something done under a standing approval is shown so
     /// the user can see what happened, and then leaves by itself after a day — rows that had to
     /// be cleared by hand would turn "stop asking me" into a different chore. Within each group
-    /// the newest leads, and the id settles a tie so a reload never reshuffles the rows.
+    /// the newest leads, and the id settles a tie so a reload never reshuffles the rows. Of
+    /// several open requests for one site, only the first is shown (`repeatedSiteRequests`).
     static func visible(_ proposals: [Proposal], now: Date) -> [Proposal] {
-        proposals
+        let repeated = repeatedSiteRequests(in: proposals, now: now)
+        return proposals
+            .filter { !repeated.contains($0.id) }
             .filter { proposal in
                 switch proposal.status {
                 case .proposed, .failed:
@@ -292,6 +312,25 @@ enum ProposalQueue {
                 return first.id < second.id
             }
     }
+
+    /// The ids of open, unexpired proposals asking for a site that an earlier open, unexpired
+    /// proposal already asks for. The earliest created asks, the id settling a tie; the rest
+    /// stay on file and are neither shown nor announced, since one sign-in answers them all.
+    static func repeatedSiteRequests(in proposals: [Proposal], now: Date) -> Set<String> {
+        let asking = proposals
+            .filter { $0.isOpen && $0.site != nil && !ProposalReview.isExpired($0, now: now) }
+            .sorted { first, second in
+                if first.created != second.created { return first.created < second.created }
+                return first.id < second.id
+            }
+        var asked = Set<String>()
+        var repeated = Set<String>()
+        for proposal in asking {
+            guard let site = proposal.site else { continue }
+            if !asked.insert(site).inserted { repeated.insert(proposal.id) }
+        }
+        return repeated
+    }
 }
 
 /// Keeps count of which proposals the user has been told about, so each is announced once
@@ -310,13 +349,16 @@ struct ProposalAnnouncer {
 
     /// How many proposals in `loaded` are news: those awaiting a decision that were neither
     /// on file before nor admitted under a standing approval. Something admitted under a rule
-    /// is being dealt with, which is the point of having given one.
-    mutating func countNew(in loaded: [Proposal], automatic: Set<String>) -> Int {
+    /// is being dealt with, which is the point of having given one. A repeated request for a
+    /// site already asked for is not news either (`ProposalQueue.repeatedSiteRequests`).
+    mutating func countNew(in loaded: [Proposal], automatic: Set<String>, now: Date = Date()) -> Int {
         let known = seen ?? []
+        let repeated = ProposalQueue.repeatedSiteRequests(in: loaded, now: now)
         let added = loaded.filter { proposal in
             proposal.status == .proposed
                 && !known.contains(proposal.id)
                 && !automatic.contains(proposal.id)
+                && !repeated.contains(proposal.id)
         }.count
         seen = known.union(loaded.map(\.id))
         return added
@@ -338,7 +380,7 @@ enum RaisedItems {
     /// behind with everything the app writes: a reviewed run is never told the rules in force,
     /// so neither can be meant.
     static let carriedFields: Set<String> = [
-        "title", "why", "action", "options", "kind", "created", "expires",
+        "title", "why", "action", "options", "kind", "created", "expires", "site",
     ]
 
     /// Moves every usable item into `proposals` and empties `raised`. Returns how many joined
@@ -466,20 +508,9 @@ enum ProposalStore {
         now: Date = Date(),
         timeZone: TimeZone = .current
     ) throws {
-        guard Proposal.isValidID(id) else { throw CocoaError(.fileWriteInvalidFileName) }
-        let url = directory.appendingPathComponent("\(id).json", isDirectory: false)
-        let data = try Data(contentsOf: url)
-        guard data.count <= Proposal.maximumFileBytes,
-              var fields = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { throw CocoaError(.fileReadCorruptFile) }
-
+        var fields = try readFields(id: id, in: directory)
         if let status {
-            fields["status"] = status.rawValue
-            fields["decided"] = now.formatted(.iso8601)
-            // The weekday and local hour, spelled out. Whether the user approves something on
-            // Tuesdays, or first thing in the morning, is a pattern the agent is asked to find,
-            // and working a weekday out from a UTC timestamp is where a model slips.
-            fields["decidedLocal"] = ProVisorClock.localStamp(now, timeZone: timeZone)
+            stamp(status, into: &fields, now: now, timeZone: timeZone)
         }
         if let result {
             fields["result"] = result
@@ -506,11 +537,77 @@ enum ProposalStore {
             break
         }
 
+        try write(fields, id: id, in: directory)
+    }
+
+    /// Why a site request was, or was not, settled.
+    enum SiteRequestSettlement: Equatable {
+        case settled
+        /// On disk the proposal is settled, dismissed, or withdrawn.
+        case notOpen
+        /// On disk the proposal names another site, or none.
+        case siteChanged
+    }
+
+    /// Records a site request done with `result`, as a compare-and-set against the file: only
+    /// when the proposal on disk is `proposed` or `failed` and its `site`, read the way
+    /// `Proposal.parse` reads it, is `host`. Otherwise nothing is written. What decides is the
+    /// file, never a copy held in memory, since the agent can rewrite or settle it at any time.
+    static func settleSiteRequest(
+        id: String,
+        in directory: URL,
+        host: String,
+        result: String,
+        now: Date = Date(),
+        timeZone: TimeZone = .current
+    ) throws -> SiteRequestSettlement {
+        var fields = try readFields(id: id, in: directory)
+        let status: Proposal.Status? = switch fields["status"] {
+        case nil: .proposed
+        case let name as String: Proposal.Status(rawValue: name)
+        default: nil
+        }
+        guard status == .proposed || status == .failed else { return .notOpen }
+        guard Proposal.parsedSite(fields["site"]) == host else { return .siteChanged }
+        stamp(.done, into: &fields, now: now, timeZone: timeZone)
+        fields["result"] = result
+        try write(fields, id: id, in: directory)
+        return .settled
+    }
+
+    private static func url(id: String, in directory: URL) throws -> URL {
+        guard Proposal.isValidID(id) else { throw CocoaError(.fileWriteInvalidFileName) }
+        return directory.appendingPathComponent("\(id).json", isDirectory: false)
+    }
+
+    private static func readFields(id: String, in directory: URL) throws -> [String: Any] {
+        let data = try Data(contentsOf: url(id: id, in: directory))
+        guard data.count <= Proposal.maximumFileBytes,
+              let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { throw CocoaError(.fileReadCorruptFile) }
+        return fields
+    }
+
+    private static func stamp(
+        _ status: Proposal.Status,
+        into fields: inout [String: Any],
+        now: Date,
+        timeZone: TimeZone
+    ) {
+        fields["status"] = status.rawValue
+        fields["decided"] = now.formatted(.iso8601)
+        // The weekday and local hour, spelled out. Whether the user approves something on
+        // Tuesdays, or first thing in the morning, is a pattern the agent is asked to find,
+        // and working a weekday out from a UTC timestamp is where a model slips.
+        fields["decidedLocal"] = ProVisorClock.localStamp(now, timeZone: timeZone)
+    }
+
+    private static func write(_ fields: [String: Any], id: String, in directory: URL) throws {
         let updated = try JSONSerialization.data(withJSONObject: fields, options: writingOptions)
         // A file over the limit would be skipped on the next load.
         guard updated.count <= Proposal.maximumFileBytes else {
             throw CocoaError(.fileWriteOutOfSpace)
         }
-        try updated.write(to: url, options: .atomic)
+        try updated.write(to: url(id: id, in: directory), options: .atomic)
     }
 }

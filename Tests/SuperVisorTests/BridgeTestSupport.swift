@@ -26,6 +26,38 @@ struct ScratchFolder {
     }
 }
 
+/// A meeting point for `parties` callers on any thread: each waits until all have arrived or
+/// `timeout` passes, and learns which.
+final class TestBarrier: @unchecked Sendable {
+    let parties: Int
+    let timeout: Duration
+    private let lock = NSLock()
+    private var arrived = 0
+    private var met: [Bool] = []
+
+    init(parties: Int, timeout: Duration) {
+        self.parties = parties
+        self.timeout = timeout
+    }
+
+    /// Whether each arrival met the others in time, in the order they returned.
+    var outcomes: [Bool] { lock.withLock { met } }
+
+    /// Waits for the other parties; true when all arrived within the timeout.
+    @discardableResult
+    func arrive() async -> Bool {
+        lock.withLock { arrived += 1 }
+        let deadline = ContinuousClock.now + timeout
+        var allArrived = lock.withLock { arrived >= parties }
+        while !allArrived, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+            allArrived = lock.withLock { arrived >= parties }
+        }
+        lock.withLock { met.append(allArrived) }
+        return allArrived
+    }
+}
+
 /// Counts calls and tracks how many are in flight at once, from any thread.
 final class ConcurrencyProbe: @unchecked Sendable {
     private let lock = NSLock()

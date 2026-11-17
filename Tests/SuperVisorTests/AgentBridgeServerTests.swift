@@ -43,6 +43,7 @@ struct AgentBridgeServerTests {
             recordedStartTime: (@Sendable (pid_t) -> ProcessStartTime?)? = nil,
             callTimeout: TimeInterval = 270,
             handlerDelay: Duration = .zero,
+            handlerBarrier: TestBarrier? = nil,
             handlerFails: Bool = false,
             handlerText: (@Sendable (JSONValue) -> String)? = nil
         ) throws {
@@ -68,6 +69,9 @@ struct AgentBridgeServerTests {
                 calls.record("\(tool)|\(token)")
                 if handlerDelay > .zero {
                     try? await Task.sleep(for: handlerDelay)
+                }
+                if let handlerBarrier {
+                    _ = await handlerBarrier.arrive()
                 }
                 let text = handlerText?(arguments)
                     ?? "echo:" + (arguments["message"]?.stringValue ?? "")
@@ -648,18 +652,20 @@ struct AgentBridgeServerTests {
 
     @Test("Two slow calls run at the same time")
     func slowCallsOverlap() async throws {
-        let fixture = try Fixture(trusted: { _ in true }, handlerDelay: .milliseconds(600))
+        // Each handler waits for the other at the barrier, which both reach only when the
+        // server runs the two calls at once; served one after the other, the first times out.
+        let barrier = TestBarrier(parties: 2, timeout: .seconds(10))
+        let fixture = try Fixture(trusted: { _ in true }, handlerBarrier: barrier)
         defer { fixture.tearDown() }
         let run = fixture.register()
 
-        let started = Date()
         async let first = BridgeTestClient.exchange(call(run, message: "one"), at: fixture.path)
         async let second = BridgeTestClient.exchange(call(run, message: "two"), at: fixture.path)
         let replies = await [first, second]
 
         #expect(replies.compactMap { $0?.text }.sorted() == ["echo:one", "echo:two"])
+        #expect(barrier.outcomes == [true, true])
         #expect(fixture.probe.peakConcurrency == 2)
-        #expect(Date().timeIntervalSince(started) < 1.1)
     }
 
     @Test("A ninth simultaneous connection is turned away while eight are being served")

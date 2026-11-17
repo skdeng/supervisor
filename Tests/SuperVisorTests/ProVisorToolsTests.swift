@@ -319,7 +319,7 @@ struct ProVisorToolsReplyTests {
     func failureSentences() {
         #expect(ProVisorTools.unknownSite(granted: [bank, utility]) == "No granted site matches that. Granted sites: Bank (example.com), City Power (power.example.org).")
         #expect(ProVisorTools.unknownSite(granted: []) == "No granted site matches that. Granted sites: none.")
-        #expect(ProVisorTools.needsPerson(siteName: "Bank") == "Bank needs the person to sign in again, in SuperVisor's settings under Sites. Raise that as an item, as \"When you cannot check something\" describes, and do not try this site again in this run.")
+        #expect(ProVisorTools.needsPerson(siteName: "Bank", siteID: "example.com") == "Bank needs the person to sign in again. Raise that as an item with \"site\": \"example.com\", as \"When you cannot check something\" describes, and do not try this site again in this run.")
         #expect(ProVisorTools.unavailable(siteName: "Bank") == "Bank could not be reached just now. Leave the follow-up open for a later run.")
         #expect(ProVisorTools.tooManyLinks == "This run has followed as many links on a site as it may.")
         #expect(ProVisorTools.noSuchLink == "There is no link with that number on the page you last read.")
@@ -660,7 +660,7 @@ struct ProVisorToolsCallTests {
 
         let reply = await fixture.open()
 
-        #expect(reply == .failure(ProVisorTools.needsPerson(siteName: "Bank")))
+        #expect(reply == .failure(ProVisorTools.needsPerson(siteName: "Bank", siteID: "example.com")))
         #expect(reply.isError)
         #expect(fixture.site.requests.isEmpty)
     }
