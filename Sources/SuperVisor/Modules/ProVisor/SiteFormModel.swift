@@ -20,10 +20,9 @@ import Foundation
 /// of keeping the site and the same details — and, for Sign in for me, only after a sign-in the
 /// enrollment confirms the password of (`SiteEnrollment`).
 ///
-/// **An address ProVisor asks for is filled in only when the user's own browsers know it.**
-/// The agent's request is model output shaped by mail from anyone, so a host it names goes
-/// into the address field only after `BrowsingHistory` finds the user has visited it;
-/// otherwise the field starts empty and the user types the address themselves.
+/// A sign-in the person is asked for, to a site ProVisor asked for that is not granted or to a
+/// granted site kept by its session, goes through `SiteSignInModel`; this form carries a
+/// request only for a granted site it signs in to again.
 @MainActor
 final class SiteFormModel: ObservableObject {
     enum Mode: Equatable {
@@ -59,82 +58,18 @@ final class SiteFormModel: ObservableObject {
         }
     }
 
-    /// The ProVisor proposal a form was opened from, the host it asked for, and the line the
-    /// form shows about it. Only a site saved under `host` settles the proposal.
+    /// The ProVisor proposal a form for a granted site was opened from, the site's host, and the
+    /// line the form shows about it. Only a site saved under `host` settles the proposal.
     struct Request: Equatable {
         let proposalID: String
         let host: String
         let message: String
-        /// The requested host matched the user's browsing history, or names a granted site.
-        let isRecognised: Bool
-    }
-
-    /// How a form opened from a ProVisor request for `host` starts.
-    enum RequestedStart: Equatable {
-        /// The host is a granted site: the form signs in to it again.
-        case signingInAgain(siteID: String)
-        /// A new site. The address is filled in only with a host the user's browsers know.
-        case adding(prefilledAddress: String?)
     }
 
     /// What the last Open Page or Sign In started with.
     enum Start: Equatable {
         case keepingSession(address: String)
         case signingIn(SignInRequest)
-    }
-
-    /// Why a sign-in or save did not go through, each shown as a fixed sentence.
-    enum Problem: Equatable {
-        case invalidAddress
-        case pageDidNotLoad
-        case notSignedIn
-        case invalidGrant
-        case passwordNotConfirmed
-        case passwordNotFilled
-        case signInNotSeen
-        case notSaved
-
-        var message: String {
-            switch self {
-            case .invalidAddress:
-                "Enter the https address of the site's sign-in page."
-            case .pageDidNotLoad:
-                "The sign-in page did not finish loading. Check the address and try again."
-            case .notSignedIn:
-                "Finish signing in on the page first, then save."
-            case .invalidGrant:
-                "This sign-in could not be recorded. Try again from the sign-in page."
-            case .passwordNotConfirmed:
-                "SuperVisor can't tell which password worked. Type the working password in the form here, then press Sign In again."
-            case .passwordNotFilled:
-                "SuperVisor didn't fill the sign-in itself, so it couldn't record it. Press Sign In and let it fill the page."
-            case .signInNotSeen:
-                "SuperVisor didn't see a sign-in here. If the page shows your account, save it anyway. If it doesn't, sign in on the page first."
-            case .notSaved:
-                "The site could not be saved to the Keychain."
-            }
-        }
-
-        /// A problem a new sign-in, not another Save, puts right.
-        var needsNewSignIn: Bool {
-            self == .passwordNotConfirmed || self == .passwordNotFilled
-        }
-
-        static func ofSignIn(_ error: any Error) -> Problem {
-            (error as? SiteEnrollment.Failure) == .invalidAddress ? .invalidAddress : .pageDidNotLoad
-        }
-
-        /// Nil for an enrollment cancelled while it finished: the window is gone.
-        static func ofFinish(_ error: any Error) -> Problem? {
-            switch error as? SiteEnrollment.Failure {
-            case .cancelled?: nil
-            case .invalidGrant?: .invalidGrant
-            case .passwordNotConfirmed?: .passwordNotConfirmed
-            case .passwordNotFilled?: .passwordNotFilled
-            case .signInNotSeen?: .signInNotSeen
-            case .invalidAddress?, .notSignedIn?, nil: .notSignedIn
-            }
-        }
     }
 
     enum SaveOutcome: Equatable {
@@ -177,24 +112,6 @@ final class SiteFormModel: ObservableObject {
     static let detailsChangedMessage = "You changed the sign-in details. Press Sign In again before saving."
     static let openPageAgainMessage = "You changed the sign-in details. Press Open Page again before saving."
 
-    /// Where a request for `host` leads: a granted site signs in again, and a new one has its
-    /// address filled in only when `hasVisited` says the user's browsers know the host.
-    static func requestedStart(
-        host: String,
-        grantedSites: [SiteRecord],
-        hasVisited: (String) -> Bool
-    ) -> RequestedStart {
-        if grantedSites.contains(where: { $0.id == host }) { return .signingInAgain(siteID: host) }
-        guard SiteHost.isValid(host), hasVisited(host) else { return .adding(prefilledAddress: nil) }
-        return .adding(prefilledAddress: host)
-    }
-
-    static let recognisedRequestMessage = "ProVisor asked for this site. It matches a site in your browser history."
-
-    static func unrecognisedRequestMessage(host: String) -> String {
-        "ProVisor asked for \(host). SuperVisor hasn't seen that address in your browser history, so type the site's address yourself."
-    }
-
     static func signInAgainRequestMessage(name: String) -> String {
         "ProVisor asked you to sign in to \(name) again."
     }
@@ -227,7 +144,7 @@ final class SiteFormModel: ObservableObject {
     @Published var textsStatus: SiteAccessCenter.TextsStatus = .off
     @Published var isWorking = false
 
-    @Published private(set) var problem: Problem?
+    @Published private(set) var problem: SiteSaveProblem?
     @Published private(set) var isSaving = false
     /// What the last Open Page or Sign In started with; nil before one, after a refused
     /// address, and after a save refused for want of a new sign-in.
@@ -255,37 +172,11 @@ final class SiteFormModel: ObservableObject {
             Request(
                 proposalID: $0,
                 host: record.id,
-                message: Self.signInAgainRequestMessage(name: record.name),
-                isRecognised: true
+                message: Self.signInAgainRequestMessage(name: record.name)
             )
         }
         saved = nil
         typedName = record.name
-    }
-
-    /// A form for adding the site a ProVisor proposal asked for, in Keep me signed in.
-    /// `prefilledAddress` is what `requestedStart` decided: the address starts as `host` only
-    /// when that is `host`, and is empty otherwise.
-    init(requestedHost host: String, proposalID: String, prefilledAddress: String?) {
-        mode = .adding
-        notice = nil
-        saved = nil
-        if let prefilledAddress, prefilledAddress == host, SiteHost.isValid(host) {
-            typedAddress = host
-            request = Request(
-                proposalID: proposalID,
-                host: host,
-                message: Self.recognisedRequestMessage,
-                isRecognised: true
-            )
-        } else {
-            request = Request(
-                proposalID: proposalID,
-                host: host,
-                message: Self.unrecognisedRequestMessage(host: host),
-                isRecognised: false
-            )
-        }
     }
 
     /// A form for signing in to a saved site again, in the way the site was kept.
@@ -296,8 +187,7 @@ final class SiteFormModel: ObservableObject {
             Request(
                 proposalID: $0,
                 host: record.id,
-                message: Self.signInAgainRequestMessage(name: record.name),
-                isRecognised: true
+                message: Self.signInAgainRequestMessage(name: record.name)
             )
         }
         chosenMethod = grant.remembersPassword ? .signsInForMe : .keepsSession
@@ -388,7 +278,7 @@ final class SiteFormModel: ObservableObject {
     var addressProblem: String? {
         let typed = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !typed.isEmpty, SiteEnrollment.normalisedAddress(typed) == nil else { return nil }
-        return Problem.invalidAddress.message
+        return SiteSaveProblem.invalidAddress.message
     }
 
     /// A note beside a valid address that leads into the middle of a sign-in: one that carries
@@ -589,7 +479,7 @@ final class SiteFormModel: ObservableObject {
         do {
             try await enrollment.beginKeepingSession(signInAddress: address)
         } catch {
-            let problem = Problem.ofSignIn(error)
+            let problem = SiteSaveProblem.ofSignIn(error)
             self.problem = problem
             if problem == .invalidAddress { started = nil }
         }
@@ -612,7 +502,7 @@ final class SiteFormModel: ObservableObject {
                 authenticatorHosts: request.authenticatorHosts
             )
         } catch {
-            let problem = Problem.ofSignIn(error)
+            let problem = SiteSaveProblem.ofSignIn(error)
             self.problem = problem
             // A refused address leaves nothing for `finish` to build on.
             if problem == .invalidAddress { started = nil }
@@ -653,7 +543,7 @@ final class SiteFormModel: ObservableObject {
                     made = try await enrollment.finish(name: resolvedName)
                 }
             } catch {
-                problem = Problem.ofFinish(error)
+                problem = SiteSaveProblem.ofFinish(error)
                 if problem?.needsNewSignIn == true { self.started = nil }
                 return .notSaved
             }

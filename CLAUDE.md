@@ -566,10 +566,11 @@ sink. Preserve these guards when touching the relevant code:
   enrollment refuses (`signInNotSeen`) unless some page of it asked for a sign-in
   (`SignInRules.asksForSignIn`: a password field, a code field, a row of four or more
   single-character boxes, or a sign-in frame), the person typed into a password field, or the
-  page it saves shows a sign-out control. **The page is probed when a load finishes and, at once, each time
-  the person types into it**, because a sign-in that moves from step to step inside one page
-  finishes no load, and a code field that submits on its last digit is gone before a page
-  would settle. A sign-in can still leave no evidence (a session an earlier window left in
+  page it saves shows a sign-out control. **The page is probed when a load finishes, at once each time
+  the person types into it, and every 2 s while a session is being kept**, because a sign-in
+  that moves from step to step inside one page finishes no load, a code field that submits on
+  its last digit is gone before a page would settle, and a sign-in can end on a button press
+  with no typing at all. A sign-in can still leave no evidence (a session an earlier window left in
   the data store, a passkey, a link opened from an email), so after that refusal the form
   offers **Save Anyway**, which saves on the person's confirmation
   (`SiteFormModel.offersSaveAnyway`; counted only while the refusal is what the form shows,
@@ -581,19 +582,24 @@ sink. Preserve these guards when touching the relevant code:
   ends the site needs the person: `SiteAccess` never signs in to such a grant and counts no
   attempt, and Settings shows **Needs you** until the user signs in again.
 - **A site the agent asks for is an offer, never a grant** (`Proposal.site`,
-  `SiteFormModel.requestedStart`). A `confirm` proposal may name the site that stands between
+  `SiteSignInModel.Start.decide`). A `confirm` proposal may name the site that stands between
   the agent and a check in a `site` field, which `Proposal.parsedSite` accepts only as a plain
   ASCII host name, lowercased as ASCII alone (Unicode case mapping would turn a look-alike
   letter into a real one); a bad value drops the field and keeps the proposal. The text is
   model output shaped by mail from anyone, and a look-alike address placed in the app's own
-  sign-in window would arrive with the app's authority. So the review window's **Sign In
-  to <host>…** button opens the site window with its address field **filled only when that
-  exact host is in the user's own browsing history on two different local days**
+  sign-in window would arrive with the app's authority. So a request for a site (the review window's **Sign In to <host>…** button, a notch prompt)
+  opens the sign-in window, which **loads the host's page by itself only when that
+  exact host is in the user's own browsing history on two different local days**, checked
+  again as the window opens
   (`BrowsingHistory`: `https` pages on that host alone, across Chromium-family profiles and
   Safari; a parent, a subdomain, a port, or an `http` page counts for nothing, and days are
-  counted, not visits, since one click can count twice). Otherwise the field starts empty and a
-  sentence names the host for the user to type. A host that is already a granted site opens
-  Sign In Again instead. Saving settles the proposal as a **compare-and-set against the file on
+  counted, not visits, since one click can count twice). Otherwise the window is titled plainly, its address field starts empty, and a
+  sentence names the host for the user to type. **Only a Keychain grant or that history check
+  vouches for an address**: a granted site kept by its session opens its grant's saved
+  sign-in address, one with a saved password opens the Sign In Again form, and one whose
+  grant cannot be read opens the Add Site form with an empty address, because the record's
+  id and name come from `sites.json`, which anything running as the user can edit
+  (`ProVisorSiteWindow.opening`). Saving settles the proposal as a **compare-and-set against the file on
   disk** (`ProposalStore.settleSiteRequest`): it is recorded done, with no run started, only
   while the file is still open and still names the site the window was opened for, and only
   that site settles it. The queue shows, and the banner announces, one open request per site,
@@ -1101,6 +1107,21 @@ names below are the code paths.
     and closes the browser. A proposal that names a site gives the review window a **Sign In
     to <host>…** button (**Sign In Again to <site>…** for a granted one) that opens this window
     for that request.
+  - **The sign-in window** (`SiteSignInModel`, `ProVisorSignInView`) is what every request to
+    sign in opens: a notch prompt, the review window's button, and Settings › Sign In Again
+    for a site kept by its session. It shares the site window and its live page
+    (`SiteWindowParts.swift`) and shows a title, one sentence, **Done**, and Cancel, with an
+    address field only when no address is vouched for (see Untrusted Input). The user signs in
+    on the page and presses Done once. **Done is always pressable and never presses itself**:
+    it turns to the brand style while the app believes the user is signed in
+    (`SiteEnrollment.appearsSignedIn`, advice only), and nothing closes the window but Done
+    succeeding, Cancel, or the close button, since a sign-in can pass through a page that
+    looks finished. Done saves a kept session through the same check and the same Save Anyway
+    as the form. **It never replaces a saved password**: before saving it reads the site the
+    save would land on and refuses when that site's grant remembers a password
+    (`SiteSignInModel.Destination`), which a typed address can otherwise reach; an existing
+    kept-session site keeps its name and the date it was added. A page that fails to load
+    offers **Try Again**. A site with a saved password keeps the Sign In Again form.
 
 **`Modules/SystemHUD/`** (volume / brightness / keyboard-backlight HUD — `VolumeController`,
 `BrightnessController`, `KeyboardBacklightController`, `MediaKeyMonitor`) is present but **NOT wired

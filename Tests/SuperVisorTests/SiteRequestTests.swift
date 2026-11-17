@@ -395,93 +395,169 @@ struct SiteRequestTests {
 
     // MARK: The window
 
-    @Test("A granted site signs in again, carrying the request that asked for it")
-    func routeForGrantedSite() {
-        let item = SignInDemand.Item(
-            host: "example.com",
-            displayName: "Example",
-            kind: .signedOut(keepsSession: true),
-            proposalID: "check"
-        )
-        #expect(ProVisorSiteWindow.route(for: item) == .signingInAgain(siteID: "example.com", requestedBy: "check"))
-
-        let unasked = SignInDemand.Item(
-            host: "example.com",
-            displayName: "Example",
-            kind: .signedOut(keepsSession: false),
-            proposalID: nil
-        )
-        #expect(ProVisorSiteWindow.route(for: unasked) == .signingInAgain(siteID: "example.com", requestedBy: nil))
+    private func item(
+        _ kind: SignInDemand.Item.Kind,
+        proposalID: String? = nil
+    ) -> SignInDemand.Item {
+        SignInDemand.Item(host: "example.com", displayName: "Example", kind: kind, proposalID: proposalID)
     }
 
-    @Test("A requested host opens as its request, and one with no proposal opens nothing")
+    @Test("A site kept by its session opens the sign-in window, carrying the request that asked for it")
+    func routeForSessionSite() {
+        #expect(ProVisorSiteWindow.route(for: item(.signedOut(keepsSession: true), proposalID: "check"))
+            == .signingIn(host: "example.com", requestedBy: "check"))
+        #expect(ProVisorSiteWindow.route(for: item(.signedOut(keepsSession: true)))
+            == .signingIn(host: "example.com", requestedBy: nil))
+    }
+
+    @Test("A site with a saved password signs in again in the form, carrying the request that asked for it")
+    func routeForPasswordSite() {
+        #expect(ProVisorSiteWindow.route(for: item(.signedOut(keepsSession: false), proposalID: "check"))
+            == .signingInAgain(siteID: "example.com", requestedBy: "check"))
+        #expect(ProVisorSiteWindow.route(for: item(.signedOut(keepsSession: false)))
+            == .signingInAgain(siteID: "example.com", requestedBy: nil))
+    }
+
+    @Test("A requested host opens the sign-in window for its request, and one with no proposal opens nothing")
     func routeForRequestedHost() {
         for recognised in [true, false] {
-            let item = SignInDemand.Item(
-                host: "example.com",
-                displayName: "example.com",
-                kind: .requested(recognised: recognised),
-                proposalID: "ask"
-            )
-            #expect(ProVisorSiteWindow.route(for: item) == .requested(host: "example.com", proposalID: "ask"))
+            #expect(ProVisorSiteWindow.route(for: item(.requested(recognised: recognised), proposalID: "ask"))
+                == .signingIn(host: "example.com", requestedBy: "ask"))
         }
-
-        let orphan = SignInDemand.Item(
-            host: "example.com",
-            displayName: "example.com",
-            kind: .requested(recognised: true),
-            proposalID: nil
-        )
-        #expect(ProVisorSiteWindow.route(for: orphan) == nil)
+        #expect(ProVisorSiteWindow.route(for: item(.requested(recognised: true))) == nil)
     }
 
-    @Test("The window reuses its form only for the same mode and the same request")
+    @Test("Settings and the review window route a granted site by the way it is kept, and a new host to the sign-in window")
+    func routeFromSettingsAndReview() {
+        var session = SiteRecord(id: "example.com", name: "Bank", added: Date(timeIntervalSince1970: 0))
+        session.keepsSessionOnly = true
+        let password = SiteRecord(id: "club.example", name: "Club", added: Date(timeIntervalSince1970: 0))
+
+        #expect(ProVisorSiteWindow.route(forSite: session, requestedBy: nil)
+            == .signingIn(host: "example.com", requestedBy: nil))
+        #expect(ProVisorSiteWindow.route(forSite: password, requestedBy: nil)
+            == .signingInAgain(siteID: "club.example", requestedBy: nil))
+
+        let granted = [session, password]
+        #expect(ProVisorSiteWindow.route(forRequestedHost: "example.com", proposalID: "p", grantedSites: granted)
+            == .signingIn(host: "example.com", requestedBy: "p"))
+        #expect(ProVisorSiteWindow.route(forRequestedHost: "club.example", proposalID: "p", grantedSites: granted)
+            == .signingInAgain(siteID: "club.example", requestedBy: "p"))
+        #expect(ProVisorSiteWindow.route(forRequestedHost: "new.example", proposalID: "p", grantedSites: granted)
+            == .signingIn(host: "new.example", requestedBy: "p"))
+    }
+
+    private func grant(remembersPassword: Bool) -> SiteGrant {
+        SiteGrant(
+            username: remembersPassword ? "alice@example.com" : "",
+            password: remembersPassword ? "saved-password" : "",
+            authenticatorKey: nil,
+            signInURL: URL(string: "https://example.com/login")!,
+            startURL: URL(string: "https://example.com/account")!,
+            fillHosts: ["example.com"],
+            browseHosts: ["example.com"],
+            codeKind: .none,
+            codeSender: nil,
+            remembersPassword: remembersPassword
+        )
+    }
+
+    @Test("The stored grant decides the window, so a saved password never opens the sign-in window")
+    func openingFollowsTheGrant() {
+        let record = SiteRecord(id: "example.com", name: "Bank", added: Date(timeIntervalSince1970: 0))
+        let password = grant(remembersPassword: true)
+        let session = grant(remembersPassword: false)
+        typealias Window = ProVisorSiteWindow
+
+        for route in [Window.SignInRoute.signingIn(host: "example.com", requestedBy: "p"),
+                      .signingInAgain(siteID: "example.com", requestedBy: "p")] {
+            #expect(Window.opening(for: route, record: record, grant: password)
+                == .signingInAgain(grant: password, record: record, requestedBy: "p"))
+            #expect(Window.opening(for: route, record: record, grant: session)
+                == .signIn(host: "example.com", requestedBy: "p"))
+        }
+    }
+
+    @Test("A granted site whose stored sign-in cannot be read opens the Add Site form, keeping its request, whichever way it is kept")
+    func openingUnreadableGrant() {
+        var session = SiteRecord(id: "example.com", name: "Bank", added: Date(timeIntervalSince1970: 0))
+        session.keepsSessionOnly = true
+        let password = SiteRecord(id: "example.com", name: "Bank", added: Date(timeIntervalSince1970: 0))
+        typealias Window = ProVisorSiteWindow
+
+        for record in [session, password] {
+            for proposalID in ["p", nil] as [String?] {
+                #expect(Window.opening(for: .signingIn(host: "example.com", requestedBy: proposalID), record: record, grant: nil)
+                    == .unreadable(record: record, requestedBy: proposalID))
+                #expect(Window.opening(for: .signingInAgain(siteID: "example.com", requestedBy: proposalID), record: record, grant: nil)
+                    == .unreadable(record: record, requestedBy: proposalID))
+            }
+        }
+        let form = SiteFormModel(unreadableSite: session, requestedBy: "p")
+        #expect(form.address.isEmpty)
+        #expect(!form.canOpenPage)
+        #expect(form.notice == "Bank's saved sign-in couldn't be read. Add it again.")
+        #expect(form.request?.proposalID == "p")
+    }
+
+    @Test("A site whose record is gone opens as a new site, keeping the request that asked for it")
+    func openingRemovedSite() {
+        typealias Window = ProVisorSiteWindow
+        for route in [Window.SignInRoute.signingIn(host: "example.com", requestedBy: "2026-11-17-check"),
+                      .signingInAgain(siteID: "example.com", requestedBy: "2026-11-17-check")] {
+            #expect(Window.opening(for: route, record: nil, grant: nil)
+                == .signIn(host: "example.com", requestedBy: "2026-11-17-check"))
+        }
+        for route in [Window.SignInRoute.signingIn(host: "example.com", requestedBy: nil),
+                      .signingInAgain(siteID: "example.com", requestedBy: nil)] {
+            #expect(Window.opening(for: route, record: nil, grant: nil) == .addingSite)
+        }
+    }
+
+    @Test("The window reuses its form only for the same mode and the same request, and its sign-in for the same site")
     func windowReuseRule() {
+        typealias Content = SiteEnrollmentWindow.Content
         func reuses(
             allowed: Bool = true,
             visible: Bool = true,
-            shown: SiteFormModel.Mode? = .adding,
+            shown: Content? = .form(.adding),
             shownRequest: String? = nil,
-            mode: SiteFormModel.Mode = .adding,
+            content: Content = .form(.adding),
             request: String? = nil
         ) -> Bool {
             ProVisorSiteWindow.reusesShownForm(
                 allowed: allowed,
                 isVisible: visible,
-                shownMode: shown,
+                shown: shown,
                 shownRequestID: shownRequest,
-                mode: mode,
+                content: content,
                 requestID: request
             )
         }
+        let again = Content.form(.signingInAgain(siteID: "example.com"))
 
         #expect(reuses())
         #expect(reuses(shownRequest: "p", request: "p"))
-        #expect(reuses(shown: .signingInAgain(siteID: "example.com"), mode: .signingInAgain(siteID: "example.com")))
+        #expect(reuses(shown: again, content: again))
         #expect(!reuses(shownRequest: nil, request: "p"))
         #expect(!reuses(shownRequest: "p", request: nil))
         #expect(!reuses(shownRequest: "p", request: "q"))
-        #expect(!reuses(shown: .signingInAgain(siteID: "example.com")))
-        #expect(!reuses(shown: .signingInAgain(siteID: "example.com"), mode: .signingInAgain(siteID: "other.example")))
+        #expect(!reuses(shown: again))
+        #expect(!reuses(shown: again, content: .form(.signingInAgain(siteID: "other.example"))))
         #expect(!reuses(shown: nil))
         #expect(!reuses(visible: false))
         #expect(!reuses(allowed: false))
-    }
 
-    @Test("A saved site whose record is gone opens as a new site, keeping the request that asked for it")
-    func removedSiteKeepsItsRequest() {
-        let asked = ProVisorSiteWindow.formForRemovedSite("example.com", requestedBy: "2026-11-17-check")
-
-        #expect(asked.mode == .adding)
-        #expect(asked.request?.proposalID == "2026-11-17-check")
-        #expect(asked.request?.host == "example.com")
-        #expect(asked.request?.isRecognised == false)
-        #expect(asked.address.isEmpty)
-
-        let plain = ProVisorSiteWindow.formForRemovedSite("example.com", requestedBy: nil)
-        #expect(plain.mode == .adding)
-        #expect(plain.request == nil)
-        #expect(plain.address.isEmpty)
+        let signIn = Content.signIn(host: "example.com")
+        #expect(reuses(shown: signIn, content: signIn))
+        #expect(reuses(shown: signIn, shownRequest: nil, content: signIn, request: "p"))
+        #expect(reuses(shown: signIn, shownRequest: "p", content: signIn, request: "q"))
+        #expect(!reuses(shown: signIn, content: .signIn(host: "other.example")))
+        #expect(!reuses(shown: signIn, content: .form(.adding)))
+        #expect(!reuses(shown: .form(.adding), content: signIn))
+        #expect(!reuses(shown: signIn, content: again))
+        #expect(!reuses(visible: false, shown: signIn, content: signIn))
+        #expect(!reuses(allowed: false, shown: signIn, content: signIn))
     }
 
     @Test("The result names the site")

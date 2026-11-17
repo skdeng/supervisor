@@ -65,8 +65,8 @@ struct Proposal: Identifiable, Equatable, Sendable {
     /// only: a run is instructed from the choice captured at the tap.
     var choice: ProposalChoice?
     /// The host of a site the agent asks the user to sign in to. It is the agent's word, shaped
-    /// by mail: it offers a sign-in and never grants one, and the sign-in window puts it in the
-    /// address field only when the user's own browsers know it (`SiteFormModel`).
+    /// by mail: it offers a sign-in and never grants one, and the sign-in window opens it only
+    /// when the user's own browsers know it (`SiteSignInModel`).
     var site: String?
 
     /// Whether the proposal still awaits a decision — a failed one can be approved again.

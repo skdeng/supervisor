@@ -88,7 +88,10 @@ struct ProVisorSiteWindowTests {
             simulatedPages: bank.site.answer,
             settling: .fast
         )
-        let model = SiteFormModel(requestedHost: "example.com", proposalID: "p", prefilledAddress: nil)
+        let model = SiteFormModel(
+            unreadableSite: SiteRecord(id: "example.com", name: "Bank", added: Date(timeIntervalSince1970: 0)),
+            requestedBy: "p"
+        )
         let window = SiteEnrollmentWindow()
         window.alphaValue = 0
         window.ignoresMouseEvents = true
@@ -186,6 +189,121 @@ struct ProVisorSiteWindowTests {
         await #expect(throws: SiteBrowser.Failure.closed) {
             _ = try await first.browser.open(URL(string: "https://example.com/")!)
         }
+    }
+
+    private func waitFor(_ condition: @MainActor () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !condition() {
+            guard ContinuousClock.now < deadline else {
+                Issue.record("the window never reached the expected state")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    @Test("The sign-in window opens its page by itself, and a sign-in neither resizes nor closes it", .timeLimit(.minutes(1)))
+    func signInWindowOpensAndStays() async throws {
+        _ = NSApplication.shared
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        let bank = TestBank()
+        let enrollment = SiteEnrollment(
+            dataStore: .nonPersistent(),
+            codes: CodeStub().codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast,
+            recheckInterval: .milliseconds(50)
+        )
+        let model = SiteSignInModel(
+            host: "example.com",
+            record: nil,
+            start: .opensPage(URL(string: "https://example.com/login")!),
+            proposalID: "p",
+            needsPerson: false
+        )
+        let window = SiteEnrollmentWindow()
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        defer { window.close() }
+
+        window.show(center: center, enrollment: enrollment, signIn: model)
+        #expect(window.content == .signIn(host: "example.com"))
+        #expect(window.requestID == "p")
+        #expect(window.title == "Sign In")
+        window.orderFront(nil)
+        try await settle(window)
+        let frame = window.frame
+        try await waitFor { model.hasOpenedPage && !model.isWorking && enrollment.currentHost == "example.com" }
+        #expect(enrollment.browser.webView.window === window)
+
+        _ = try await enrollment.browser.run("""
+            document.getElementById('user').value = username;
+            document.getElementById('pass').value = password;
+            HTMLFormElement.prototype.requestSubmit.call(document.forms[0]);
+            """, arguments: ["username": bank.username, "password": bank.password])
+        try await waitFor { enrollment.appearsSignedIn }
+        try await settle(window)
+
+        #expect(window.isVisible)
+        #expect(window.enrollment === enrollment)
+        #expect(window.frame == frame)
+        #expect(window.contentView?.frame.size == SiteEnrollmentWindow.initialContentSize)
+        #expect(center.sites.isEmpty)
+
+        window.close()
+        #expect(window.content == nil)
+        #expect(window.requestID == nil)
+    }
+
+    @Test("Showing the sign-in window ends an Add Site enrollment, and the reverse", .timeLimit(.minutes(1)))
+    func signInAndAddSiteReplaceEachOther() async throws {
+        _ = NSApplication.shared
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        func makeEnrollment() -> SiteEnrollment {
+            SiteEnrollment(
+                dataStore: .nonPersistent(),
+                codes: CodeStub().codes,
+                simulatedPages: { _ in nil },
+                settling: .fast
+            )
+        }
+        let adding = makeEnrollment()
+        let signingIn = makeEnrollment()
+        let addingAgain = makeEnrollment()
+        let window = SiteEnrollmentWindow()
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        defer { window.close() }
+        let model = SiteSignInModel(
+            host: "example.com",
+            record: nil,
+            start: .asksForAddress(host: "example.com"),
+            proposalID: nil,
+            needsPerson: false
+        )
+
+        window.show(center: center, enrollment: adding, model: SiteFormModel())
+        window.orderFront(nil)
+        try await settle(window)
+        #expect(window.content == .form(.adding))
+
+        window.show(center: center, enrollment: signingIn, signIn: model)
+        try await settle(window)
+        #expect(window.enrollment === signingIn)
+        #expect(window.content == .signIn(host: "example.com"))
+        #expect(adding.isCancelled)
+        #expect(adding.browser.webView.superview == nil)
+        #expect(signingIn.browser.webView.window === window)
+
+        window.show(center: center, enrollment: addingAgain, model: SiteFormModel())
+        try await settle(window)
+        #expect(window.enrollment === addingAgain)
+        #expect(window.content == .form(.adding))
+        #expect(signingIn.isCancelled)
+        #expect(signingIn.browser.webView.superview == nil)
+        #expect(addingAgain.browser.webView.window === window)
     }
 
     @Test("Keys a person types into a password field on the page are reported", .timeLimit(.minutes(1)))

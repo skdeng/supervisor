@@ -33,6 +33,11 @@ import WebKit
 /// from an email. The person can see the page, so after that refusal their confirmation
 /// (`confirmedByPerson`) saves it; such a grant holds no secret, and a mistaken one reads
 /// only what the site shows a visitor.
+///
+/// A sign-in that moves from step to step inside one page finishes no load, and one that ends
+/// on a button press involves no typing either, so while a session is being kept the page is
+/// also probed every `recheckInterval`. What the probes find is published as `appearsSignedIn`,
+/// which only advises the window's look; `finishKeepingSession` decides on a fresh read.
 @MainActor
 final class SiteEnrollment: ObservableObject {
     enum Failure: Error, Equatable {
@@ -74,8 +79,16 @@ final class SiteEnrollment: ObservableObject {
     @Published private(set) var passwordIsConfirmed = false
     /// A saved secret the app declined to fill because the page was on another host.
     @Published private(set) var unvettedFill: AssistedSignInSession.UnvettedFill?
+    /// Whether the page on display looks past the sign-in of a session being kept: a secure
+    /// top frame that asks for no sign-in, after a sign-in seen in this enrollment or showing a
+    /// sign-out control. False whenever no session is being kept.
+    @Published private(set) var appearsSignedIn = false
     /// Set by `cancel()`; nothing the enrollment did is used afterwards.
     private(set) var isCancelled = false
+    /// Whether a page of the kept session asked for a sign-in, or the person typed a password.
+    private(set) var keptSessionSawSignIn = false
+
+    static let standardRecheckInterval: Duration = .seconds(2)
 
     let browser: SiteBrowser
 
@@ -107,8 +120,9 @@ final class SiteEnrollment: ObservableObject {
     private var passwordTyped = false
     /// The hosts navigations went through up to the first page past the sign-in, once there.
     private var hostsAtSignIn: Set<String>?
-    /// Whether a page of the kept session asked for a sign-in, or the person typed a password.
-    private var keptSessionSawSignIn = false
+    private let recheckInterval: Duration
+    /// The timed re-probe of a kept session's page; it holds the enrollment only while it acts.
+    private var recheckTask: Task<Void, Never>?
     private var observeTask: Task<Void, Never>?
     private var observeRequested = false
     /// Whether a pending observation waits for the page to settle before it probes.
@@ -119,10 +133,12 @@ final class SiteEnrollment: ObservableObject {
         codes: SignInCodes,
         simulatedPages: SiteBrowser.SimulatedPages? = nil,
         settling: SiteBrowser.Settling = .standard,
-        codeWaitLimit: Duration = SignInBroker.standardCodeWaitLimit
+        codeWaitLimit: Duration = SignInBroker.standardCodeWaitLimit,
+        recheckInterval: Duration = SiteEnrollment.standardRecheckInterval
     ) {
         self.codes = codes
         self.codeWaitLimit = codeWaitLimit
+        self.recheckInterval = recheckInterval
         browser = SiteBrowser(
             policy: .anyHTTPSHost,
             dataStore: dataStore,
@@ -178,7 +194,8 @@ final class SiteEnrollment: ObservableObject {
     /// page at any time; the app goes on examining the pages the browser loads until `finish`.
     ///
     /// `passwordHosts` and `authenticatorHosts` are for secrets saved with a site rather than
-    /// typed now: such a secret is filled only on those hosts (see `AssistedSignInSession`).
+    /// typed now: such a secret is filled only on those hosts (see `AssistedSignInSession`). A
+    /// cancelled enrollment throws `cancelled` and starts nothing.
     func begin(
         signInAddress: String,
         username: String,
@@ -189,10 +206,12 @@ final class SiteEnrollment: ObservableObject {
         passwordHosts: [String]? = nil,
         authenticatorHosts: [String]? = nil
     ) async throws {
+        guard !isCancelled else { throw Failure.cancelled }
         guard let url = Self.normalisedAddress(signInAddress) else { throw Failure.invalidAddress }
         stopAssisting()
         stopObserving()
         keptSessionURL = nil
+        appearsSignedIn = false
         pending = Pending(
             signInURL: url,
             username: username,
@@ -243,7 +262,9 @@ final class SiteEnrollment: ObservableObject {
 
     /// Loads the sign-in page for the person to sign in on themselves. Nothing is filled and
     /// no secret is held; the hosts the browser passes through are recorded as for `begin`.
+    /// A cancelled enrollment throws `cancelled` and starts nothing.
     func beginKeepingSession(signInAddress: String) async throws {
+        guard !isCancelled else { throw Failure.cancelled }
         guard let url = Self.normalisedAddress(signInAddress) else { throw Failure.invalidAddress }
         stopAssisting()
         stopObserving()
@@ -251,6 +272,7 @@ final class SiteEnrollment: ObservableObject {
         session = nil
         keptSessionURL = url
         keptSessionSawSignIn = false
+        appearsSignedIn = false
         broker = SignInBroker(browser: browser, codeWaitLimit: codeWaitLimit)
         hostsAtSignIn = nil
         learnedCodeSender = nil
@@ -259,6 +281,7 @@ final class SiteEnrollment: ObservableObject {
         passwordIsConfirmed = false
         isBeginning = true
         note = Notes.signInYourself
+        startRechecking()
         refreshWorking()
         defer {
             isBeginning = false
@@ -482,6 +505,7 @@ final class SiteEnrollment: ObservableObject {
     private func wipe() {
         stopObserving()
         keptSessionSawSignIn = false
+        if appearsSignedIn { appearsSignedIn = false }
         isArmed = false
         assistRequested = false
         pending = nil
@@ -510,6 +534,36 @@ final class SiteEnrollment: ObservableObject {
         observeRequested = false
         observeSettles = false
         observeTask?.cancel()
+        recheckTask?.cancel()
+        recheckTask = nil
+    }
+
+    /// Whether the timed re-probe of a kept session is running.
+    var isRechecking: Bool { recheckTask != nil }
+
+    /// Probes the page every `recheckInterval` while a session is being kept, skipping a turn
+    /// while a load is in flight, whose finish is probed anyway. The task holds the enrollment
+    /// only between its sleeps, so it never keeps one alive, and ends once no session is kept.
+    private func startRechecking() {
+        recheckTask?.cancel()
+        let interval = recheckInterval
+        recheckTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return
+                }
+                guard let self, !Task.isCancelled else { return }
+                guard self.keptSessionURL != nil else {
+                    self.recheckTask = nil
+                    return
+                }
+                if !self.browser.webView.isLoading {
+                    self.requestObservation(settling: false)
+                }
+            }
+        }
     }
 
     /// Asks for the open page of a kept session to be probed for a sign-in, once the page in
@@ -537,8 +591,9 @@ final class SiteEnrollment: ObservableObject {
         }
     }
 
-    /// Notes whether the page on display asks for a sign-in (`SignInRules.asksForSignIn`).
-    /// Only the noting is kept, never what the page holds.
+    /// Notes whether the page on display asks for a sign-in (`SignInRules.asksForSignIn`), and
+    /// whether it looks signed in (`appearsSignedIn`). Only the noting is kept, never what the
+    /// page holds.
     private func observeCurrentPage(settling: Bool) async {
         guard let broker, keptSessionURL != nil else { return }
         if settling {
@@ -555,6 +610,10 @@ final class SiteEnrollment: ObservableObject {
         if SignInRules.asksForSignIn(probe) {
             keptSessionSawSignIn = true
         }
+        let looksSignedIn = probe.isSecureTopFrame
+            && SignInRules.isPastSignIn(probe)
+            && (keptSessionSawSignIn || probe.hasSignOutControl)
+        if looksSignedIn != appearsSignedIn { appearsSignedIn = looksSignedIn }
     }
 
     /// Asks for the open page to be examined once the page in flight, if any, has been. A

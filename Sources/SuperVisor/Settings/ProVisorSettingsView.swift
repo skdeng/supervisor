@@ -189,7 +189,7 @@ struct ProVisorSettingsView: View {
             Spacer(minLength: 8)
 
             Button("Sign In Again") {
-                ProVisorSiteWindow.shared.showSigningInAgain(site.id, center: sites)
+                ProVisorSiteWindow.shared.showSignInAgain(site, center: sites)
             }
             .buttonStyle(.plain)
             .font(.caption.weight(.medium))

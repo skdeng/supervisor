@@ -203,7 +203,7 @@ private struct ProVisorSignInRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
 
-            Text(ProVisorSignInText.reason(item.kind))
+            Text(ProVisorSignInText.reason(item))
                 .font(.caption)
                 .foregroundStyle(NotchTheme.secondaryForeground)
                 .lineLimit(1)
@@ -219,10 +219,13 @@ enum ProVisorSignInText {
         "Sign in to \(item.displayName)"
     }
 
-    static func reason(_ kind: SignInDemand.Item.Kind) -> String {
-        switch kind {
+    /// Why the site waits. Only a kept session whose record is flagged is known to have signed
+    /// the person out; a site can also wait because its start page moved or a run was turned
+    /// away from it.
+    static func reason(_ item: SignInDemand.Item) -> String {
+        switch item.kind {
         case .signedOut(keepsSession: true):
-            return "It signed you out"
+            return item.needsPerson ? "It signed you out" : "It needs you to sign in again"
         case .signedOut(keepsSession: false):
             return "SuperVisor couldn't sign in by itself"
         case .requested:

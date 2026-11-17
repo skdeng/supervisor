@@ -2,11 +2,12 @@ import AppKit
 import SwiftUI
 import WebKit
 
-/// Opens the Add Site window, for a new site, to sign in to a saved one again, or for the site
-/// a ProVisor proposal asked for.
+/// Opens the site window: the Add Site form for a new site, the Sign In Again form for a site
+/// that keeps a saved password, and the sign-in window (`ProVisorSignInView`) for a site kept
+/// by its session and for a site a ProVisor proposal asked for.
 ///
-/// One window is reused. Asking for the sign-in it already shows, for the same request,
-/// brings it forward; asking for another ends the one it shows.
+/// One window is reused. Asking for what it already shows brings it forward; asking for
+/// anything else ends the enrollment it shows.
 @MainActor
 final class ProVisorSiteWindow {
     static let shared = ProVisorSiteWindow()
@@ -16,18 +17,16 @@ final class ProVisorSiteWindow {
     private init() {}
 
     func showAdding(center: SiteAccessCenter) {
-        present(.adding, center: center) { SiteFormModel() }
+        present(.form(.adding), center: center) { SiteFormModel() }
     }
 
-    /// Opens the window on a saved site. A site whose grant cannot be read opens as a new one,
-    /// saying so.
-    func showSigningInAgain(_ siteID: String, center: SiteAccessCenter) {
-        showSigningInAgain(siteID, center: center, requestedBy: nil)
+    /// Settings' Sign In Again for `record`.
+    func showSignInAgain(_ record: SiteRecord, center: SiteAccessCenter) {
+        center.refresh()
+        open(Self.route(forSite: record, requestedBy: nil), center: center)
     }
 
-    /// Opens the window for the site proposal `proposalID` asked for: a granted site signs in
-    /// again, and a new one is added with its address filled in only when `history` finds the
-    /// host among the sites the user has visited (`SiteFormModel.requestedStart`). Saving it
+    /// The review window's button for the site proposal `proposalID` asked for. Saving the site
     /// settles the request (`SignInDemand.effectOfSaving`); closing the window leaves the
     /// proposal as it is.
     func showRequested(
@@ -37,134 +36,245 @@ final class ProVisorSiteWindow {
         history: BrowsingHistory = BrowsingHistory()
     ) {
         center.refresh()
-        switch SiteFormModel.requestedStart(host: host, grantedSites: center.sites, hasVisited: history.hasVisited) {
-        case let .signingInAgain(siteID):
-            showSigningInAgain(siteID, center: center, requestedBy: proposalID)
-        case let .adding(prefilledAddress):
-            present(.adding, center: center, requestID: proposalID) {
-                SiteFormModel(requestedHost: host, proposalID: proposalID, prefilledAddress: prefilledAddress)
+        open(
+            Self.route(forRequestedHost: host, proposalID: proposalID, grantedSites: center.sites),
+            center: center,
+            history: history
+        )
+    }
+
+    /// A sign-in prompt from the banner or the sheet.
+    func showSignIn(
+        _ item: SignInDemand.Item,
+        center: SiteAccessCenter = .shared,
+        history: BrowsingHistory = BrowsingHistory()
+    ) {
+        guard let route = Self.route(for: item) else {
+            AppLog.error(.provisor, "sign-in prompt for \(item.host) has no request")
+            return
+        }
+        center.refresh()
+        open(route, center: center, history: history)
+    }
+
+    /// Which window a sign-in is expected to open, before the stored sign-in is read.
+    enum SignInRoute: Equatable {
+        /// The sign-in window, for a site kept by its session or a host a proposal asked for.
+        case signingIn(host: String, requestedBy: String?)
+        /// The Sign In Again form, for a site that keeps a saved password: saving a session
+        /// over it would discard the password.
+        case signingInAgain(siteID: String, requestedBy: String?)
+
+        var host: String {
+            switch self {
+            case let .signingIn(host, _): host
+            case let .signingInAgain(siteID, _): siteID
+            }
+        }
+
+        var requestedBy: String? {
+            switch self {
+            case let .signingIn(_, proposalID): proposalID
+            case let .signingInAgain(_, proposalID): proposalID
             }
         }
     }
 
-    /// Which form a sign-in prompt opens.
-    enum SignInRoute: Equatable {
-        /// Signs in to a granted site again, settling the request that asked for it, if any.
-        case signingInAgain(siteID: String, requestedBy: String?)
-        /// Opens the site a proposal asked for (`showRequested`).
-        case requested(host: String, proposalID: String)
-    }
-
-    /// The form for `item`: a granted site signs in again, and a requested host opens as its
-    /// request. Nil for a requested host with no proposal, which no demand produces.
+    /// The window for a sign-in prompt: a granted site by the way it is kept, and a requested
+    /// host in the sign-in window. Nil for a requested host with no proposal, which no demand
+    /// produces.
     static func route(for item: SignInDemand.Item) -> SignInRoute? {
         switch item.kind {
-        case .signedOut:
+        case .signedOut(keepsSession: true):
+            return .signingIn(host: item.host, requestedBy: item.proposalID)
+        case .signedOut(keepsSession: false):
             return .signingInAgain(siteID: item.host, requestedBy: item.proposalID)
         case .requested:
             guard let proposalID = item.proposalID else { return nil }
-            return .requested(host: item.host, proposalID: proposalID)
+            return .signingIn(host: item.host, requestedBy: proposalID)
         }
     }
 
-    /// Opens the window for a sign-in prompt from the banner or the sheet.
-    func showSignIn(_ item: SignInDemand.Item, center: SiteAccessCenter = .shared) {
-        switch Self.route(for: item) {
-        case let .signingInAgain(siteID, proposalID):
-            showSigningInAgain(siteID, center: center, requestedBy: proposalID)
-        case let .requested(host, proposalID):
-            showRequested(host: host, proposalID: proposalID, center: center)
-        case nil:
-            AppLog.error(.provisor, "sign-in prompt for \(item.host) has no request")
-        }
+    /// The window for signing in to a granted site again, by the way it is kept.
+    static func route(forSite record: SiteRecord, requestedBy proposalID: String?) -> SignInRoute {
+        record.keepsSessionOnly
+            ? .signingIn(host: record.id, requestedBy: proposalID)
+            : .signingInAgain(siteID: record.id, requestedBy: proposalID)
     }
 
-    private func showSigningInAgain(_ siteID: String, center: SiteAccessCenter, requestedBy proposalID: String?) {
-        guard let record = center.sites.first(where: { $0.id == siteID }) else {
-            present(.adding, center: center, requestID: proposalID) {
-                Self.formForRemovedSite(siteID, requestedBy: proposalID)
+    /// The window for a host a proposal asked for: a granted site's by the way it is kept, and
+    /// the sign-in window for any other host.
+    static func route(
+        forRequestedHost host: String,
+        proposalID: String,
+        grantedSites: [SiteRecord]
+    ) -> SignInRoute {
+        guard let record = grantedSites.first(where: { $0.id == host }) else {
+            return .signingIn(host: host, requestedBy: proposalID)
+        }
+        return route(forSite: record, requestedBy: proposalID)
+    }
+
+    /// What a route opens once the site's record and stored sign-in are read.
+    enum Opening: Equatable {
+        /// The Add Site form, empty.
+        case addingSite
+        /// The sign-in window.
+        case signIn(host: String, requestedBy: String?)
+        /// The Sign In Again form for a grant that keeps a saved password.
+        case signingInAgain(grant: SiteGrant, record: SiteRecord, requestedBy: String?)
+        /// The Add Site form for a granted site whose stored sign-in cannot be read.
+        case unreadable(record: SiteRecord, requestedBy: String?)
+    }
+
+    /// Settles `route` against the site's `record` and stored `grant`, which may have changed
+    /// since the route was chosen. The grant decides between the two kinds of window, so a
+    /// saved password is never shown the sign-in window, whose save would discard it.
+    ///
+    /// A granted site whose grant cannot be read opens the Add Site form with its address
+    /// empty, whichever route asked: the record comes from `sites.json`, which anything running
+    /// as the user can edit, and only the Keychain grant vouches for an address. A site whose
+    /// record is gone is added as new, through the sign-in window when a proposal asked for it,
+    /// so its request is kept, and through the empty Add Site form otherwise.
+    static func opening(for route: SignInRoute, record: SiteRecord?, grant: SiteGrant?) -> Opening {
+        let (host, proposalID) = (route.host, route.requestedBy)
+        guard let record else {
+            return proposalID == nil ? .addingSite : .signIn(host: host, requestedBy: proposalID)
+        }
+        guard let grant else { return .unreadable(record: record, requestedBy: proposalID) }
+        return grant.remembersPassword
+            ? .signingInAgain(grant: grant, record: record, requestedBy: proposalID)
+            : .signIn(host: host, requestedBy: proposalID)
+    }
+
+    /// Opens what `route` leads to, from the center's site list as last refreshed.
+    private func open(
+        _ route: SignInRoute,
+        center: SiteAccessCenter,
+        history: BrowsingHistory = BrowsingHistory()
+    ) {
+        let record = center.sites.first { $0.id == route.host }
+        let grant = record.flatMap { center.storedGrant(for: $0.id) }
+        switch Self.opening(for: route, record: record, grant: grant) {
+        case .addingSite:
+            present(.form(.adding), center: center) { SiteFormModel() }
+        case let .signIn(host, proposalID):
+            presentSignIn(host: host, center: center) {
+                SiteSignInModel(
+                    host: host,
+                    record: record,
+                    // The history is read now, never taken from when the prompt was raised.
+                    start: .decide(host: host, record: record, grant: grant, hasVisited: history.hasVisited),
+                    proposalID: proposalID,
+                    needsPerson: record.map { $0.needsPerson || center.awaitingSignIn.contains($0.id) } ?? false
+                )
             }
-            return
-        }
-        guard let grant = center.storedGrant(for: siteID) else {
-            present(.adding, center: center, reusesShownForm: false, requestID: proposalID) {
+        case let .signingInAgain(grant, record, proposalID):
+            present(.form(.signingInAgain(siteID: record.id)), center: center, requestID: proposalID) {
+                SiteFormModel(signingInAgain: grant, record: record, requestedBy: proposalID)
+            }
+        case let .unreadable(record, proposalID):
+            present(.form(.adding), center: center, reusesShownForm: false, requestID: proposalID) {
                 SiteFormModel(unreadableSite: record, requestedBy: proposalID)
             }
-            return
-        }
-        present(.signingInAgain(siteID: siteID), center: center, requestID: proposalID) {
-            SiteFormModel(signingInAgain: grant, record: record, requestedBy: proposalID)
         }
     }
 
     private func present(
-        _ mode: SiteFormModel.Mode,
+        _ content: SiteEnrollmentWindow.Content,
         center: SiteAccessCenter,
         reusesShownForm: Bool = true,
         requestID: String? = nil,
         makeModel: () -> SiteFormModel
     ) {
-        let window = self.window ?? SiteEnrollmentWindow()
-        if self.window == nil {
-            window.center()
-            self.window = window
-        }
+        let window = reusableWindow()
         if !Self.reusesShownForm(
             allowed: reusesShownForm,
             isVisible: window.isVisible,
-            shownMode: window.mode,
+            shown: window.content,
             shownRequestID: window.requestID,
-            mode: mode,
+            content: content,
             requestID: requestID
         ) {
             window.show(center: center, enrollment: center.makeEnrollment(), model: makeModel())
         }
+        bringForward(window)
+    }
+
+    private func presentSignIn(host: String, center: SiteAccessCenter, makeModel: () -> SiteSignInModel) {
+        let window = reusableWindow()
+        if !Self.reusesShownForm(
+            allowed: true,
+            isVisible: window.isVisible,
+            shown: window.content,
+            shownRequestID: window.requestID,
+            content: .signIn(host: host),
+            requestID: nil
+        ) {
+            window.show(center: center, enrollment: center.makeEnrollment(), signIn: makeModel())
+        }
+        bringForward(window)
+    }
+
+    private func reusableWindow() -> SiteEnrollmentWindow {
+        if let window { return window }
+        let window = SiteEnrollmentWindow()
+        window.center()
+        self.window = window
+        return window
+    }
+
+    private func bringForward(_ window: SiteEnrollmentWindow) {
         window.makeKeyAndOrderFront(nil)
         // An accessory app is never frontmost by itself, and a window in a background app
         // takes no typing.
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// The form for a saved site whose record is gone: a new site, whose address the person
-    /// types. When it was asked for by a proposal it keeps the request, so saving the site
-    /// still settles it.
-    static func formForRemovedSite(_ siteID: String, requestedBy proposalID: String?) -> SiteFormModel {
-        guard let proposalID else { return SiteFormModel() }
-        return SiteFormModel(requestedHost: siteID, proposalID: proposalID, prefilledAddress: nil)
-    }
-
-    /// Whether the form on screen already is the one asked for: the window shows a form in the
-    /// same mode, opened for the same request or for none.
+    /// Whether the window on screen already shows what is asked for: a form in the same mode,
+    /// opened for the same request or for none, or the sign-in window for the same site. A
+    /// sign-in to a site is answered by saving that site whichever request asked for it, so
+    /// the request it was opened for does not matter there.
     static func reusesShownForm(
         allowed: Bool,
         isVisible: Bool,
-        shownMode: SiteFormModel.Mode?,
+        shown: SiteEnrollmentWindow.Content?,
         shownRequestID: String?,
-        mode: SiteFormModel.Mode,
+        content: SiteEnrollmentWindow.Content,
         requestID: String?
     ) -> Bool {
-        allowed && isVisible && shownMode == mode && shownRequestID == requestID
+        guard allowed, isVisible, shown == content else { return false }
+        if case .signIn = content { return true }
+        return shownRequestID == requestID
     }
-
 }
 
-/// The window a site is added in: the form on the left, the live page on the right.
+/// The window a site is added or signed in to in: the form or the sign-in pane on the left, the
+/// live page on the right.
 ///
 /// **The window's size is the user's.** The hosting controller carries no sizing options and
-/// the content fills whatever frame the window has, so nothing the form shows or hides can
+/// the content fills whatever frame the window has, so nothing either view shows or hides can
 /// resize the window from inside a layout pass (the hazard `FittedWindow` describes).
 ///
 /// Closing it by any route ends the enrollment it shows, which forgets the typed secrets and
 /// closes the browser.
 @MainActor
 final class SiteEnrollmentWindow: NSWindow {
+    /// What the window shows.
+    enum Content: Equatable {
+        /// The Add Site or Sign In Again form.
+        case form(SiteFormModel.Mode)
+        /// The sign-in window for a site.
+        case signIn(host: String)
+    }
+
     static let initialContentSize = NSSize(width: 1040, height: 700)
     static let minimumContentSize = NSSize(width: 900, height: 600)
 
     private let hosting: NSHostingController<AnyView>
     private(set) var enrollment: SiteEnrollment?
-    private(set) var mode: SiteFormModel.Mode?
-    /// The proposal the form shown was opened from.
+    private(set) var content: Content?
+    /// The proposal what is shown was opened from.
     private(set) var requestID: String?
 
     init() {
@@ -187,11 +297,7 @@ final class SiteEnrollmentWindow: NSWindow {
 
     /// Shows a fresh form for `enrollment`, ending any enrollment shown before.
     func show(center: SiteAccessCenter, enrollment: SiteEnrollment, model: SiteFormModel) {
-        let previous = self.enrollment
-        self.enrollment = enrollment
-        mode = model.mode
-        requestID = model.request?.proposalID
-        previous?.cancel()
+        replace(with: enrollment, content: .form(model.mode), requestID: model.request?.proposalID)
         model.follow(enrollment, center: center)
         title = model.isSigningInAgain ? "Sign In Again" : "Add a Site"
         hosting.rootView = AnyView(
@@ -207,6 +313,33 @@ final class SiteEnrollmentWindow: NSWindow {
         )
     }
 
+    /// Shows the sign-in window for `enrollment`, ending any enrollment shown before, and opens
+    /// the page at once when the model's start is an address the app vouches for.
+    func show(center: SiteAccessCenter, enrollment: SiteEnrollment, signIn model: SiteSignInModel) {
+        replace(with: enrollment, content: .signIn(host: model.host), requestID: model.proposalID)
+        title = "Sign In"
+        hosting.rootView = AnyView(
+            ProVisorSignInView(
+                center: center,
+                enrollment: enrollment,
+                model: model
+            ) { [weak self, weak enrollment] in
+                guard let enrollment else { return }
+                self?.close(showing: enrollment)
+            }
+            .id(ObjectIdentifier(enrollment))
+        )
+        Task { await model.beginIfTrusted(using: enrollment) }
+    }
+
+    private func replace(with enrollment: SiteEnrollment, content: Content, requestID: String?) {
+        let previous = self.enrollment
+        self.enrollment = enrollment
+        self.content = content
+        self.requestID = requestID
+        previous?.cancel()
+    }
+
     /// Closes the window if it still shows `enrollment`. A save or Cancel that finishes after
     /// the window moved on to another enrollment leaves that one alone.
     func close(showing enrollment: SiteEnrollment) {
@@ -217,7 +350,7 @@ final class SiteEnrollmentWindow: NSWindow {
     override func close() {
         let ending = enrollment
         enrollment = nil
-        mode = nil
+        content = nil
         requestID = nil
         ending?.cancel()
         super.close()
@@ -250,16 +383,7 @@ struct ProVisorSiteView: View {
 
             Divider()
 
-            VStack(spacing: 0) {
-                SiteLocationBar(
-                    host: enrollment.currentHost,
-                    isSecure: enrollment.currentIsSecure,
-                    isWorking: enrollment.isWorking
-                )
-                Divider()
-                SiteWebViewHost(browser: enrollment.browser)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            SiteLivePagePane(enrollment: enrollment)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .tint(NotchTheme.brandColor)
@@ -327,17 +451,13 @@ struct ProVisorSiteView: View {
         }
     }
 
-    /// The line about the ProVisor proposal the form was opened from. The host in it is plain
-    /// text that cannot be selected, so it is never a link and never copied into the address.
+    /// The line about the ProVisor proposal the form was opened from.
     private func requestLine(_ request: SiteFormModel.Request) -> some View {
-        Label(
-            request.message,
-            systemImage: request.isRecognised ? "checkmark.seal" : "exclamationmark.triangle.fill"
-        )
-        .font(.callout)
-        .foregroundStyle(request.isRecognised ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.orange))
-        .fixedSize(horizontal: false, vertical: true)
-        .textSelection(.disabled)
+        Label(request.message, systemImage: "checkmark.seal")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.disabled)
     }
 
     /// The two ways of keeping a site, each with what it means. A saved site keeps its own,
@@ -630,113 +750,5 @@ private struct SiteMethodRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
-    }
-}
-
-/// Where the page is: its host behind a padlock, or a red warning when the page is not fully
-/// secure. It is always on screen, so the user can see they are on the real site before a
-/// password goes into it.
-private struct SiteLocationBar: View {
-    let host: String?
-    let isSecure: Bool
-    let isWorking: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            if let host {
-                if isSecure {
-                    Image(systemName: "lock.fill")
-                        .foregroundStyle(.secondary)
-                        .help("The page and everything on it came over an encrypted connection")
-                    Text(host)
-                        .fontWeight(.medium)
-                } else {
-                    Image(systemName: "lock.open.fill")
-                        .foregroundStyle(.red)
-                        .help("Part of this page did not come over an encrypted connection")
-                    Text("Not secure")
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.red)
-                    Text(host)
-                        .foregroundStyle(.red)
-                }
-            } else {
-                Image(systemName: "globe")
-                    .foregroundStyle(.secondary)
-                Text("No page yet")
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 8)
-
-            if isWorking {
-                ProgressView()
-                    .controlSize(.small)
-            }
-        }
-        .font(.callout)
-        .lineLimit(1)
-        .truncationMode(.middle)
-        .textSelection(.enabled)
-        .padding(.horizontal, 14)
-        .frame(height: 36)
-        .frame(maxWidth: .infinity)
-        .background(.bar)
-    }
-}
-
-/// Hosts the enrollment browser's web view, moved out of the browser's hidden window.
-private struct SiteWebViewHost: NSViewRepresentable {
-    let browser: SiteBrowser
-
-    func makeNSView(context: Context) -> NSView {
-        let container = NSView()
-        browser.present(in: container)
-        return container
-    }
-
-    func updateNSView(_ container: NSView, context: Context) {
-        if browser.webView.superview !== container {
-            browser.present(in: container)
-        }
-    }
-}
-
-/// The window's primary action, in the brand gradient.
-private struct SiteProminentButtonStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var isEnabled
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.body.weight(.semibold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 7)
-            .background(Capsule().fill(NotchTheme.brandGradient))
-            .opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.4)
-            .contentShape(Capsule())
-    }
-}
-
-private extension View {
-    /// A text field drawn in the system's colours, outlined in the brand gradient while focused.
-    func siteFieldChrome(isFocused: Bool) -> some View {
-        textFieldStyle(.plain)
-            .focusEffectDisabled()
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color(nsColor: .textBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(
-                        isFocused
-                            ? AnyShapeStyle(NotchTheme.brandGradient)
-                            : AnyShapeStyle(Color(nsColor: .separatorColor)),
-                        lineWidth: isFocused ? 1.5 : 1
-                    )
-            )
     }
 }

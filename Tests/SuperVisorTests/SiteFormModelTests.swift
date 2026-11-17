@@ -242,7 +242,7 @@ struct SiteFormModelTests {
 
     @Test("Each failure is shown as its fixed sentence")
     func problemSentences() {
-        typealias Problem = SiteFormModel.Problem
+        typealias Problem = SiteSaveProblem
         #expect(Problem.ofSignIn(SiteEnrollment.Failure.invalidAddress) == .invalidAddress)
         #expect(Problem.ofSignIn(SiteBrowser.Failure.loadFailed) == .pageDidNotLoad)
         #expect(Problem.ofSignIn(SiteBrowser.Failure.timedOut) == .pageDidNotLoad)
@@ -952,186 +952,23 @@ struct SiteFormModelTests {
 
     // MARK: Requests from ProVisor
 
-    @Test("A request for a host the user has visited fills in the address and says it matched")
-    func requestVisited() {
-        var asked: [String] = []
-        let start = SiteFormModel.requestedStart(host: "example.com", grantedSites: []) { host in
-            asked.append(host)
-            return true
-        }
-        #expect(start == .adding(prefilledAddress: "example.com"))
-        #expect(asked == ["example.com"])
-
-        let model = SiteFormModel(requestedHost: "example.com", proposalID: "2026-11-17-check", prefilledAddress: "example.com")
-        #expect(model.address == "example.com")
-        #expect(model.method == .keepsSession)
-        #expect(model.mode == .adding)
-        #expect(model.canOpenPage)
-        #expect(model.request == SiteFormModel.Request(
-            proposalID: "2026-11-17-check",
-            host: "example.com",
-            message: "ProVisor asked for this site. It matches a site in your browser history.",
-            isRecognised: true
-        ))
-    }
-
-    @Test("A request for a host the user has not visited leaves the address empty and says to type it")
-    func requestNotVisited() {
-        let start = SiteFormModel.requestedStart(host: "examp1e-login.com", grantedSites: []) { _ in false }
-        #expect(start == .adding(prefilledAddress: nil))
-
-        let model = SiteFormModel(requestedHost: "examp1e-login.com", proposalID: "2026-11-17-check", prefilledAddress: nil)
-        #expect(model.address.isEmpty)
-        #expect(model.name.isEmpty)
-        #expect(!model.canOpenPage)
-        #expect(model.request == SiteFormModel.Request(
-            proposalID: "2026-11-17-check",
-            host: "examp1e-login.com",
-            message: "ProVisor asked for examp1e-login.com. SuperVisor hasn't seen that address in your browser history, so type the site's address yourself.",
-            isRecognised: false
-        ))
-    }
-
-    @Test("A prefilled address other than the requested host is not taken")
-    func requestPrefillMustBeTheHost() {
-        let model = SiteFormModel(requestedHost: "example.com", proposalID: "p", prefilledAddress: "evil.example.net")
-        #expect(model.address.isEmpty)
-        #expect(model.request?.isRecognised == false)
-    }
-
-    @Test("A request for a granted site signs in to it again, without reading the history")
+    @Test("A request for a granted site carries its proposal and says so")
     func requestGranted() {
         let granted = SiteRecord(id: "example.com", name: "Bank", added: Date(timeIntervalSince1970: 0))
-        var asked = 0
-        let start = SiteFormModel.requestedStart(host: "example.com", grantedSites: [granted]) { _ in
-            asked += 1
-            return false
-        }
-        #expect(start == .signingInAgain(siteID: "example.com"))
-        #expect(asked == 0)
-
         let model = SiteFormModel(signingInAgain: sessionGrant(), record: granted, requestedBy: "p")
+        #expect(model.request == SiteFormModel.Request(
+            proposalID: "p",
+            host: "example.com",
+            message: "ProVisor asked you to sign in to Bank again."
+        ))
+    }
+
+    @Test("A request for a site whose saved sign-in cannot be read carries its proposal")
+    func requestUnreadable() {
+        let model = SiteFormModel(unreadableSite: savedRecord(), requestedBy: "p")
         #expect(model.request?.proposalID == "p")
-        #expect(model.request?.host == "example.com")
-        #expect(model.request?.message == "ProVisor asked you to sign in to Bank again.")
-    }
-
-    @Test("A requested host that is not a host name is never filled in")
-    func requestInvalidHost() {
-        var asked = 0
-        let start = SiteFormModel.requestedStart(host: "https://example.com/login", grantedSites: []) { _ in
-            asked += 1
-            return true
-        }
-        #expect(start == .adding(prefilledAddress: nil))
-        #expect(asked == 0)
-    }
-
-    @Test("Closing a requested form without saving reports no save", .timeLimit(.minutes(1)))
-    func requestCancelReportsNothing() async throws {
-        let (fixture, center, bank, enrollment) = try flow { $0.markSignedIn() }
-        defer { withExtendedLifetime((fixture, bank)) {} }
-        let model = SiteFormModel(requestedHost: "example.com", proposalID: "p", prefilledAddress: "example.com")
-        model.address = "example.com/account"
-        await model.openPage(using: enrollment)
-        enrollment.cancel()
-
-        var saved = 0
-        #expect(await model.save(using: enrollment, into: center) { _ in saved += 1 } == .notSaved)
-        #expect(saved == 0)
-        #expect(center.sites.isEmpty)
-    }
-
-    /// The proposals folder of a request for example.com, and a form opened from it.
-    private func requestFolder() throws -> URL {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("site-form-request-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let fields: [String: Any] = [
-            "title": "Confirm the renewal",
-            "action": "Record the answer in followups/x.md.",
-            "kind": "confirm",
-            "site": "example.com",
-        ]
-        try JSONSerialization.data(withJSONObject: fields)
-            .write(to: directory.appendingPathComponent("2026-11-17-check.json"))
-        return directory
-    }
-
-    /// What the window hands a save from a requested form, with the center's folder replaced.
-    private func settler(
-        _ request: SiteFormModel.Request?,
-        in directory: URL,
-        outcomes: @escaping (SiteRequests.Outcome) -> Void
-    ) -> (SiteRecord) -> Void {
-        { record in
-            guard let request else { return }
-            outcomes(SiteRequests.settle(
-                proposalID: request.proposalID,
-                host: request.host,
-                savedSiteID: record.id,
-                siteName: record.name,
-                in: directory,
-                isBusy: false
-            ))
-        }
-    }
-
-    @Test("Saving the requested site from the form settles the request on disk", .timeLimit(.minutes(1)))
-    func requestSettledOnSave() async throws {
-        let (fixture, center, bank, enrollment) = try flow()
-        let directory = try requestFolder()
-        defer {
-            enrollment.cancel()
-            withExtendedLifetime((fixture, bank)) {}
-            try? FileManager.default.removeItem(at: directory)
-        }
-        let model = SiteFormModel(requestedHost: "example.com", proposalID: "2026-11-17-check", prefilledAddress: "example.com")
-        model.address = "example.com/login"
-        model.name = "Example Club"
-        await model.openPage(using: enrollment)
-        try await signInOnPage(enrollment, bank)
-
-        var outcomes: [SiteRequests.Outcome] = []
-        let saved = await model.save(
-            using: enrollment,
-            into: center,
-            onSaved: settler(model.request, in: directory) { outcomes.append($0) }
-        )
-
-        #expect(saved == .saved)
-        #expect(outcomes == [.settled])
-        let proposal = try #require(ProposalStore.load(from: directory).first)
-        #expect(proposal.status == .done)
-        #expect(proposal.result == "Signed in to Example Club.")
-    }
-
-    @Test("Saving a site under another host from a requested form leaves the request open", .timeLimit(.minutes(1)))
-    func requestNotSettledForAnotherHost() async throws {
-        let (fixture, center, bank, enrollment) = try flow()
-        bank.site.route("/login", host: "login.example.com", page: TestPages.redirect(to: "https://example.com/login"))
-        let directory = try requestFolder()
-        defer {
-            enrollment.cancel()
-            withExtendedLifetime((fixture, bank)) {}
-            try? FileManager.default.removeItem(at: directory)
-        }
-        let model = SiteFormModel(requestedHost: "example.com", proposalID: "2026-11-17-check", prefilledAddress: nil)
-        model.address = "login.example.com/login"
-        await model.openPage(using: enrollment)
-        try await signInOnPage(enrollment, bank)
-
-        var outcomes: [SiteRequests.Outcome] = []
-        let saved = await model.save(
-            using: enrollment,
-            into: center,
-            onSaved: settler(model.request, in: directory) { outcomes.append($0) }
-        )
-
-        #expect(saved == .saved)
-        #expect(center.sites.map(\.id) == ["login.example.com"])
-        #expect(outcomes == [.otherSite])
-        #expect(ProposalStore.load(from: directory).first?.status == .proposed)
+        #expect(model.request?.host == "my.example.com")
+        #expect(model.request?.message == "ProVisor asked you to sign in to Example Club again.")
     }
 
     @Test("A site whose saved sign-in cannot be read opens as a new one, saying so")

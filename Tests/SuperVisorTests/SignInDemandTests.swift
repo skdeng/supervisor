@@ -77,7 +77,8 @@ struct SignInDemandTests {
                 host: "example.com",
                 displayName: "Bank",
                 kind: .signedOut(keepsSession: true),
-                proposalID: nil
+                proposalID: nil,
+                needsPerson: true
             ),
         ])
         #expect(result.first?.id == "example.com")
@@ -98,6 +99,25 @@ struct SignInDemandTests {
                 proposalID: nil
             ),
         ])
+    }
+
+    @Test("The sheet row says a site signed the person out only for a flagged kept session")
+    func reasonLine() {
+        func reason(_ kind: SignInDemand.Item.Kind, needsPerson: Bool = false) -> String {
+            ProVisorSignInText.reason(SignInDemand.Item(
+                host: "example.com",
+                displayName: "Bank",
+                kind: kind,
+                proposalID: nil,
+                needsPerson: needsPerson
+            ))
+        }
+
+        #expect(reason(.signedOut(keepsSession: true), needsPerson: true) == "It signed you out")
+        #expect(reason(.signedOut(keepsSession: true)) == "It needs you to sign in again")
+        #expect(reason(.signedOut(keepsSession: false), needsPerson: true) == "SuperVisor couldn't sign in by itself")
+        #expect(reason(.signedOut(keepsSession: false)) == "SuperVisor couldn't sign in by itself")
+        #expect(reason(.requested(recognised: true)) == "ProVisor asked for this site")
     }
 
     @Test("An awaited id that is not a granted site is not in demand")
@@ -151,7 +171,8 @@ struct SignInDemandTests {
                 host: "example.com",
                 displayName: "Bank",
                 kind: .signedOut(keepsSession: false),
-                proposalID: "a-bank"
+                proposalID: "a-bank",
+                needsPerson: true
             ),
         ])
     }

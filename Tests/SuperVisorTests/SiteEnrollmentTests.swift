@@ -870,6 +870,185 @@ struct SiteEnrollmentTests {
         }
     }
 
+    // MARK: Whether the page looks signed in
+
+    /// An enrollment whose kept session is re-probed every 50 ms.
+    private func rechecking(_ bank: TestBank) -> SiteEnrollment {
+        SiteEnrollment(
+            dataStore: .nonPersistent(),
+            codes: CodeStub().codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast,
+            recheckInterval: .milliseconds(50)
+        )
+    }
+
+    @Test("The sign-in page does not look signed in, and the page after a sign-in by hand does", .timeLimit(.minutes(1)))
+    func appearsSignedInAfterSignIn() async throws {
+        let bank = TestBank()
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/login")
+        #expect(!session.appearsSignedIn)
+        #expect(session.keptSessionSawSignIn)
+
+        try await signInByHand(session, bank)
+        try await waitFor { session.appearsSignedIn }
+    }
+
+    @Test("A page with a sign-out control looks signed in with no sign-in seen", .timeLimit(.minutes(1)))
+    func appearsSignedInBySignOutControl() async throws {
+        let bank = TestBank()
+        bank.site.route("/members", page: TestPages.page("Members", """
+            <p>Welcome back</p><a href="/logout">Sign out</a>
+            """))
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/members")
+
+        #expect(session.appearsSignedIn)
+        #expect(!session.keptSessionSawSignIn)
+    }
+
+    @Test("A new begin starts with the page not looking signed in", .timeLimit(.minutes(1)))
+    func appearsSignedInResetsOnBegin() async throws {
+        let bank = TestBank()
+        bank.site.route("/welcome", page: TestPages.page("Welcome", "<p>Open an account today.</p>"))
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/login")
+        try await signInByHand(session, bank)
+        try await waitFor { session.appearsSignedIn }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/welcome")
+        #expect(!session.appearsSignedIn)
+        #expect(!session.keptSessionSawSignIn)
+
+        try await begin(session, bank)
+        #expect(!session.appearsSignedIn)
+    }
+
+    @Test("The timed re-probe notices a sign-in step that appears with no load and no typing", .timeLimit(.minutes(1)))
+    func recheckSeesAStepWithoutTyping() async throws {
+        let bank = TestBank()
+        bank.startPageIsPublic = true
+        let session = rechecking(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/account")
+        #expect(!session.keptSessionSawSignIn)
+        #expect(!session.appearsSignedIn)
+
+        _ = try await session.browser.run("""
+            const box = document.createElement('input');
+            box.id = 'step';
+            box.autocomplete = 'one-time-code';
+            document.body.appendChild(box);
+            """)
+        try await waitFor { session.keptSessionSawSignIn }
+        #expect(!session.appearsSignedIn)
+
+        // The step goes away the way a code field does once its code is accepted.
+        _ = try await session.browser.run("document.getElementById('step').remove();")
+        try await waitFor { session.appearsSignedIn }
+    }
+
+    @Test("The timed re-probe notices a signed-in page that arrives with no load and no typing", .timeLimit(.minutes(1)))
+    func recheckSeesASignedInPageWithoutALoad() async throws {
+        let bank = TestBank()
+        let session = rechecking(bank)
+        defer { session.cancel() }
+
+        try await session.beginKeepingSession(signInAddress: "example.com/login")
+        #expect(!session.appearsSignedIn)
+
+        _ = try await session.browser.run("""
+            document.body.innerHTML = '<h1>Account</h1><a href="/logout">Sign out</a>';
+            """)
+        try await waitFor { session.appearsSignedIn }
+        #expect(bank.site.requests(to: "/login").count == 1)
+    }
+
+    @Test("The timed re-probe runs only while a session is kept, and stops when cancelled", .timeLimit(.minutes(1)))
+    func recheckRunsOnlyWhileKeepingASession() async throws {
+        let bank = TestBank()
+        let session = rechecking(bank)
+        defer { session.cancel() }
+        #expect(!session.isRechecking)
+
+        try await session.beginKeepingSession(signInAddress: "example.com/login")
+        #expect(session.isRechecking)
+
+        try await begin(session, bank)
+        #expect(!session.isRechecking)
+
+        bank.signOut()
+        try await session.beginKeepingSession(signInAddress: "example.com/login")
+        #expect(session.isRechecking)
+        try await signInByHand(session, bank)
+        _ = try await session.finishKeepingSession(name: "Bank")
+        #expect(!session.isRechecking)
+        #expect(!session.appearsSignedIn)
+
+        bank.signOut()
+        try await session.beginKeepingSession(signInAddress: "example.com/login")
+        #expect(session.isRechecking)
+        session.cancel()
+        #expect(!session.isRechecking)
+        #expect(!session.appearsSignedIn)
+    }
+
+    @Test("The timed re-probe does not keep the enrollment alive", .timeLimit(.minutes(1)))
+    func recheckDoesNotRetain() async throws {
+        let bank = TestBank()
+        weak var released: SiteEnrollment?
+        do {
+            let session = rechecking(bank)
+            try await session.beginKeepingSession(signInAddress: "example.com/login")
+            #expect(session.isRechecking)
+            released = session
+        }
+        try await waitFor { released == nil }
+    }
+
+    @Test("Keeping a session on a cancelled enrollment starts nothing", .timeLimit(.minutes(1)))
+    func cancelledKeepingStartsNothing() async throws {
+        let bank = TestBank()
+        let session = rechecking(bank)
+        session.cancel()
+
+        await #expect(throws: SiteEnrollment.Failure.cancelled) {
+            try await session.beginKeepingSession(signInAddress: "example.com/login")
+        }
+
+        #expect(!session.isRechecking)
+        #expect(session.note == nil)
+        #expect(!session.isWorking)
+        #expect(!session.keptSessionSawSignIn)
+        #expect(bank.site.requests.isEmpty)
+    }
+
+    @Test("Signing in on a cancelled enrollment starts nothing", .timeLimit(.minutes(1)))
+    func cancelledBeginStartsNothing() async throws {
+        let bank = TestBank()
+        let stub = CodeStub()
+        let session = enrollment(bank, stub: stub)
+        session.cancel()
+
+        await #expect(throws: SiteEnrollment.Failure.cancelled) {
+            try await begin(session, bank)
+        }
+
+        #expect(session.note == nil)
+        #expect(!session.isWorking)
+        #expect(bank.site.requests.isEmpty)
+        #expect(stub.calls.isEmpty)
+        await #expect(throws: SiteEnrollment.Failure.cancelled) { _ = try await session.finish(name: "Bank") }
+    }
+
     @Test("Each finish answers only its own begin", .timeLimit(.minutes(1)))
     func finishesDoNotCross() async throws {
         let bank = TestBank()

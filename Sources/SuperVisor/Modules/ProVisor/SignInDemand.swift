@@ -21,6 +21,9 @@ enum SignInDemand {
         let kind: Kind
         /// The earliest open proposal that asks for this host.
         let proposalID: String?
+        /// The granted site's record is flagged as needing the person (`SiteRecord.needsPerson`);
+        /// false for a site a run was only turned away from, and for a requested host.
+        var needsPerson = false
 
         var id: String { host }
 
@@ -87,7 +90,8 @@ enum SignInDemand {
                     host: site.id,
                     displayName: site.name,
                     kind: .signedOut(keepsSession: site.keepsSessionOnly),
-                    proposalID: requests[site.id]?.id
+                    proposalID: requests[site.id]?.id,
+                    needsPerson: site.needsPerson
                 )
             }
 
