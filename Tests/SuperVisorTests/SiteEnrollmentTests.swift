@@ -22,7 +22,9 @@ struct SiteEnrollmentTests {
         address: String = "example.com/login",
         kind: SiteGrant.CodeKind = .none,
         key: String? = nil,
-        sender: String? = nil
+        sender: String? = nil,
+        passwordHosts: [String]? = nil,
+        authenticatorHosts: [String]? = nil
     ) async throws {
         try await enrollment.begin(
             signInAddress: address,
@@ -30,11 +32,25 @@ struct SiteEnrollmentTests {
             password: bank.password,
             authenticatorKey: key,
             codeKind: kind,
-            codeSender: sender
+            codeSender: sender,
+            passwordHosts: passwordHosts,
+            authenticatorHosts: authenticatorHosts
         )
     }
 
     private func url(_ text: String) -> URL { URL(string: text)! }
+
+    /// Waits up to five seconds for `condition`, which a page the person drives brings about.
+    private func waitFor(_ condition: @MainActor () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !condition() {
+            guard ContinuousClock.now < deadline else {
+                Issue.record("the page never reached the expected state")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
 
     // MARK: A full enrollment
 
@@ -137,7 +153,7 @@ struct SiteEnrollmentTests {
         #expect(appGrant.isValid(for: "example.com"))
     }
 
-    @Test("A texted-code site that never asked for a code gives no grant, as the sender is unknown", .timeLimit(.minutes(1)))
+    @Test("A texted-code site that never asked for a code is saved as one with no code", .timeLimit(.minutes(1)))
     func textedWithoutACodePage() async throws {
         let bank = TestBank()
         let session = enrollment(bank)
@@ -145,7 +161,198 @@ struct SiteEnrollmentTests {
 
         try await begin(session, bank, kind: .text, sender: nil)
 
+        let (grant, _) = try await session.finish(name: "Bank")
+        #expect(grant.codeKind == .none)
+        #expect(grant.codeSender == nil)
+        #expect(grant.isValid(for: "example.com"))
+    }
+
+    @Test("A texted-code site that asked for a code that never came gives no grant, as the sender is unknown", .timeLimit(.minutes(1)))
+    func textedCodeNeverArrived() async throws {
+        let bank = TestBank()
+        bank.requiresCode = true
+        let session = enrollment(bank, stub: CodeStub(firstText: nil))
+        defer { session.cancel() }
+
+        try await begin(session, bank, kind: .text, sender: nil)
+        #expect(session.browser.currentURL?.path == "/verify")
+
+        // The person types the code into the page themselves.
+        _ = try await session.browser.run("""
+            document.getElementById('otp').value = '\(bank.code)';
+            HTMLFormElement.prototype.requestSubmit.call(document.forms[0]);
+            """)
+        try await waitFor { bank.signedIn && session.browser.currentURL?.path == "/home" }
+        await session.idle()
+
         await #expect(throws: SiteEnrollment.Failure.invalidGrant) { _ = try await session.finish(name: "Bank") }
+    }
+
+    // MARK: Which password worked
+
+    @Test("A password the app filled, followed by the signed-in page, is confirmed", .timeLimit(.minutes(1)))
+    func filledPasswordIsConfirmed() async throws {
+        let bank = TestBank()
+        let session = enrollment(bank)
+        defer { session.cancel() }
+        #expect(!session.passwordIsConfirmed)
+
+        try await begin(session, bank)
+
+        #expect(session.passwordIsConfirmed)
+        let (grant, _) = try await session.finish(name: "Bank")
+        #expect(grant.password == bank.password)
+    }
+
+    @Test("A password the site rejected, then typed into the page by the person, cannot be saved", .timeLimit(.minutes(1)))
+    func rejectedThenRetypedCannotBeSaved() async throws {
+        let bank = TestBank()
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await session.begin(
+            signInAddress: "example.com/login",
+            username: bank.username,
+            password: "an-old-password",
+            authenticatorKey: nil,
+            codeKind: .none,
+            codeSender: nil
+        )
+        #expect(!bank.signedIn)
+        #expect(session.browser.currentURL?.path == "/login")
+        #expect(!session.passwordIsConfirmed)
+
+        // The person signs in with the right password in the page. A script's events are not
+        // trusted, so only the login form coming back says the filled password was wrong.
+        _ = try await session.browser.run("""
+            document.getElementById('user').value = username;
+            document.getElementById('pass').value = password;
+            HTMLFormElement.prototype.requestSubmit.call(document.forms[0]);
+            """, arguments: ["username": bank.username, "password": bank.password])
+        try await waitFor { bank.signedIn && session.browser.currentURL?.path == "/home" }
+        await session.idle()
+
+        #expect(!session.passwordIsConfirmed)
+        await #expect(throws: SiteEnrollment.Failure.passwordNotConfirmed) { _ = try await session.finish(name: "Bank") }
+    }
+
+    @Test("Typing into a password field on the page unconfirms the password the app filled", .timeLimit(.minutes(1)))
+    func typedPasswordUnconfirms() async throws {
+        let bank = TestBank()
+        let session = enrollment(bank)
+        defer { session.cancel() }
+        try await begin(session, bank)
+        #expect(session.passwordIsConfirmed)
+
+        // The message the page script posts for a person's typing lands here.
+        session.browser.notePasswordTyped()
+
+        #expect(!session.passwordIsConfirmed)
+        await #expect(throws: SiteEnrollment.Failure.passwordNotConfirmed) { _ = try await session.finish(name: "Bank") }
+
+        // A new sign-in starts the question over.
+        bank.signOut()
+        try await begin(session, bank)
+        #expect(session.passwordIsConfirmed)
+    }
+
+    @Test("A synthetic input event on a password field is not taken for the person typing", .timeLimit(.minutes(1)))
+    func syntheticTypingIsIgnored() async throws {
+        let bank = TestBank()
+        let session = enrollment(bank)
+        defer { session.cancel() }
+        var typed = 0
+        let observer = session.browser.passwordTypedObserver
+        session.browser.passwordTypedObserver = {
+            typed += 1
+            observer?()
+        }
+        _ = try await session.browser.open(url("https://example.com/login"))
+        _ = try await session.browser.run("""
+            const field = document.getElementById('pass');
+            field.value = 'x';
+            field.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            field.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: 'x' }));
+            """)
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(typed == 0)
+    }
+
+    @Test("A sign-in the person did entirely in the page cannot be saved, as the app has nothing to replay", .timeLimit(.minutes(1)))
+    func signInByThePersonAloneCannotBeSaved() async throws {
+        let bank = TestBank()
+        bank.showsChallenge = true
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await begin(session, bank)
+        #expect(bank.site.posts.isEmpty)
+
+        _ = try await session.browser.run("""
+            document.getElementById('user').value = username;
+            document.getElementById('pass').value = password;
+            HTMLFormElement.prototype.requestSubmit.call(document.forms[0]);
+            """, arguments: ["username": bank.username, "password": bank.password])
+        try await waitFor { bank.signedIn && session.browser.currentURL?.path == "/home" }
+        await session.idle()
+
+        await #expect(throws: SiteEnrollment.Failure.passwordNotFilled) { _ = try await session.finish(name: "Bank") }
+    }
+
+    // MARK: Saved secrets on other hosts
+
+    @Test("A saved password is not filled on a host outside its list, and nothing is sent", .timeLimit(.minutes(1)))
+    func savedPasswordStaysOnItsHosts() async throws {
+        let bank = TestBank()
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await begin(session, bank, passwordHosts: ["login.example.org"])
+
+        #expect(bank.site.posts.isEmpty)
+        #expect(session.unvettedFill == AssistedSignInSession.UnvettedFill(host: "example.com", kind: .password))
+        #expect(session.note == SiteEnrollment.Notes.finishYourself)
+        let typed = try await session.browser.run("return document.getElementById('pass').value;")
+        #expect(typed.string == "")
+
+        // Typed afresh, the password goes in as for a new site.
+        try await begin(session, bank)
+        #expect(session.unvettedFill == nil)
+        #expect(bank.signedIn)
+    }
+
+    @Test("A saved password is filled on a host in its list", .timeLimit(.minutes(1)))
+    func savedPasswordFillsOnItsHosts() async throws {
+        let bank = TestBank()
+        let session = enrollment(bank)
+        defer { session.cancel() }
+
+        try await begin(session, bank, passwordHosts: ["example.com"])
+
+        #expect(session.unvettedFill == nil)
+        #expect(bank.signedIn)
+        #expect(session.passwordIsConfirmed)
+    }
+
+    @Test("A saved authenticator key is not used on a host outside its list", .timeLimit(.minutes(1)))
+    func savedKeyStaysOnItsHosts() async throws {
+        let bank = TestBank()
+        bank.requiresCode = true
+        let stub = CodeStub()
+        let session = enrollment(bank, stub: stub)
+        defer { session.cancel() }
+
+        try await begin(
+            session,
+            bank,
+            kind: .authenticator,
+            key: CodeStub.sampleKey,
+            authenticatorHosts: ["login.example.org"]
+        )
+
+        #expect(bank.site.posts.map(\.path) == ["/session"])
+        #expect(session.unvettedFill == AssistedSignInSession.UnvettedFill(host: "example.com", kind: .code))
+        #expect(!stub.calls.contains { $0.hasPrefix("authenticator") })
     }
 
     @Test("When the sign-in went through too many hosts, the grant keeps the sign-in, start, and fill hosts", .timeLimit(.minutes(2)))
@@ -494,7 +701,8 @@ struct SiteEnrollmentTests {
 
         session.cancel()
 
-        await #expect(throws: SiteEnrollment.Failure.notSignedIn) { _ = try await session.finish(name: "Bank") }
+        #expect(session.isCancelled)
+        await #expect(throws: SiteEnrollment.Failure.cancelled) { _ = try await session.finish(name: "Bank") }
     }
 
     @Test("The host the user sees follows the page they are on", .timeLimit(.minutes(1)))
@@ -510,5 +718,46 @@ struct SiteEnrollmentTests {
 
         #expect(session.currentHost == "www.example.org")
         #expect(session.currentIsSecure)
+    }
+
+    @Test("A load toward another host that fails leaves the bar on the page on display", .timeLimit(.minutes(1)))
+    func failedLoadKeepsTheHost() async throws {
+        let bank = TestBank()
+        let session = enrollment(bank)
+        defer { session.cancel() }
+        try await begin(session, bank)
+        #expect(session.currentHost == "example.com")
+
+        var shown: [String?] = []
+        let watching = session.$currentHost.sink { shown.append($0) }
+        defer { watching.cancel() }
+        // The simulated site has no page there, so the load fails.
+        await #expect(throws: SiteBrowser.Failure.loadFailed) {
+            _ = try await session.browser.open(url("https://nowhere.example.net/"))
+        }
+        try await Task.sleep(for: .milliseconds(200))
+
+        #expect(session.currentHost == "example.com")
+        #expect(session.currentIsSecure)
+        #expect(!shown.contains("nowhere.example.net"))
+    }
+
+    @Test("A load that has started but not committed does not move the bar", .timeLimit(.minutes(1)))
+    func provisionalLoadDoesNotMoveTheHost() async throws {
+        let bank = TestBank()
+        bank.site.route("/elsewhere", host: "www.example.org", page: TestPages.page("Elsewhere", "<p>other</p>"))
+        let session = enrollment(bank)
+        defer { session.cancel() }
+        try await begin(session, bank)
+
+        let webView = session.browser.webView
+        webView.load(URLRequest(url: url("https://www.example.org/elsewhere")))
+        // The web view names the page being loaded as soon as the load starts.
+        try #require(webView.url?.host() == "www.example.org")
+        session.browser.webView(webView, didStartProvisionalNavigation: nil)
+        #expect(session.currentHost == "example.com")
+
+        try await waitFor { session.currentHost == "www.example.org" }
+        #expect(session.browser.committedURL?.host() == "www.example.org")
     }
 }

@@ -13,6 +13,11 @@ import WebKit
 /// recognises them, and leaves a challenge or a page it does not recognise to the user, whose
 /// next page it examines afresh. The typed secrets live from `begin` until `finish` succeeds or
 /// `cancel()` is called, which the window calls when it closes.
+///
+/// **The saved password is the one that worked.** `finish` builds the grant from the password
+/// given to `begin`, so it refuses unless the app filled that password and the sign-in then
+/// left the password form, with no page asking for it again and no typing by the person into
+/// a password field on the page (`passwordIsConfirmed`).
 @MainActor
 final class SiteEnrollment: ObservableObject {
     enum Failure: Error, Equatable {
@@ -22,6 +27,13 @@ final class SiteEnrollment: ObservableObject {
         case notSignedIn
         /// What was observed does not make a valid grant.
         case invalidGrant
+        /// The app filled the password, but the site asked for it again or the person typed a
+        /// password into the page, so which password worked is unknown.
+        case passwordNotConfirmed
+        /// The app filled no password, so it has no sign-in it could replay.
+        case passwordNotFilled
+        /// The enrollment was cancelled while it finished.
+        case cancelled
     }
 
     /// What the app says about where it stands.
@@ -40,6 +52,12 @@ final class SiteEnrollment: ObservableObject {
     /// The handle texted codes came from, learned from the first code that arrived; the window
     /// shows it for the user to confirm.
     @Published private(set) var learnedCodeSender: String?
+    /// See the type's discussion; false from `begin` until the sign-in shows the password took.
+    @Published private(set) var passwordIsConfirmed = false
+    /// A saved secret the app declined to fill because the page was on another host.
+    @Published private(set) var unvettedFill: AssistedSignInSession.UnvettedFill?
+    /// Set by `cancel()`; nothing the enrollment did is used afterwards.
+    private(set) var isCancelled = false
 
     let browser: SiteBrowser
 
@@ -66,6 +84,7 @@ final class SiteEnrollment: ObservableObject {
     private var isArmed = false
     private var assistTask: Task<Void, Never>?
     private var assistRequested = false
+    private var passwordTyped = false
     /// The hosts navigations went through up to the first page past the sign-in, once there.
     private var hostsAtSignIn: Set<String>?
 
@@ -82,13 +101,18 @@ final class SiteEnrollment: ObservableObject {
             policy: .anyHTTPSHost,
             dataStore: dataStore,
             simulatedPages: simulatedPages,
-            settling: settling
+            settling: settling,
+            observesPasswordTyping: true
         )
-        browser.navigationObserver = { [weak self] in
+        browser.locationObserver = { [weak self] in
             self?.refreshLocation()
         }
         browser.pageFinishedObserver = { [weak self] in
             self?.pageFinished()
+        }
+        browser.passwordTypedObserver = { [weak self] in
+            self?.passwordTyped = true
+            self?.refreshPasswordConfirmation()
         }
     }
 
@@ -118,13 +142,18 @@ final class SiteEnrollment: ObservableObject {
 
     /// Loads the sign-in page and lets the app fill what it recognises. The user may type in the
     /// page at any time; the app goes on examining the pages the browser loads until `finish`.
+    ///
+    /// `passwordHosts` and `authenticatorHosts` are for secrets saved with a site rather than
+    /// typed now: such a secret is filled only on those hosts (see `AssistedSignInSession`).
     func begin(
         signInAddress: String,
         username: String,
         password: String,
         authenticatorKey: String?,
         codeKind: SiteGrant.CodeKind,
-        codeSender: String?
+        codeSender: String?,
+        passwordHosts: [String]? = nil,
+        authenticatorHosts: [String]? = nil
     ) async throws {
         guard let url = Self.normalisedAddress(signInAddress) else { throw Failure.invalidAddress }
         stopAssisting()
@@ -145,10 +174,15 @@ final class SiteEnrollment: ObservableObject {
             authenticatorKey: authenticatorKey,
             codeKind: codeKind,
             codeSender: codeSender,
-            codes: codes
+            codes: codes,
+            passwordHosts: passwordHosts,
+            authenticatorHosts: authenticatorHosts
         )
         hostsAtSignIn = nil
         learnedCodeSender = nil
+        unvettedFill = nil
+        passwordTyped = false
+        passwordIsConfirmed = false
         isBeginning = true
         note = Notes.signingIn
         refreshWorking()
@@ -178,7 +212,11 @@ final class SiteEnrollment: ObservableObject {
     /// page is that page without its query and fragment; the browse hosts are the hosts the
     /// sign-in went through; the fill hosts are the sign-in host and the hosts the filled pages
     /// and forms belong to. A refusal leaves the enrollment as it was.
+    ///
+    /// A texted or emailed code with no sender known, on a sign-in that never showed a code
+    /// field, is saved as no code: the site did not ask for one this time.
     func finish(name: String) async throws -> (grant: SiteGrant, record: SiteRecord) {
+        guard !isCancelled else { throw Failure.cancelled }
         guard let pending, let session, let broker else { throw Failure.notSignedIn }
         isArmed = false
         assistRequested = false
@@ -201,7 +239,12 @@ final class SiteEnrollment: ObservableObject {
               let probe = try? await broker.probe(),
               probe.isSecureTopFrame,
               SignInRules.isPastSignIn(probe)
-        else { throw Failure.notSignedIn }
+        else { throw isCancelled ? Failure.cancelled : Failure.notSignedIn }
+        guard !isCancelled else { throw Failure.cancelled }
+        guard session.steps.contains(where: { $0.kind == .password }) else {
+            throw Failure.passwordNotFilled
+        }
+        guard passwordIsConfirmed else { throw Failure.passwordNotConfirmed }
 
         var startComponents = currentComponents
         startComponents.query = nil
@@ -226,20 +269,26 @@ final class SiteEnrollment: ObservableObject {
             browseHosts.formUnion(observed)
         }
 
-        let codeSender: String? = switch pending.codeKind {
+        var codeKind = pending.codeKind
+        var codeSender: String? = switch pending.codeKind {
         case .text: session.learnedCodeSender ?? pending.codeSender
         case .email: pending.codeSender
         case .none, .authenticator: nil
         }
+        if codeKind == .text || codeKind == .email, codeSender == nil, !session.sawCodeField,
+           !steps.contains(where: { $0.kind == .code }) {
+            codeKind = .none
+            codeSender = nil
+        }
         let grant = SiteGrant(
             username: pending.username,
             password: pending.password,
-            authenticatorKey: pending.codeKind == .authenticator ? pending.authenticatorKey : nil,
+            authenticatorKey: codeKind == .authenticator ? pending.authenticatorKey : nil,
             signInURL: pending.signInURL,
             startURL: startURL,
             fillHosts: fillHosts,
             browseHosts: [signInHost] + browseHosts.subtracting([signInHost]).sorted(),
-            codeKind: pending.codeKind,
+            codeKind: codeKind,
             codeSender: codeSender,
             signInSteps: steps,
             signOutControlSeen: probe.hasSignOutControl
@@ -256,6 +305,7 @@ final class SiteEnrollment: ObservableObject {
     /// Stops examining pages, forgets the secrets, and closes the browser. The enrollment is
     /// finished with.
     func cancel() {
+        isCancelled = true
         stopAssisting()
         wipe()
         browser.close()
@@ -317,6 +367,8 @@ final class SiteEnrollment: ObservableObject {
         note = Notes.signingIn
         let stopped = await session.run()
         learnedCodeSender = session.learnedCodeSender
+        unvettedFill = session.unvettedFill
+        refreshPasswordConfirmation()
         if session.hasReachedSignedInPage {
             if hostsAtSignIn == nil { hostsAtSignIn = browser.traversedHosts.union(browser.visitedHosts) }
             note = Notes.checkAndSave
@@ -334,8 +386,15 @@ final class SiteEnrollment: ObservableObject {
     }
 
     private func refreshLocation() {
-        let url = browser.currentURL
-        currentHost = url?.host(percentEncoded: false)?.lowercased()
-        currentIsSecure = url?.scheme?.lowercased() == "https" && browser.webView.hasOnlySecureContent
+        let url = browser.committedURL
+        let host = url?.host(percentEncoded: false)?.lowercased()
+        let secure = url?.scheme?.lowercased() == "https" && browser.webView.hasOnlySecureContent
+        if host != currentHost { currentHost = host }
+        if secure != currentIsSecure { currentIsSecure = secure }
+    }
+
+    private func refreshPasswordConfirmation() {
+        let confirmed = session?.passwordWasAccepted == true && !passwordTyped
+        if confirmed != passwordIsConfirmed { passwordIsConfirmed = confirmed }
     }
 }

@@ -24,6 +24,7 @@ enum ProVisorSetupError: Error, LocalizedError {
 ///   CHARTER.md     the agent's standing brief — the user's to edit
 ///   access.json    which connector tools each kind of run may call
 ///   standing.json  the rules the user agreed may be acted on without asking
+///   sites.json     the sites granted for signed-in reading (secrets are in the Keychain)
 ///   workspace/     the agent's working directory
 ///     proposals/   one JSON file per proposal
 ///     memory/      the agent's own notes between runs
@@ -60,6 +61,11 @@ enum ProVisorHome {
 
     static var standingURL: URL {
         rootURL.appendingPathComponent("standing.json", isDirectory: false)
+    }
+
+    /// The granted sites as the settings list shows them (`SiteRegistry`).
+    static var sitesURL: URL {
+        rootURL.appendingPathComponent("sites.json", isDirectory: false)
     }
 
     static var workspaceURL: URL {

@@ -1142,6 +1142,110 @@ struct SignInBrokerTests {
         #expect(bank.site.posts.map(\.path) == ["/session"])
     }
 
+    /// Code sources whose texted-code source polls until its task is cancelled, recording that
+    /// it began and that cancellation stopped it.
+    private final class PollingSource: @unchecked Sendable {
+        private let lock = NSLock()
+        private var began = false
+        private var stopped = false
+
+        var hasBegun: Bool { lock.withLock { began } }
+        var hasStopped: Bool { lock.withLock { stopped } }
+
+        var codes: SignInCodes {
+            SignInCodes(
+                authenticator: { _ in nil },
+                texted: { [self] _, _ in
+                    lock.withLock { began = true }
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .milliseconds(10))
+                    }
+                    lock.withLock { stopped = true }
+                    return nil
+                },
+                emailed: { _, _ in nil },
+                messageBaseline: { 1 },
+                firstTextedCode: { _ in nil }
+            )
+        }
+    }
+
+    private func waitFor(_ condition: () -> Bool) async throws -> Bool {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !condition() {
+            if ContinuousClock.now >= deadline { return false }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return true
+    }
+
+    @Test("Cancelling a sign-in that waits for a texted code cancels the code source's own task", .timeLimit(.minutes(1)))
+    func cancellingStopsTheCodeSource() async throws {
+        let bank = TestBank()
+        bank.requiresCode = true
+        let source = PollingSource()
+        let page = browser(bank)
+        defer { page.close() }
+        let signIn = grant(bank, steps: defaultSteps + [step(.code, "/verify", codeField)], kind: .text, sender: "24273")
+        _ = try await page.open(signIn.startURL)
+        let broker = SignInBroker(browser: page)
+
+        let running = Task { @MainActor in await broker.signIn(with: signIn, codes: source.codes) }
+        #expect(try await waitFor { source.hasBegun })
+        running.cancel()
+
+        #expect(await running.value == .interrupted)
+        #expect(try await waitFor { source.hasStopped })
+    }
+
+    @Test("Closing the browser of a sign-in that waits for a texted code stops the code source", .timeLimit(.minutes(1)))
+    func closingStopsTheCodeSource() async throws {
+        let bank = TestBank()
+        bank.requiresCode = true
+        let source = PollingSource()
+        let page = browser(bank)
+        let signIn = grant(bank, steps: defaultSteps + [step(.code, "/verify", codeField)], kind: .text, sender: "24273")
+        _ = try await page.open(signIn.startURL)
+        let broker = SignInBroker(browser: page)
+
+        let running = Task { @MainActor in await broker.signIn(with: signIn, codes: source.codes) }
+        #expect(try await waitFor { source.hasBegun })
+        page.close()
+
+        #expect(await running.value == .interrupted)
+        #expect(try await waitFor { source.hasStopped })
+        #expect(bank.site.posts.map(\.path) == ["/session"])
+    }
+
+    @Test("Cancelling an enrollment that waits for a texted code stops the code source", .timeLimit(.minutes(1)))
+    func cancellingEnrollmentStopsTheCodeSource() async throws {
+        let bank = TestBank()
+        bank.requiresCode = true
+        let source = PollingSource()
+        let enrollment = SiteEnrollment(
+            dataStore: .nonPersistent(),
+            codes: source.codes,
+            simulatedPages: bank.site.answer,
+            settling: .fast
+        )
+        let beginning = Task { @MainActor in
+            try await enrollment.begin(
+                signInAddress: "example.com/login",
+                username: bank.username,
+                password: bank.password,
+                authenticatorKey: nil,
+                codeKind: .text,
+                codeSender: "24273"
+            )
+        }
+        #expect(try await waitFor { source.hasBegun })
+        enrollment.cancel()
+        _ = try? await beginning.value
+
+        #expect(try await waitFor { source.hasStopped })
+        #expect(!enrollment.isWorking)
+    }
+
     @Test("A sign-in whose task is cancelled while a code is awaited is interrupted", .timeLimit(.minutes(1)))
     func cancelledWhileAwaitingACode() async throws {
         let bank = TestBank()

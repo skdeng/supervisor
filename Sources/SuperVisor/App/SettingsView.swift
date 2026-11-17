@@ -134,7 +134,11 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case "provisor":
-            ProVisorSettingsView(settings: settings, center: ProVisorCenter.shared)
+            ProVisorSettingsView(
+                settings: settings,
+                center: ProVisorCenter.shared,
+                sites: SiteAccessCenter.shared
+            )
         default:
             EmptyView()
         }

@@ -32,6 +32,8 @@ enum SignInOutcome: Equatable, Sendable {
         case stillSignedOut
         /// A page could not be loaded, or took too long.
         case loadFailed
+        /// A saved secret would have been filled on a host the grant does not fill on.
+        case unvettedHost
     }
 
     /// How the attempt counts against the site, or nil for an attempt that does not count.
@@ -48,7 +50,8 @@ enum SignInOutcome: Equatable, Sendable {
         case let .needsPerson(reason):
             switch reason {
             case .noCode, .pageMoved, .loadFailed: return .transientFailure
-            case .noRecordedSteps, .unrecognisedPage, .challenge, .tooManySteps, .stillSignedOut:
+            case .noRecordedSteps, .unrecognisedPage, .challenge, .tooManySteps, .stillSignedOut,
+                 .unvettedHost:
                 return .needsPerson
             }
         }
@@ -468,6 +471,8 @@ final class SignInBroker {
                     codes: codes
                 )
                 try Task.checkCancellation()
+                // A wait for a code ends early when the browser closes; that is no missing code.
+                if browser.isClosed { return .interrupted }
                 guard let value else { return .needsPerson(.noCode) }
                 requests.append(FillRequest(kind: pick.step.kind, key: pick.step.field, value: value))
             }
@@ -564,45 +569,48 @@ final class SignInBroker {
 
     // MARK: Waiting for codes
 
-    /// The answer of `operation`, or nil when `codeWaitLimit` passes first or the task is
-    /// cancelled. An operation that never returns is left behind, not waited for.
+    /// The answer of `operation`, or nil when `codeWaitLimit` passes first, the task is
+    /// cancelled, or the browser closes. However the wait ends, the operation's task is
+    /// cancelled, so a code source that polls stops with it.
     fileprivate func bounded(_ operation: @escaping @Sendable () async -> String?) async -> String? {
         let race = CodeRace()
         let limit = codeWaitLimit
+        let closeToken = browser.whenClosed { race.finish(nil) }
+        defer { browser.withdrawCloseHandler(closeToken) }
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
                 let timer = Task {
                     try? await Task.sleep(for: limit)
                     race.finish(nil)
                 }
-                race.install(continuation, timer: timer)
-                Task { race.finish(await operation()) }
+                let work = Task { race.finish(await operation()) }
+                race.install(continuation, tasks: [timer, work])
             }
         } onCancel: {
             race.finish(nil)
         }
     }
 
-    /// Resolves a wait for a code once, whichever of the answer, the time limit, and
-    /// cancellation comes first.
+    /// Resolves a wait for a code once, whichever of the answer, the time limit, cancellation,
+    /// and the browser closing comes first, and cancels the tasks the wait started.
     private final class CodeRace: @unchecked Sendable {
         private let lock = NSLock()
         private var continuation: CheckedContinuation<String?, Never>?
-        private var timer: Task<Void, Never>?
+        private var tasks: [Task<Void, Never>] = []
         private var isFinished = false
         private var result: String?
 
-        func install(_ continuation: CheckedContinuation<String?, Never>, timer: Task<Void, Never>) {
+        func install(_ continuation: CheckedContinuation<String?, Never>, tasks: [Task<Void, Never>]) {
             lock.lock()
             if isFinished {
                 let result = result
                 lock.unlock()
-                timer.cancel()
+                tasks.forEach { $0.cancel() }
                 continuation.resume(returning: result)
                 return
             }
             self.continuation = continuation
-            self.timer = timer
+            self.tasks = tasks
             lock.unlock()
         }
 
@@ -615,11 +623,11 @@ final class SignInBroker {
             isFinished = true
             result = value
             let continuation = continuation
-            let timer = timer
+            let tasks = tasks
             self.continuation = nil
-            self.timer = nil
+            self.tasks = []
             lock.unlock()
-            timer?.cancel()
+            tasks.forEach { $0.cancel() }
             continuation?.resume(returning: value)
         }
     }
@@ -676,6 +684,15 @@ final class SignInBroker {
         case submitDisabled
         /// The fields were filled but no way to submit them was found.
         case noSubmit
+    }
+
+    /// Whether the page shows exactly one visible password field matching `key`, and it holds
+    /// no value. Only the emptiness is read, never the value.
+    func isPasswordFieldEmpty(_ key: FieldKey) async throws -> Bool {
+        let value = try await browser.run(Scripts.passwordFieldEmpty, arguments: [
+            "key": ["name": key.name, "id": key.id, "autocomplete": key.autocomplete, "type": key.type],
+        ])
+        return value.bool == true
     }
 
     /// Reads what the page shows.
@@ -751,6 +768,18 @@ final class SignInBroker {
             const formOf = (element) => inputProto('form').get.call(element);
             const controlsOf = (form) => Array.prototype.slice.call(formProto('elements').get.call(form));
             const isSubmitControl = (control) => (control.tagName === 'BUTTON' || control.tagName === 'INPUT') && control.type === 'submit';
+            const matches = (element, key) => {
+              if (key.name !== '' && attr(element, 'name') === key.name) return true;
+              if (key.id !== '' && attr(element, 'id') === key.id) return true;
+              return key.autocomplete !== '' && attr(element, 'autocomplete').toLowerCase() === key.autocomplete
+                && attr(element, 'type').toLowerCase() === key.type;
+            };
+            """
+
+        static let passwordFieldEmpty = common + """
+
+            const found = fillableInputs().filter((element) => element.type === 'password' && matches(element, key));
+            return found.length === 1 && inputProto('value').get.call(found[0]) === '';
             """
 
         static let probe = common + """
@@ -841,12 +870,6 @@ final class SignInBroker {
                 && isSecureContext && window.top === window.self;
               if (!onPage()) return result('moved');
 
-              const matches = (element, key) => {
-                if (key.name !== '' && attr(element, 'name') === key.name) return true;
-                if (key.id !== '' && attr(element, 'id') === key.id) return true;
-                return key.autocomplete !== '' && attr(element, 'autocomplete').toLowerCase() === key.autocomplete
-                  && attr(element, 'type').toLowerCase() === key.type;
-              };
               const inputs = fillableInputs();
               const targets = [];
               for (const fill of fills) {
@@ -953,8 +976,18 @@ final class SignInBroker {
 /// filled, the steps it recorded, the code sender it learned, and the hosts the filled forms
 /// submit to. Each `run` examines the page that is open and the pages its fills lead to, so a
 /// page the user took over, or one the app passed on, is examined afresh when the user moves on.
+///
+/// A secret saved with a site (`passwordHosts`, `authenticatorHosts`) is filled only on a page
+/// whose host is in its list, into a form that sends to one of them; anywhere else the session
+/// stops with `.unvettedHost` and fills nothing on that page.
 @MainActor
 final class AssistedSignInSession {
+    /// A fill the session refused because the page's host is not one the secret may go to.
+    struct UnvettedFill: Equatable, Sendable {
+        let host: String
+        let kind: SignInStep.Kind
+    }
+
     private let broker: SignInBroker
     private let username: String
     private let password: String
@@ -962,6 +995,8 @@ final class AssistedSignInSession {
     private let codeKind: SiteGrant.CodeKind
     private let codeSender: String?
     private let codes: SignInCodes
+    private let passwordHosts: [String]?
+    private let authenticatorHosts: [String]?
 
     private(set) var steps: [SignInStep] = []
     private(set) var learnedCodeSender: String?
@@ -970,6 +1005,14 @@ final class AssistedSignInSession {
     /// password field. From there on the session fills nothing: what the user sees is the site
     /// they signed in to.
     private(set) var hasReachedSignedInPage = false
+    /// Set when a page asked for a code.
+    private(set) var sawCodeField = false
+    private(set) var unvettedFill: UnvettedFill?
+    /// Set when, after the password was filled, a page showed the field it went into empty
+    /// again at the same address: the site asked for the password again.
+    private(set) var passwordShownAgain = false
+    /// Set when, after the password was filled, a page no longer showed the field it went into.
+    private(set) var leftPasswordForm = false
     private var sawPasswordField = false
     private var used = Set<SignInStep.Kind>()
     private var baseline: Int64?
@@ -983,7 +1026,9 @@ final class AssistedSignInSession {
         authenticatorKey: String?,
         codeKind: SiteGrant.CodeKind,
         codeSender: String?,
-        codes: SignInCodes
+        codes: SignInCodes,
+        passwordHosts: [String]? = nil,
+        authenticatorHosts: [String]? = nil
     ) {
         self.broker = broker
         self.username = username
@@ -992,6 +1037,8 @@ final class AssistedSignInSession {
         self.codeKind = codeKind
         self.codeSender = codeSender
         self.codes = codes
+        self.passwordHosts = passwordHosts
+        self.authenticatorHosts = authenticatorHosts
         baseline = codes.messageBaseline()
         requestedAt = broker.currentTime()
     }
@@ -1005,6 +1052,12 @@ final class AssistedSignInSession {
         )
     }
 
+    /// Whether the password the session filled took: a later page left its form, and no page
+    /// asked for it again.
+    var passwordWasAccepted: Bool {
+        steps.contains { $0.kind == .password } && leftPasswordForm && !passwordShownAgain
+    }
+
     /// Examines the open page and fills what it recognises, then does the same on the page each
     /// fill leads to. Returns why it stopped; nil means no field was left to fill.
     func run() async -> SignInOutcome.Reason? {
@@ -1013,12 +1066,14 @@ final class AssistedSignInSession {
             do {
                 try Task.checkCancellation()
                 page = try await broker.probe()
+                try await notePasswordForm(on: page)
             } catch {
                 return stopped(by: error)
             }
             if page.hasChallenge { return .challenge }
             guard page.isSecureTopFrame else { return .pageMoved }
             if page.hasVisiblePassword { sawPasswordField = true }
+            if page.hasCodeField { sawCodeField = true }
             if sawPasswordField, SignInRules.isPastSignIn(page) {
                 hasReachedSignedInPage = true
                 return nil
@@ -1030,6 +1085,17 @@ final class AssistedSignInSession {
             case let .stop(reason): return reason
             case let .fill(chosen): picks = chosen
             }
+            let host = String(page.origin.dropFirst("https://".count))
+            var allowedHosts: [String]?
+            for pick in picks {
+                guard let limit = savedSecretHosts(for: pick.kind) else { continue }
+                guard limit.contains(host) else {
+                    unvettedFill = UnvettedFill(host: host, kind: pick.kind)
+                    return .unvettedHost
+                }
+                allowedHosts = limit
+            }
+
             fills += picks.count
             if fills > SignInBroker.maximumFills { return .tooManySteps }
 
@@ -1044,7 +1110,7 @@ final class AssistedSignInSession {
                 case .code:
                     value = await code()
                 }
-                if Task.isCancelled { return .loadFailed }
+                if Task.isCancelled || broker.browser.isClosed { return .loadFailed }
                 guard let value else { return .noCode }
                 requests.append(SignInBroker.FillRequest(kind: pick.kind, key: pick.field.key, value: value))
             }
@@ -1057,7 +1123,7 @@ final class AssistedSignInSession {
                 status = try await broker.fill(
                     origin: page.origin,
                     path: page.path,
-                    allowedHosts: nil,
+                    allowedHosts: allowedHosts,
                     requests: requests
                 )
             } catch {
@@ -1082,6 +1148,30 @@ final class AssistedSignInSession {
             }
         }
         return .tooManySteps
+    }
+
+    /// The hosts a saved secret behind a fill of `kind` may go to, or nil when the value was
+    /// typed during this enrollment.
+    private func savedSecretHosts(for kind: SignInStep.Kind) -> [String]? {
+        switch kind {
+        case .username: nil
+        case .password: passwordHosts
+        case .code: codeKind == .authenticator ? authenticatorHosts : nil
+        }
+    }
+
+    /// Notes whether a page after the password fill shows that fill's field: empty again at
+    /// the same address is the site asking for the password again; absent is the form left. A
+    /// field still holding the value is a form still being submitted, and says neither.
+    private func notePasswordForm(on page: PageProbe) async throws {
+        guard let step = steps.first(where: { $0.kind == .password }) else { return }
+        guard SignInRules.visibleField(for: step, on: page) != nil else {
+            leftPasswordForm = true
+            return
+        }
+        if try await broker.isPasswordFieldEmpty(step.field) {
+            passwordShownAgain = true
+        }
     }
 
     private func stopped(by error: any Error) -> SignInOutcome.Reason {
@@ -1136,11 +1226,13 @@ extension SignInBroker {
         after baseline: Int64
     ) async -> (code: String, sender: String)? {
         let found = FirstText()
-        _ = await bounded {
+        let code = await bounded {
             guard let first = await codes.firstTextedCode(baseline) else { return nil }
             found.set(first)
             return first.code
         }
+        // A source that answers after the wait ended, cancelled or not, answered no one.
+        guard code != nil else { return nil }
         return found.value
     }
 

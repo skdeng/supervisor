@@ -109,6 +109,11 @@ final class SerialGate {
 /// nothing here follows a link by activating it. New windows are refused, downloads cancelled,
 /// and the dialogs a page raises are answered at once so a page cannot hold the reader.
 ///
+/// **Where the page is.** `committedURL` and `hasOnlySecureContent` describe the page the web
+/// view displays. `webView.url` names a page still loading as soon as a load starts, so it is
+/// not what a person is shown as the address; `locationObserver` is called when the displayed
+/// page or its secure state changes, never when a load merely starts.
+///
 /// **A simulated site.** With `simulatedPages` set, each main-frame navigation is answered with
 /// the HTML the closure returns for that request, served at the request's own `https://` URL by
 /// `loadSimulatedRequest`, so a page sees a real origin, path, and secure context while no
@@ -211,8 +216,16 @@ final class SiteBrowser: NSObject {
     private(set) var blockedWindows = 0
     /// Frames inside a page that were refused a load.
     private(set) var blockedFrames = 0
-    /// Called on the main actor whenever the main frame starts, commits, or finishes a load.
-    var navigationObserver: (@MainActor () -> Void)?
+    /// The address of the page on display: set when a main-frame load commits or finishes, and
+    /// kept when a load fails before committing.
+    private(set) var committedURL: URL?
+    /// Called on the main actor when the page on display changes, finishes loading, stays put
+    /// after a load that failed, or changes whether all its content came over a secure
+    /// connection.
+    var locationObserver: (@MainActor () -> Void)?
+    /// Called on the main actor each time the person types into a password field on the page.
+    /// Only a browser made with `observesPasswordTyping` calls it.
+    var passwordTypedObserver: (@MainActor () -> Void)?
     /// Called on the main actor each time the main frame finishes a load.
     var pageFinishedObserver: (@MainActor () -> Void)?
 
@@ -226,13 +239,23 @@ final class SiteBrowser: NSObject {
     private var currentNavigation: WKNavigation?
     private var currentFinished = false
     private var loadFailures = 0
-    private var isClosed = false
+    private(set) var isClosed = false
+    private var secureContentObservation: NSKeyValueObservation?
+    private var closeHandlers: [UUID: @MainActor () -> Void] = [:]
+    private let passwordTypingRelay: PasswordTypingRelay?
 
+    /// The message the password-typing script posts. It carries nothing but the fact.
+    nonisolated static let passwordTypedMessage = "supervisorPasswordTyped"
+
+    /// With `observesPasswordTyping`, a script in the app's isolated content world reports each
+    /// input a person makes into a password field (see `passwordTypedObserver`). Events a
+    /// script dispatches, the app's own fills among them, are not trusted and are not reported.
     init(
         policy: SiteNavigationPolicy,
         dataStore: WKWebsiteDataStore = SiteBrowser.sharedStore,
         simulatedPages: SimulatedPages? = nil,
-        settling: Settling = .standard
+        settling: Settling = .standard,
+        observesPasswordTyping: Bool = false
     ) {
         self.policy = policy
         self.simulatedPages = simulatedPages
@@ -244,6 +267,23 @@ final class SiteBrowser: NSObject {
         configuration.mediaTypesRequiringUserActionForPlayback = .all
         // Sites refuse the bare WebKit agent string as an unsupported browser.
         configuration.applicationNameForUserAgent = "Version/26.0 Safari/605.1.15"
+        if observesPasswordTyping {
+            let relay = PasswordTypingRelay()
+            configuration.userContentController.addUserScript(WKUserScript(
+                source: Scripts.passwordTyping,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false,
+                in: .defaultClient
+            ))
+            configuration.userContentController.add(
+                relay,
+                contentWorld: .defaultClient,
+                name: Self.passwordTypedMessage
+            )
+            passwordTypingRelay = relay
+        } else {
+            passwordTypingRelay = nil
+        }
         webView = WKWebView(frame: Self.initialFrame, configuration: configuration)
 
         let container = NSView(frame: Self.initialFrame)
@@ -261,9 +301,26 @@ final class SiteBrowser: NSObject {
         super.init()
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        passwordTypingRelay?.browser = self
+        secureContentObservation = webView.observe(\.hasOnlySecureContent, options: [.new]) { [weak self] _, _ in
+            MainActor.assumeIsolated {
+                self?.locationObserver?()
+            }
+        }
     }
 
     var currentURL: URL? { webView.url }
+
+    /// Moves the web view out of its hidden window into `host`, filling it, for a person to
+    /// watch and type into. Loading and reading go on as before; `close()` removes the view
+    /// from the host.
+    func present(in host: NSView) {
+        guard !isClosed else { return }
+        webView.removeFromSuperview()
+        webView.frame = host.bounds
+        webView.autoresizingMask = [.width, .height]
+        host.addSubview(webView)
+    }
 
     /// Stops loading and releases the window. The browser is of no further use.
     func close() {
@@ -272,10 +329,40 @@ final class SiteBrowser: NSObject {
         webView.stopLoading()
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
+        webView.configuration.userContentController.removeAllScriptMessageHandlers()
+        secureContentObservation?.invalidate()
+        secureContentObservation = nil
         webView.removeFromSuperview()
         window.close()
-        navigationObserver = nil
+        locationObserver = nil
         pageFinishedObserver = nil
+        passwordTypedObserver = nil
+        let handlers = closeHandlers.values
+        closeHandlers.removeAll()
+        handlers.forEach { $0() }
+    }
+
+    /// Calls `handler` once when the browser closes, at once if it already has. The returned
+    /// token withdraws it.
+    @discardableResult
+    func whenClosed(_ handler: @escaping @MainActor () -> Void) -> UUID {
+        let token = UUID()
+        if isClosed {
+            handler()
+        } else {
+            closeHandlers[token] = handler
+        }
+        return token
+    }
+
+    func withdrawCloseHandler(_ token: UUID) {
+        closeHandlers.removeValue(forKey: token)
+    }
+
+    /// Reports a person's typing into a password field; the page script's message lands here.
+    func notePasswordTyped() {
+        guard !isClosed else { return }
+        passwordTypedObserver?()
     }
 
     private func ensureOpen() throws {
@@ -572,6 +659,33 @@ final class SiteBrowser: NSObject {
               links: links
             };
             """
+
+        /// Runs in the isolated content world, where the page's scripts cannot reach the
+        /// listener or the message handler. Only a trusted event, which comes from the person,
+        /// is reported, and the message carries no value.
+        static let passwordTyping = """
+            document.addEventListener('input', (event) => {
+              if (!event.isTrusted) return;
+              const target = event.composedPath()[0];
+              if (target instanceof HTMLInputElement && target.type === 'password') {
+                window.webkit.messageHandlers.\(SiteBrowser.passwordTypedMessage).postMessage(null);
+              }
+            }, true);
+            """
+    }
+}
+
+/// Receives the password-typing script's message for a browser, holding it weakly: the web
+/// view's content controller keeps its handlers alive for as long as the web view lives.
+@MainActor
+private final class PasswordTypingRelay: NSObject, WKScriptMessageHandler {
+    weak var browser: SiteBrowser?
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        browser?.notePasswordTyped()
     }
 }
 
@@ -673,11 +787,11 @@ extension SiteBrowser: WKNavigationDelegate {
         currentNavigation = navigation
         currentFinished = false
         pendingServe = nil
-        navigationObserver?()
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        navigationObserver?()
+        committedURL = webView.url
+        locationObserver?()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -687,7 +801,8 @@ extension SiteBrowser: WKNavigationDelegate {
            let host = url.host(percentEncoded: false)?.lowercased() {
             visitedHosts.insert(host)
         }
-        navigationObserver?()
+        committedURL = webView.url
+        locationObserver?()
         pageFinishedObserver?()
     }
 
@@ -705,6 +820,8 @@ extension SiteBrowser: WKNavigationDelegate {
         withError error: any Error
     ) {
         noteFailure(of: navigation, error)
+        // The page on display is the one committed before this load began.
+        locationObserver?()
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
