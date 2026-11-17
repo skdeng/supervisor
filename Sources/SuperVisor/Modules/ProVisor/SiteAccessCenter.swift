@@ -4,9 +4,9 @@ import Foundation
 import Synchronization
 import WebKit
 
-/// The app's one owner of what a pass reads through the bridge: the granted sites as Settings
-/// lists them, the texts and photo-places settings and whether each can be read, and the code
-/// sources a sign-in draws on.
+/// The app's one owner of what a pass reads through the bridge: the granted sites as the sites
+/// window lists them, the texts and photo-places settings and whether each can be read, and
+/// the code sources a sign-in draws on.
 ///
 /// Building it does nothing but construct objects; the registry, the Messages database, and the
 /// Photos permission are first read by `refresh()`, which Settings calls when it appears.
@@ -38,7 +38,7 @@ final class SiteAccessCenter: ObservableObject {
         case accessDenied
     }
 
-    /// How a site reads in the settings list.
+    /// How a site reads in the sites window.
     enum SiteStatus: Equatable {
         case needsYou
         case signedIn(Date)

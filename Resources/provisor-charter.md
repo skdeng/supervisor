@@ -62,11 +62,9 @@ mattered is lost with the rest.
    are claiming; a proposal built on a subject line is how wrong proposals happen.
 4. Write each proposal to disk as soon as you are sure of it. A run can be cut off by its turn
    or cost limit, and anything not yet written is lost.
-5. Before you finish, update `memory/`.
-6. End with two or three plain sentences, with no lists or formatting: where you looked, what
-   you proposed, and anything that got in your way, such as a data tool you expected and did not
-   have. This summary is shown as a few lines of small text in SuperVisor's settings, and it is
-   how they find out that something is misconfigured.
+5. Before you finish, update `memory/`: where you looked, what you proposed, and anything that
+   got in your way, such as a data tool you expected and did not have. Your notes are the record
+   of the run, and they are how this person finds out that something is misconfigured.
 
 ## Memory
 

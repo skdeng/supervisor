@@ -638,7 +638,7 @@ struct SiteSignInModelTests {
 
         #expect(await model.done(using: enrollment, into: center) == .notSaved)
         #expect(model.problem == .hasSavedPassword)
-        #expect(model.problem?.signInWindowMessage == "This site has a saved password. Use Sign In Again in Settings to sign in to it.")
+        #expect(model.problem?.signInWindowMessage == "This site has a saved password. Use Sign In Again in Manage Sites to sign in to it.")
         #expect(model.canPressDone)
         #expect(saves == 0)
         let grant = try #require(center.storedGrant(for: "example.com"))

@@ -21,14 +21,6 @@ import Foundation
 final class ProVisorCenter: ObservableObject, FollowUpHolding {
     static let shared = ProVisorCenter()
 
-    /// How the most recent scouting pass ended.
-    struct ScoutReport: Equatable {
-        let finished: Date
-        /// The agent's closing summary, or why the pass failed.
-        let text: String
-        let failed: Bool
-    }
-
     /// Every valid proposal on disk, whatever its status. `ProposalQueue` picks what shows.
     @Published private(set) var proposals: [Proposal] = []
     @Published private(set) var isScouting = false
@@ -41,7 +33,10 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
     @Published private(set) var actingID: String?
     /// Approved proposals waiting behind the acting run.
     @Published private(set) var queuedIDs: [String] = []
-    @Published private(set) var lastScout: ScoutReport?
+    /// Why the last scouting pass failed, in the app's own words, or nil when it finished or
+    /// none has run. What the agent says when a pass ends is kept nowhere: its account of a
+    /// run is in the notes it writes under `memory/`.
+    @Published private(set) var lastScoutFailure: String?
     /// The user's standing approvals, in force and revoked, as last read from disk.
     @Published private(set) var standingRules: [StandingRule] = []
     /// Whether the module is enabled and the center is watching and scheduling.
@@ -440,22 +435,13 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
 
         let finished = Date()
         switch outcome {
-        case let .success(result):
+        case .success:
             defaults.set(finished.timeIntervalSince1970, forKey: Self.lastScoutKey)
             defaults.set(briefDigest, forKey: Self.briefDigestKey)
-            lastScout = ScoutReport(
-                finished: finished,
-                text: Proposal.displayText(result.text, limit: 600) ?? "Finished.",
-                failed: false
-            )
+            lastScoutFailure = nil
             AppLog.notice(.provisor, "scout finished")
         case let .failure(error):
-            lastScout = ScoutReport(
-                finished: finished,
-                text: Proposal.displayText(error.localizedDescription, limit: 600)
-                    ?? "The scouting pass failed.",
-                failed: true
-            )
+            lastScoutFailure = Self.failureSentence(error)
             AppLog.error(.provisor, "scout failed: \(Self.logName(error))")
         }
 
@@ -1366,12 +1352,21 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
     // MARK: - Reporting
 
     private func report(setupFailure error: any Error) {
-        lastScout = ScoutReport(
-            finished: Date(),
-            text: error.localizedDescription,
-            failed: true
-        )
+        lastScoutFailure = Self.setupFailureSentence(error)
         AppLog.error(.provisor, "setup failed")
+    }
+
+    /// Why a pass could not be set up, in words the app wrote: a setup error's own
+    /// description, which names a file of the user's, or one sentence for a folder or file
+    /// that could not be made.
+    static func setupFailureSentence(_ error: any Error) -> String {
+        (error as? ProVisorSetupError)?.localizedDescription
+            ?? "ProVisor's folder could not be prepared."
+    }
+
+    /// Why a pass that started failed, in words the app wrote (`AgentTaskError.fixedDescription`).
+    static func failureSentence(_ error: any Error) -> String {
+        (error as? AgentTaskError)?.fixedDescription ?? "The scouting pass failed."
     }
 
     /// Names a failure for the log without its text, which can quote the agent's own output —

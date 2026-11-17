@@ -19,7 +19,7 @@ final class ProVisorSiteWindow {
         present(.form(.adding), center: center) { SiteFormModel() }
     }
 
-    /// Settings' Sign In Again for `record`.
+    /// The sites window's Sign In Again for `record`.
     func showSignInAgain(_ record: SiteRecord, center: SiteAccessCenter) {
         center.refresh()
         open(Self.route(forSite: record, requestedBy: nil), center: center)

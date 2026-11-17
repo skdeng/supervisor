@@ -22,6 +22,42 @@ struct ProVisorSiteWindowTests {
         window.contentView?.layoutSubtreeIfNeeded()
     }
 
+    @Test("The sites window keeps its size as sites are listed and removed", .timeLimit(.minutes(1)))
+    func sitesWindowKeepsSize() async throws {
+        _ = NSApplication.shared
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        let window = ProVisorSitesWindow.makeWindow(center: center)
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        defer { window.close() }
+
+        let content = try #require(window.contentView)
+        #expect(content.frame.size == ProVisorSitesWindow.initialContentSize)
+        #expect(window.contentMinSize == ProVisorSitesWindow.minimumContentSize)
+        #expect((window.contentViewController as? NSHostingController<ProVisorSitesView>)?.sizingOptions == [])
+
+        window.orderFront(nil)
+        try await settle(window)
+        let frame = window.frame
+
+        // More rows than the window holds, then none.
+        let records = (1...14).map {
+            SiteRecord(id: "site\($0).example.com", name: "Site \($0)", added: Date(timeIntervalSince1970: 1_800_000_000))
+        }
+        try SiteRegistry.save(records, to: fixture.registry)
+        center.refresh()
+        #expect(center.sites.count == 14)
+        try await settle(window)
+        #expect(window.frame == frame)
+
+        try SiteRegistry.save([], to: fixture.registry)
+        center.refresh()
+        #expect(center.sites.isEmpty)
+        try await settle(window)
+        #expect(window.frame == frame)
+    }
+
     @Test("Form changes leave the window's size alone, and the page is in the window", .timeLimit(.minutes(1)))
     func formChangesKeepSize() async throws {
         _ = NSApplication.shared

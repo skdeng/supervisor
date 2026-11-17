@@ -1829,6 +1829,43 @@ struct ProVisorSettingsTests {
         return defaults
     }
 
+    @Test("The Sites row counts the granted sites and those waiting for a sign-in")
+    func sitesSummary() {
+        let added = Date(timeIntervalSince1970: 1_800_000_000)
+        let bank = SiteRecord(id: "bank.example.com", name: "Bank", added: added)
+        var clinic = SiteRecord(id: "clinic.example.com", name: "Clinic", added: added)
+        clinic.needsPerson = true
+        let shop = SiteRecord(id: "shop.example.com", name: "Shop", added: added)
+
+        #expect(ProVisorSettingsView.sitesSummary([], awaiting: []) == "None yet")
+        #expect(ProVisorSettingsView.sitesSummary([bank], awaiting: []) == "1 site")
+        #expect(ProVisorSettingsView.sitesSummary([bank, shop], awaiting: []) == "2 sites")
+        #expect(ProVisorSettingsView.sitesSummary([bank, clinic], awaiting: []) == "2 sites, 1 needs you")
+        #expect(
+            ProVisorSettingsView.sitesSummary([bank, clinic, shop], awaiting: ["shop.example.com"])
+                == "3 sites, 2 need you"
+        )
+    }
+
+    @Test("A failed pass is described in the app's words, never the agent's or its process's")
+    @MainActor
+    func failureSentences() {
+        #expect(ProVisorCenter.failureSentence(AgentTaskError.agentError("words from a mail"))
+            == "The agent reported an error.")
+        #expect(ProVisorCenter.failureSentence(AgentTaskError.malformedOutput("words from a mail"))
+            == "The agent did not return a valid result.")
+        #expect(ProVisorCenter.failureSentence(AgentTaskError.launchFailed("words on stderr"))
+            == "The local agent task could not be started.")
+        #expect(ProVisorCenter.failureSentence(AgentTaskError.limitReached(.spending))
+            == "The agent reached its spending limit before finishing.")
+        #expect(ProVisorCenter.failureSentence(AgentTaskError.timedOut) == "The agent task timed out.")
+        #expect(ProVisorCenter.failureSentence(CocoaError(.fileNoSuchFile)) == "The scouting pass failed.")
+        #expect(ProVisorCenter.setupFailureSentence(ProVisorSetupError.charterUnreadable)
+            == "CHARTER.md in ProVisor's folder is empty or too large to use.")
+        #expect(ProVisorCenter.setupFailureSentence(CocoaError(.fileWriteNoPermission))
+            == "ProVisor's folder could not be prepared.")
+    }
+
     @Test("ProVisor stays off until turned on; other modules default on")
     func moduleIsOptIn() {
         let settings = SettingsStore(defaults: makeDefaults())

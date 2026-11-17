@@ -69,6 +69,22 @@ enum AgentTaskError: Error, LocalizedError, Sendable {
         }
     }
 
+    /// What went wrong in the app's own words, for a place that must not show the agent's
+    /// output: the error's description carries the agent's result text or the tail of what its
+    /// process wrote, and this never does.
+    var fixedDescription: String {
+        switch self {
+        case .binaryNotFound, .unreadableSource, .timedOut, .cancelled, .limitReached:
+            errorDescription ?? "The agent task failed."
+        case .launchFailed:
+            "The local agent task could not be started."
+        case .agentError:
+            "The agent reported an error."
+        case .malformedOutput:
+            "The agent did not return a valid result."
+        }
+    }
+
     /// The case's name alone, for a report that must not carry the error's text.
     var caseName: String {
         switch self {

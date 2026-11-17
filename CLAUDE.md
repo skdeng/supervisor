@@ -674,7 +674,7 @@ sink. Preserve these guards when touching the relevant code:
   reads are fresh loads at the browser's default size, and a control a page tucks into a
   menu at one width would otherwise flag a healthy site on every visit. When the session
   ends the site needs the person: `SiteAccess` never signs in to such a grant and counts no
-  attempt, and Settings shows **Needs you** until the user signs in again.
+  attempt, and the sites window shows **Needs you** until the user signs in again.
 - **A site the agent asks for is an offer, never a grant** (`Proposal.site`,
   `SiteSignInModel.Start.decide`). A `confirm` proposal may name the site that stands between
   the agent and a check in a `site` field, which `Proposal.parsedSite` accepts only as a plain
@@ -1054,7 +1054,7 @@ names below are the code paths.
   - **The agent's home** is `~/Library/Application Support/SuperVisor/ProVisor/`: `CHARTER.md`
     (its standing brief, seeded once from `Resources/provisor-charter.md` and then the user's to
     edit), `access.json` (which connector tools each kind of run may call), `standing.json`
-    (the standing approvals), `sites.json` (the granted sites as Settings lists them; their
+    (the standing approvals), `sites.json` (the granted sites as the sites window lists them; their
     secrets and the hosts those may go to are in the Keychain), `runs/` (one tool-channel
     configuration per run that carries the bridge, holding that run's token, deleted when the
     run ends and swept at launch if a crash left one, beside the shared token-free
@@ -1097,8 +1097,8 @@ names below are the code paths.
   - **Data comes from the claude.ai connectors** Claude Code exposes locally
     (`mcp__claude_ai_<Server>__<tool>`); the default `access.json` reads Gmail and Google
     Calendar. Connectors load only for a Claude-account sign-in, not an API key. The connector
-    names in the defaults follow the documented naming but vary by account — the agent's closing
-    summary, shown in Settings, says when a data tool it expected was missing.
+    names in the defaults follow the documented naming but vary by account — the agent's notes
+    under `memory/` say when a data tool it expected was missing.
   - **Sites, texts, and photo places are three more sources, read through the bridge** by a
     scouting pass and a follow-up pass (Untrusted Input says what bounds them). `open_site`,
     `follow_link`, and `read_more` read pages of a granted site signed in as the user;
@@ -1134,7 +1134,7 @@ names below are the code paths.
     pass has launched, so one that fails to start stays owed. It waits while a scouting pass or another follow-up pass runs, is dropped
     on sleep and re-armed on wake like the scouting timer, carries the scout's confinement and
     bridge with a smaller allowance (30 turns, $0.75, 10 minutes), looks for nothing beyond the
-    owed checks, and leaves the scouting report in Settings alone. Proposals it writes are
+    owed checks, and leaves the scouting status in Settings alone. Proposals it writes are
     admitted and announced like a scout's, and **a standing approval admitted from one draws on
     the scouting pass's allowance of five**: only a scouting pass resets that count
     (`automaticRunsThisPass`).
@@ -1234,19 +1234,34 @@ names below are the code paths.
     proposal behind a visible sign-in prompt is folded into that prompt's sheet row and left
     out of the count. In the sheet, sign-in rows lead the section, three unprompted and the
     rest behind **N more**. No compact presence.
-  - **Settings › ProVisor** lists the granted sites, each with its name, host, and one of
-    **Needs you** (flagged, or a run was turned away since the last sign-in), **Signed in** *(when)* (with "asks you when it signs you out" for a kept
-    session), or **Not signed in yet**, and with **Sign In Again** and **Remove**. Remove
-    deletes the Keychain item, the registry entry, and the cookies and site data the site's
-    browse hosts left, except what another granted site shares (data is kept per registrable
-    domain). It also holds **Add Site…**, the **Read my texts** toggle with a Full Disk Access
-    row that opens System Settings while a read fails, the **Read where my photos were taken**
-    toggle, a line naming the condition that pauses reading sites, texts, and photo places
-    when one fails, and the **Offer to keep passwords** toggle (`provisor.offerPasswords`, on
-    by default). Turning the photo toggle on asks for access to Photos when the user has
-    never been asked (the system shows that prompt once); a row under it offers **Allow…**
-    while they have not answered and **Open System Settings** once they refused
-    (`SiteAccessCenter.PhotoPlacesStatus`).
+  - **Settings › ProVisor never shows the agent's account of a pass.** The agent's words
+    are drawn from mail anyone can send, so they appear only where a proposal is reviewed
+    and, on this pane, in a standing rule the user read in full and accepted. The pane shows
+    when the last pass ran and, for one that failed, why in the app's words
+    (`ProVisorCenter.failureSentence`, built on `AgentTaskError.fixedDescription`, which
+    leaves out the agent's result text and its process's output; a pass that could not be
+    set up reads from `setupFailureSentence`). **A failure's detail is therefore on record
+    nowhere**: the pane and the log both carry a fixed name, so finding which flag an old
+    CLI refused means running the CLI by hand. What the agent says when a scouting or
+    follow-up pass ends is kept nowhere: the protocol tells it, over whatever a seeded
+    charter still says about a closing summary, that its notes under `memory/` are the
+    record of a run, and **Open Folder** is how the user reads them. The pane also holds a **Sites** row with a count ("2 sites, 1 needs you",
+    `ProVisorSettingsView.sitesSummary`) and **Manage Sites…**, the **Read my texts** toggle
+    with a Full Disk Access row that opens System Settings while a read fails, the **Read
+    where my photos were taken** toggle, a line naming the condition that pauses reading
+    sites, texts, and photo places when one fails, and the **Offer to keep passwords** toggle
+    (`provisor.offerPasswords`, on by default). Turning the photo toggle on asks for access
+    to Photos when the user has never been asked (the system shows that prompt once); a row
+    under it offers **Allow…** while they have not answered and **Open System Settings** once
+    they refused (`SiteAccessCenter.PhotoPlacesStatus`).
+  - **The sites window** (`ProVisorSitesWindow`, opened by **Manage Sites…**) lists the
+    granted sites, each with its name, host, and one of **Needs you** (flagged, or a run was
+    turned away since the last sign-in), **Signed in** *(when)* (with "asks you when it signs
+    you out" for a kept session), or **Not signed in yet**, and with **Sign In Again** and
+    **Remove**; **Add Site…** is at its foot. Remove deletes the Keychain item, the registry
+    entry, and the cookies and site data the site's browse hosts left, except what another
+    granted site shares (data is kept per registrable domain). Its size is the user's: the
+    hosting controller carries no sizing options (the hazard `FittedWindow` describes).
   - **The site window** (`ProVisorSiteWindow`) is one reused window, the form on the left and
     the live page on the right. **Keep me signed in**, the default, asks for the address only:
     the user signs in on the page and the grant keeps the session and no secret; when the app
@@ -1266,7 +1281,8 @@ names below are the code paths.
     to <host>…** button (**Sign In Again to <site>…** for a granted one) that opens this window
     for that request.
   - **The sign-in window** (`SiteSignInModel`, `ProVisorSignInView`) is what every request to
-    sign in opens: a notch prompt, the review window's button, and Settings › Sign In Again,
+    sign in opens: a notch prompt, the review window's button, and the sites window's
+    Sign In Again,
     for any site whose stored sign-in can be read. It shares the site window and its live page
     (`SiteWindowParts.swift`) and shows a title, one sentence, **Done**, and Cancel, with an
     address field only when no address is vouched for (see Untrusted Input). The user signs in

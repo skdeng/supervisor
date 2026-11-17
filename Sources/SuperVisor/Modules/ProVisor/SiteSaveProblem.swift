@@ -41,7 +41,7 @@ enum SiteSaveProblem: Equatable {
         case .notSaved:
             "The site could not be saved to the Keychain."
         case .hasSavedPassword:
-            "This site has a saved password. Use Sign In Again in Settings to sign in to it."
+            "This site has a saved password. Use Sign In Again in Manage Sites to sign in to it."
         case .signInNotConfirmed:
             "SuperVisor couldn't confirm you're signed in. Finish signing in on the page, then press Done."
         }
