@@ -66,6 +66,7 @@ final class NowPlayingReader: @unchecked Sendable {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
         process.arguments = ["-e", Self.perlScript, dylibPath]
+        process.environment = ChildEnvironment.minimal()
 
         let stdout = Pipe()
         process.standardOutput = stdout

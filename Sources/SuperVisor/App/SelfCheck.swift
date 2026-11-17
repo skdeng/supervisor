@@ -34,10 +34,30 @@ enum SelfCheck {
             finish(keychain(), report: report)
         case "messages":
             finish(messages(), report: report)
+        case "disclaimed-exec":
+            finish(disclaimedExec(), report: report)
         case "webkit":
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
             let check = WebKitCheck()
+            check.start { result in
+                finish(result, report: report)
+            }
+            application.run()
+            exit(0)
+        case "agent":
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            let check = AgentCheck()
+            check.start { result in
+                finish(result, report: report)
+            }
+            application.run()
+            exit(0)
+        case "bridge":
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            let check = BridgeCheck()
             check.start { result in
                 finish(result, report: report)
             }
@@ -139,6 +159,37 @@ enum SelfCheck {
         return result
     }
 
+    /// Whether a program started through this executable's disclaimed launcher can read the
+    /// Messages database: this process starts itself in `--exec-disclaimed` mode, which replaces
+    /// itself with `/bin/cat` on the file.
+    private static func disclaimedExec() -> [String: Any] {
+        let path = NSHomeDirectory() + "/Library/Messages/chat.db"
+        var result: [String: Any] = ["check": "disclaimed-exec"]
+        guard let launcher = Bundle.main.executableURL else {
+            result["childCanRead"] = false
+            result["failure"] = "launcher not found"
+            return result
+        }
+
+        let process = Process()
+        process.executableURL = launcher
+        process.arguments = [DisclaimedExec.flag, "/bin/cat", path]
+        process.environment = ChildEnvironment.minimal()
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            result["childCanRead"] = process.terminationReason == .exit
+                && process.terminationStatus == 0
+        } catch {
+            result["childCanRead"] = false
+            result["failure"] = "launch failed"
+        }
+        return result
+    }
+
     /// Runs `/bin/cat` on the file with its output discarded and reports whether it succeeded.
     /// Returns nil when the child could not be started as asked.
     private static func childCanRead(_ path: String, disclaiming: Bool) -> Bool? {
@@ -149,6 +200,10 @@ enum SelfCheck {
         defer {
             posix_spawnattr_destroy(&attributes)
             posix_spawn_file_actions_destroy(&fileActions)
+        }
+        // Only the three standard streams reach the child. The disclaim goes after the flags.
+        guard posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT)) == 0 else {
+            return nil
         }
         if disclaiming, !ProcessResponsibility.disclaim(&attributes) {
             return nil
@@ -275,5 +330,179 @@ private final class WebKitCheck: NSObject, WKNavigationDelegate {
         }
         result["seconds"] = Date().timeIntervalSince(started)
         completion(result)
+    }
+}
+
+/// Whether the agent CLI starts, runs a one-turn prompt, and returns a result when started the
+/// way every agent run is: through `AgentTaskService`, with responsibility disclaimed. A failure
+/// is reported by the error's case name alone.
+@MainActor
+private final class AgentCheck {
+    private static let arguments = [
+        "-p", "Reply with the single word: ok",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--restricted",
+        "--permission-prompts", "none",
+        "--no-session-persistence",
+        "--tools", "",
+        "--model", "haiku",
+        "--max-turns", "1",
+        "--max-budget-usd", "0.05",
+        "--strict-mcp-config",
+    ]
+
+    func start(completion: @escaping ([String: Any]) -> Void) {
+        let started = Date()
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agent-check-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+        Task { @MainActor in
+            var result: [String: Any] = [
+                "check": "agent",
+                "disclaimAvailable": ProcessResponsibility.isAvailable,
+            ]
+            do {
+                _ = try await AgentTaskService().run(
+                    arguments: Self.arguments,
+                    workingDirectory: folder,
+                    timeout: .seconds(90)
+                )
+                result["succeeded"] = true
+            } catch {
+                result["succeeded"] = false
+                result["failure"] = (error as? AgentTaskError)?.caseName ?? "unexpected"
+            }
+            result["seconds"] = Date().timeIntervalSince(started)
+            try? FileManager.default.removeItem(at: folder)
+            completion(result)
+        }
+    }
+}
+
+/// Whether a real agent run can reach a tool this app serves: the agent CLI starts the bridge
+/// helper, the helper's connection passes the signature and ancestry checks, and the tool's
+/// answer comes back in the run's result.
+@MainActor
+private final class BridgeCheck {
+    private nonisolated static let reply = "pong 7391"
+
+    func start(completion: @escaping ([String: Any]) -> Void) {
+        let started = Date()
+        let suffix = UUID().uuidString.prefix(8).lowercased()
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bridge-check-\(suffix)", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: folder,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        // A socket of this check's own, so it never meets the one a running app is serving.
+        let socketPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("svb-\(suffix).sock").path
+
+        let token = AgentBridgeServer.makeToken()
+        let calls = CallCounter()
+        let server = AgentBridgeServer(
+            path: socketPath,
+            version: AgentBridgeHelper.bundleVersion
+        ) { _, _, _ in
+            calls.increment()
+            return BridgeReply(text: Self.reply)
+        }
+        server.register(BridgeRun(
+            token: token,
+            rootProcess: nil,
+            tools: [BridgeTool(
+                name: "echo",
+                description: "Returns a fixed reply.",
+                inputSchema: .object(["type": .string("object"), "properties": .object([:])])
+            )]
+        ))
+
+        var result: [String: Any] = ["check": "bridge"]
+        let configuration: [String: Any] = ["mcpServers": ["supervisor": [
+            "type": "stdio",
+            "command": Bundle.main.executablePath ?? "",
+            "args": [AgentBridgeHelper.flag],
+            "env": [
+                AgentBridgeHelper.tokenVariable: token,
+                AgentBridgeHelper.socketVariable: socketPath,
+            ],
+            "alwaysLoad": true,
+        ]]]
+        let configurationURL = folder.appendingPathComponent("mcp.json")
+        do {
+            try server.start()
+            let data = try JSONSerialization.data(withJSONObject: configuration)
+            FileManager.default.createFile(
+                atPath: configurationURL.path,
+                contents: data,
+                attributes: [.posixPermissions: 0o600]
+            )
+        } catch {
+            result["succeeded"] = false
+            result["failure"] = "setup"
+            completion(result)
+            return
+        }
+
+        let arguments = [
+            "-p", "Call the echo tool once, then reply with exactly the text it returned.",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--restricted",
+            "--permission-prompts", "none",
+            "--no-session-persistence",
+            "--tools", "",
+            "--model", "haiku",
+            "--max-turns", "4",
+            "--max-budget-usd", "0.10",
+            "--strict-mcp-config",
+            "--mcp-config", configurationURL.path,
+            "--allowedTools", "mcp__supervisor__echo",
+        ]
+
+        Task { @MainActor in
+            do {
+                let outcome = try await AgentTaskService().run(
+                    arguments: arguments,
+                    workingDirectory: folder,
+                    timeout: .seconds(120),
+                    environment: [AgentBridgeHelper.socketVariable: socketPath],
+                    onLaunch: { pid in
+                        server.setRootProcess(pid, for: token)
+                    }
+                )
+                result["succeeded"] = true
+                result["replyReachedTheRun"] = outcome.text.contains("7391")
+            } catch {
+                result["succeeded"] = false
+                result["failure"] = (error as? AgentTaskError)?.caseName ?? "unexpected"
+            }
+            result["toolCalls"] = calls.value
+            // How many parents separate the connecting helper from the agent CLI the run started;
+            // the server admits `AgentBridgeServer.maximumPeerDepth`.
+            result["helperDepth"] = server.lastPeerDepth ?? NSNull()
+            result["admittedDepth"] = AgentBridgeServer.maximumPeerDepth
+            result["seconds"] = Date().timeIntervalSince(started)
+            server.stop()
+            try? FileManager.default.removeItem(at: folder)
+            completion(result)
+        }
+    }
+
+    private final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+
+        func increment() {
+            lock.withLock { count += 1 }
+        }
+
+        var value: Int {
+            lock.withLock { count }
+        }
     }
 }

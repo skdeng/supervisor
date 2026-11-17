@@ -80,162 +80,69 @@ final class AgentEventSocket {
         .path
 
     private let socketPath: String
-    private var worker: Worker?
+    private var listener: UnixSocketListener?
 
     init(socketPath: String = AgentEventSocket.defaultSocketPath) {
         self.socketPath = socketPath
     }
 
     func start() {
-        guard worker == nil else { return }
-        let worker = Worker(socketPath: socketPath) { [weak self] event in
+        guard listener == nil else { return }
+        let connections = EventConnectionHandler { [weak self] event in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self?.onEvent?(event)
                 }
             }
         }
-        self.worker = worker
-        worker.start()
+        let listener = UnixSocketListener(
+            path: socketPath,
+            queue: DispatchQueue(label: "com.supervisor.agent-event-socket")
+        ) { connection in
+            connections.handle(connection)
+        }
+        do {
+            try listener.start()
+        } catch let failure as UnixSocketListener.Failure {
+            switch failure {
+            case .pathTooLong:
+                AppLog.error(.swarm, "socket path too long")
+            case let .socketFailed(code):
+                AppLog.error(.swarm, "socket create failed errno \(code)")
+            case let .bindFailed(code):
+                AppLog.error(.swarm, "socket bind failed errno \(code)")
+            case let .listenFailed(code):
+                AppLog.error(.swarm, "socket listen failed errno \(code)")
+            }
+            return
+        } catch {
+            AppLog.error(.swarm, "socket start failed")
+            return
+        }
+        self.listener = listener
+        AppLog.notice(.swarm, "socket bound \(socketPath)")
     }
 
     func stop() {
-        worker?.stop()
-        worker = nil
+        guard let listener else { return }
+        listener.stop()
+        self.listener = nil
+        AppLog.debug(.swarm, "socket stopped and unlinked \(socketPath)")
     }
 }
 
-private final class Worker: @unchecked Sendable {
+/// Reads one hook payload from each connection the listener hands over.
+private final class EventConnectionHandler: Sendable {
     private static let maximumPayloadSize = 64 * 1024
     private static let approvalReply = Data(#"{"decision":"ask"}"#.utf8)
 
-    private let socketPath: String
     private let deliver: @Sendable (FleetHookEvent) -> Void
-    private let queue = DispatchQueue(label: "com.supervisor.agent-event-socket")
 
-    // Access is confined to `queue`.
-    private var listener: Int32 = -1
-    private var source: DispatchSourceRead?
-    private var isRunning = false
-
-    init(
-        socketPath: String,
-        deliver: @escaping @Sendable (FleetHookEvent) -> Void
-    ) {
-        self.socketPath = socketPath
+    init(deliver: @escaping @Sendable (FleetHookEvent) -> Void) {
         self.deliver = deliver
     }
 
-    deinit {
-        if listener >= 0 {
-            close(listener)
-        }
-        unlink(socketPath)
-    }
-
-    func start() {
-        queue.async { [weak self] in
-            guard let self, !isRunning else { return }
-            isRunning = true
-            openListener()
-        }
-    }
-
-    func stop() {
-        queue.sync {
-            isRunning = false
-            source?.cancel()
-            source = nil
-            if listener >= 0 {
-                close(listener)
-                listener = -1
-            }
-            unlink(socketPath)
-            AppLog.debug(.swarm, "socket stopped and unlinked \(socketPath)")
-        }
-    }
-
-    private func openListener() {
-        // The socket lives under Application Support, which need not exist on a fresh install;
-        // bind fails with ENOENT rather than creating the path itself.
-        try? FileManager.default.createDirectory(
-            at: URL(fileURLWithPath: socketPath).deletingLastPathComponent(),
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        unlink(socketPath)
-
-        let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard descriptor >= 0 else {
-            isRunning = false
-            return
-        }
-
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = socketPath.utf8CString
-        guard pathBytes.count <= MemoryLayout.size(ofValue: address.sun_path) else {
-            close(descriptor)
-            isRunning = false
-            return
-        }
-        withUnsafeMutablePointer(to: &address.sun_path) { destination in
-            destination.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { bytes in
-                _ = pathBytes.withUnsafeBufferPointer {
-                    memcpy(bytes, $0.baseAddress, pathBytes.count)
-                }
-            }
-        }
-        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-
-        let didBind = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard didBind == 0 else {
-            let bindError = errno
-            close(descriptor)
-            unlink(socketPath)
-            isRunning = false
-            AppLog.error(.swarm, "socket bind failed errno \(bindError)")
-            return
-        }
-        guard listen(descriptor, SOMAXCONN) == 0 else {
-            let listenError = errno
-            close(descriptor)
-            unlink(socketPath)
-            isRunning = false
-            AppLog.error(.swarm, "socket listen failed errno \(listenError)")
-            return
-        }
-
-        _ = chmod(socketPath, S_IRUSR | S_IWUSR)
-        _ = fcntl(descriptor, F_SETFL, fcntl(descriptor, F_GETFL) | O_NONBLOCK)
-        listener = descriptor
-        AppLog.notice(.swarm, "socket bound \(socketPath)")
-
-        let source = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: queue)
-        source.setEventHandler { [weak self] in
-            self?.acceptPendingConnections()
-        }
-        self.source = source
-        source.resume()
-    }
-
-    private func acceptPendingConnections() {
-        guard isRunning, listener >= 0 else { return }
-        while true {
-            let connection = accept(listener, nil, nil)
-            guard connection >= 0 else {
-                if errno == EINTR { continue }
-                return
-            }
-            handle(connection)
-        }
-    }
-
-    private func handle(_ connection: Int32) {
+    func handle(_ connection: Int32) {
         defer { close(connection) }
         var repliedToApproval = false
         // Every exit path answers an unanswered connection with the pass-through decision. The
@@ -250,15 +157,6 @@ private final class Worker: @unchecked Sendable {
             }
         }
 
-        _ = fcntl(connection, F_SETFL, fcntl(connection, F_GETFL) & ~O_NONBLOCK)
-        var noPipe: Int32 = 1
-        _ = setsockopt(
-            connection,
-            SOL_SOCKET,
-            SO_NOSIGPIPE,
-            &noPipe,
-            socklen_t(MemoryLayout<Int32>.size)
-        )
         var deadline = timeval(tv_sec: 0, tv_usec: 250_000)
         _ = setsockopt(
             connection,

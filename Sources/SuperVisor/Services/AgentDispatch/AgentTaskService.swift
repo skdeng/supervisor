@@ -35,6 +35,19 @@ enum AgentTaskError: Error, LocalizedError, Sendable {
         }
     }
 
+    /// The case's name alone, for a report that must not carry the error's text.
+    var caseName: String {
+        switch self {
+        case .binaryNotFound: "binaryNotFound"
+        case .launchFailed: "launchFailed"
+        case .unreadableSource: "unreadableSource"
+        case .timedOut: "timedOut"
+        case .cancelled: "cancelled"
+        case .agentError: "agentError"
+        case .malformedOutput: "malformedOutput"
+        }
+    }
+
     private static func withDiagnostic(_ summary: String, _ diagnostic: String?) -> String {
         guard let diagnostic, !diagnostic.isEmpty else { return summary }
         return "\(summary) \(diagnostic)"
@@ -221,8 +234,23 @@ final class AgentTaskService {
     private var scratchDirectoryURL: URL?
     private var hasRun = false
     private var runStartedAt: Date?
+    private let executableOverride: URL?
+    private let disclaim: DisclaimResponsibility
+
+    /// Marks spawn attributes so the child answers for itself; false when it did not take.
+    typealias DisclaimResponsibility = @Sendable (inout posix_spawnattr_t?) -> Bool
 
     var hasUnresolvedTask: Bool { continuation != nil }
+
+    /// `executableOverride` replaces the discovered CLI, and `disclaim` the call that disclaims
+    /// responsibility, so a test can start a stand-in and make the disclaim fail.
+    init(
+        executableOverride: URL? = nil,
+        disclaim: @escaping DisclaimResponsibility = ProcessResponsibility.disclaim
+    ) {
+        self.executableOverride = executableOverride
+        self.disclaim = disclaim
+    }
 
     func run(
         request: String,
@@ -236,7 +264,7 @@ final class AgentTaskService {
         guard !cancellationRequested, !Task.isCancelled else {
             throw AgentTaskError.cancelled
         }
-        guard let executableURL = Self.resolveExecutable() else {
+        guard let executableURL = executableOverride ?? Self.resolveExecutable() else {
             AppLog.error(.agentDispatch, "agent task spawn failed: executable not found")
             throw AgentTaskError.binaryNotFound
         }
@@ -274,10 +302,15 @@ final class AgentTaskService {
     ///
     /// Nothing is copied and no scratch directory is made or removed: what the run may read,
     /// write, and call is decided entirely by the arguments passed here.
+    ///
+    /// The child's environment is `ChildEnvironment.minimal(adding: environment)`. `onLaunch`
+    /// receives the child's process id once, right after it is spawned.
     func run(
         arguments: [String],
         workingDirectory: URL,
-        timeout: Duration
+        timeout: Duration,
+        environment extra: [String: String] = [:],
+        onLaunch: (@MainActor (pid_t) -> Void)? = nil
     ) async throws -> AgentTaskResult {
         guard !hasRun else { throw AgentTaskError.launchFailed(nil) }
         hasRun = true
@@ -285,7 +318,7 @@ final class AgentTaskService {
         guard !cancellationRequested, !Task.isCancelled else {
             throw AgentTaskError.cancelled
         }
-        guard let executableURL = Self.resolveExecutable() else {
+        guard let executableURL = executableOverride ?? Self.resolveExecutable() else {
             AppLog.error(.agentDispatch, "agent task spawn failed: executable not found")
             throw AgentTaskError.binaryNotFound
         }
@@ -293,7 +326,9 @@ final class AgentTaskService {
             executableURL: executableURL,
             arguments: arguments,
             workingDirectory: workingDirectory,
-            timeout: timeout
+            timeout: timeout,
+            environment: extra,
+            onLaunch: onLaunch
         )
     }
 
@@ -301,7 +336,9 @@ final class AgentTaskService {
         executableURL: URL,
         arguments: [String],
         workingDirectory: URL,
-        timeout: Duration
+        timeout: Duration,
+        environment extra: [String: String] = [:],
+        onLaunch: (@MainActor (pid_t) -> Void)? = nil
     ) async throws -> AgentTaskResult {
         runStartedAt = Date()
         AppLog.notice(.agentDispatch, "agent task started")
@@ -313,7 +350,9 @@ final class AgentTaskService {
                     arguments: arguments,
                     workingDirectory: workingDirectory,
                     timeout: timeout,
-                    continuation: continuation
+                    environment: extra,
+                    continuation: continuation,
+                    onLaunch: onLaunch
                 )
             }
         } onCancel: { [weak self] in
@@ -353,7 +392,9 @@ final class AgentTaskService {
         arguments: [String],
         workingDirectory: URL,
         timeout: Duration,
-        continuation: CheckedContinuation<AgentTaskResult, Error>
+        environment extra: [String: String],
+        continuation: CheckedContinuation<AgentTaskResult, Error>,
+        onLaunch: (@MainActor (pid_t) -> Void)?
     ) {
         self.continuation = continuation
         outputOutcome = nil
@@ -369,18 +410,23 @@ final class AgentTaskService {
             spawned = try Self.spawn(
                 executableURL: executableURL,
                 arguments: arguments,
-                workingDirectory: workingDirectory
+                workingDirectory: workingDirectory,
+                environment: ChildEnvironment.minimal(adding: extra),
+                disclaim: disclaim
             )
         } catch {
+            let failure = error as? AgentTaskError
+                ?? .launchFailed(error.localizedDescription)
             AppLog.error(
                 .agentDispatch,
-                "agent task spawn failed: \(error.localizedDescription)"
+                "agent task spawn failed: \(failure.localizedDescription)"
             )
-            resolve(.failure(.launchFailed(error.localizedDescription)))
+            resolve(.failure(failure))
             return
         }
 
         processIdentifier = spawned.processIdentifier
+        onLaunch?(spawned.processIdentifier)
         observeExit(of: spawned.processIdentifier)
 
         Self.readOutput(from: spawned.standardOutput) { [weak self] outcome in
@@ -632,7 +678,9 @@ final class AgentTaskService {
     private nonisolated static func spawn(
         executableURL: URL,
         arguments: [String],
-        workingDirectory: URL
+        workingDirectory: URL,
+        environment: [String: String],
+        disclaim: DisclaimResponsibility
     ) throws -> SpawnedAgentProcess {
         var outputDescriptors = [Int32](repeating: -1, count: 2)
         var errorDescriptors = [Int32](repeating: -1, count: 2)
@@ -691,9 +739,11 @@ final class AgentTaskService {
             setupError = posix_spawnattr_setpgroup(&attributes, 0)
         }
         if setupError == 0 {
+            // Close-on-exec by default: the child holds the three descriptors set up above and
+            // nothing else of the app's, whatever the app has open.
             setupError = posix_spawnattr_setflags(
                 &attributes,
-                Int16(POSIX_SPAWN_SETPGROUP)
+                Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)
             )
         }
 
@@ -703,9 +753,21 @@ final class AgentTaskService {
             throw POSIXError(POSIXErrorCode(rawValue: setupError) ?? .EIO)
         }
 
+        // See `ProcessResponsibility` for why every agent process is started this way. An
+        // agent that would answer for the app's privacy grants is not started at all.
+        guard disclaim(&attributes) else {
+            outputDescriptors.forEach { Darwin.close($0) }
+            errorDescriptors.forEach { Darwin.close($0) }
+            throw AgentTaskError.launchFailed(
+                ProcessResponsibility.isAvailable
+                    ? "responsibility not disclaimed"
+                    : "responsibility cannot be disclaimed"
+            )
+        }
+
         let argumentPointers = ([executableURL.path] + arguments).map { strdup($0) } + [nil]
         defer { argumentPointers.compactMap { $0 }.forEach { free($0) } }
-        let environmentPointers = ProcessInfo.processInfo.environment
+        let environmentPointers = environment
             .map { strdup("\($0.key)=\($0.value)") } + [nil]
         defer { environmentPointers.compactMap { $0 }.forEach { free($0) } }
 
@@ -827,7 +889,7 @@ final class AgentTaskService {
 
     /// Claude CLI discovery uses absolute paths because an LSUIElement app has no login-shell
     /// PATH.
-    private nonisolated static func resolveExecutable() -> URL? {
+    nonisolated static func resolveExecutable() -> URL? {
         firstExecutable(among: executableCandidates)
     }
 

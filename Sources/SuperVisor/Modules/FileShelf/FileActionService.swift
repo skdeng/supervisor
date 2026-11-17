@@ -130,6 +130,9 @@ enum FileActionService {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
         process.currentDirectoryURL = workDir
         process.arguments = ["-r", "-X", "-y", archiveURL.path, "--"] + relativePaths
+        // `zip` reads options from `$ZIPOPT`, which would let the app's environment change what
+        // the archive holds.
+        process.environment = ChildEnvironment.minimal()
 
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice

@@ -24,7 +24,7 @@ struct SessionHost: Equatable, Sendable {
 
     @MainActor
     static func resolve(forSessionPID pid: pid_t) -> SessionHost? {
-        var current = parentPID(of: pid)
+        var current = ProcessAncestry.parentPID(of: pid)
         var depth = 0
         while let candidate = current, candidate > 1, depth < maximumDepth {
             if let app = NSRunningApplication(processIdentifier: candidate),
@@ -36,21 +36,10 @@ struct SessionHost: Equatable, Sendable {
                         .lastPathComponent ?? "app"
                 )
             }
-            current = parentPID(of: candidate)
+            current = ProcessAncestry.parentPID(of: candidate)
             depth += 1
         }
         return nil
-    }
-
-    private static func parentPID(of pid: pid_t) -> pid_t? {
-        var info = kinfo_proc()
-        var size = MemoryLayout<kinfo_proc>.stride
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
-        guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0,
-              size == MemoryLayout<kinfo_proc>.stride
-        else { return nil }
-        let parent = info.kp_eproc.e_ppid
-        return parent == pid ? nil : parent
     }
 }
 

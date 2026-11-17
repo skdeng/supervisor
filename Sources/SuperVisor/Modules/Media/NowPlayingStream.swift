@@ -85,6 +85,7 @@ final class NowPlayingStream {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
         process.arguments = ["-e", Self.perlScript, dylibPath]
+        process.environment = ChildEnvironment.minimal()
 
         let output = Pipe()
         let input = Pipe()

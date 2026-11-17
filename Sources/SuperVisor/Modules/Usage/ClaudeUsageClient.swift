@@ -299,6 +299,7 @@ final class ClaudeUsageClient {
             "-w",
             "-s", keychainService,
         ]
+        process.environment = ChildEnvironment.minimal()
         let output = Pipe()
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = output

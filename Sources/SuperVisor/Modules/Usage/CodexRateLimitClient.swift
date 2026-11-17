@@ -51,18 +51,24 @@ final class CodexRateLimitClient {
             failCurrentAttempt(reason: "helper executable not found")
             return
         }
+        // The installed CLI lives where anything running as the user can replace it, so it is
+        // never started directly: this app's own executable replaces itself with it, with
+        // responsibility disclaimed, and the CLI holds none of the app's privacy grants.
+        guard let launcherURL = Bundle.main.executableURL else {
+            failCurrentAttempt(reason: "app executable not found")
+            return
+        }
 
         let process = Process()
-        process.executableURL = executableURL
-        process.arguments = ["app-server"]
+        process.executableURL = launcherURL
+        process.arguments = [DisclaimedExec.flag, executableURL.path, "app-server"]
 
         // An NVM-installed `codex` is a Node script whose shebang uses `/usr/bin/env node`.
         // GUI apps have a sparse PATH, so prepend the resolved CLI's directory for its sibling
         // `node` binary without sourcing or executing the user's shell configuration.
-        var environment = ProcessInfo.processInfo.environment
-        let inheritedPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        environment["PATH"] = executableURL.deletingLastPathComponent().path + ":" + inheritedPath
-        process.environment = environment
+        process.environment = ChildEnvironment.minimal(adding: [
+            "PATH": executableURL.deletingLastPathComponent().path + ":" + ChildEnvironment.path,
+        ])
 
         let input = Pipe()
         let output = Pipe()
