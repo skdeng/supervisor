@@ -48,9 +48,20 @@ them.
   meanwhile; test the decision that leads to the line as a pure function. **Two `async let`
   children start in no fixed order**, so a test may assert what each call returned but not which
   ran last, and a bound that tells two outcomes apart sits far from both (15 s against 60 s, not
-  0.5 s against 1 s): the suite runs under load.
+  0.5 s against 1 s): the suite runs under load. **A run that ends with status 0 and no
+  `Test run with N tests` line stopped early and proved nothing.** The test process's main
+  thread sits in one outer `CFRunLoopRun`, and the Swift runtime calls `exit(0)` the moment it
+  returns. AppKit's display cycle wakes its event loop with `CFRunLoopStop`, and once a test
+  has run `NSApplication.run()` (`Stepper` in `ProVisorReviewWindowTests`) a wake that fires
+  after `run()` has returned stops the outer loop instead, and every test still waiting on the
+  main actor goes unreported. The stepper closes its window and lets the loop go idle before
+  stopping it, which makes this rarer and does not end it; run the suite again, or with
+  `--no-parallel`, when the summary line is missing. A
+  run can also die on an uncaught `NSInternalInconsistencyException` thrown by
+  `STScreenTimeConfigurationObserver` while a `WKWebView` deallocates, which is the system's
+  frameworks and leaves a `swiftpm-testing-helper` crash report.
 - **`swift build`** alone compiles the binary but does *not* produce the bundle. The bundle is
-  required because TCC permission grants (Location, Calendar, Reminders, Accessibility,
+  required because TCC permission grants (Location, Calendar, Reminders, Photos, Accessibility,
   Bluetooth, Full Disk Access) and the now-playing read only persist for a **stable, signed
   bundle identity** — a bare `swift run`
   binary gets a fresh identity each launch and grants never stick. `make-app.sh` also compiles
@@ -81,6 +92,12 @@ them.
     the same of a program started through `--exec-disclaimed`.
   - `history` — the browsing-history files open and carry the tables and columns
     `BrowsingHistory` reads (counts and flags; Chrome's and Safari's need Full Disk Access).
+  - `photos` — whether the app may read Photos (`access`: `notAsked`, `allowed`, `denied`; the
+    check never asks) and, when it may, how many photos the read looked at, how many carry a
+    position, and how the whole library groups into stays (`photosScanned`,
+    `photosWithPosition`, `stays`, `groupingMetres`, `readSeconds`). **`allowed` proves
+    nothing about the read**: only `photosScanned` above zero shows PhotoKit handed the
+    library over.
   - `webkit` — a web view that is never shown loads a page, and its data store keeps a cookie
     across launches (run it twice; `cookieFromEarlierLaunch`). `site-read` — `SiteBrowser` reads
     `https://example.com/` and reports counts, and whether a page in its hidden window is
@@ -401,23 +418,23 @@ sink. Preserve these guards when touching the relevant code:
   cover every file-writing tool) plus the **read** connector tools in `access.json`, so no
   connector tool it holds can send, change, or delete. **Tools that change mail go only to an
   acting run**, which exists only after the user approved one proposal or typed an instruction,
-  or under a standing approval with its shorter list (next bullet). **The site and text tools**
+  or under a standing approval with its shorter list (next bullet). **The site, text, and photo-place tools**
   (`open_site`, `follow_link`, `read_more`,
-  `read_texts`; the bridge's rules join the connector rules in `--allowedTools` as
+  `read_texts`, `read_photo_places`; the bridge's rules join the connector rules in `--allowedTools` as
   `mcp__supervisor__<tool>`) **go only to passes that can change nothing outside the
   workspace**: the scout and the follow-up pass, never an acting or standing-approval run,
   which can write drafts the user may later send, into which a page or a text could steer
-  account data. A pass that holds them can cause a sign-in attempt on a granted site and
+  account data or a position. A pass that holds them can cause a sign-in attempt on a granted site and
   whatever following a link on a signed-in site does, as bounded under "Signed-in sites"
   below. The bridge is attached only while all of these hold (`ProVisorBridge`): a site is
-  granted or texts are on; the scout's connector list is sealed; responsibility for the agent
+  granted, texts are on, or photo places are on; the scout's connector list is sealed; responsibility for the agent
   process can be disclaimed; and the installed CLI is the signed build (judged on the file
   before the run, remembered while its size, inode, and times hold, and judged again on the
   running process when the server accepts it as the run's root). A list is sealed when every
   rule is on `ProVisorAccess.sealedReadRules`, the tools known to read and nothing else.
-  **Sealing is what keeps site and text reading from becoming a way to leak**: a connector
-  tool that could send, invite, post, or fetch an address would carry what a page or a text
-  says out of the Mac. That is why Notion's `notion-fetch`, which loads any address it is
+  **Sealing is what keeps site, text, and photo-place reading from becoming a way to leak**: a
+  connector tool that could send, invite, post, or fetch an address would carry what a page or
+  a text says, or where the user has been, out of the Mac. That is why Notion's `notion-fetch`, which loads any address it is
   given, public pages anyone can publish included, is off the list. The list covers Gmail and
   Google Calendar by read pattern (`search_*`, `get_*`, `list_*`), and Microsoft 365, Slack,
   and Notion by exact tool name, because those connectors mix reading and writing under one
@@ -469,8 +486,8 @@ sink. Preserve these guards when touching the relevant code:
   starts from the recommended option and an empty box, because a box pre-filled from a file
   the scout can rewrite would run the scout's words as the user's. The ideas banner carries a count only, a sign-in banner names only a site the rule under "A site the agent asks for" allows, and `AppLog` records names and counts —
   never proposal text or a failure's message, which can quote the agent's output, and never
-  page text, message text, browsing history, or an address with a query string (a site is named
-  by its host). Verify a change to the flags by running the CLI in a scratch directory and
+  page text, message text, browsing history, a position or the date of a photo, or an address
+  with a query string (a site is named by its host). Verify a change to the flags by running the CLI in a scratch directory and
   asking it to write outside the folders that run is allowed, read outside the directory, run a
   command, and call a connector tool that is not allowed: each must come back denied. For a
   pass that carries the bridge, the `bridge` and `tools` self-checks confirm a real run reaches
@@ -703,6 +720,28 @@ sink. Preserve these guards when touching the relevant code:
   run off the main actor), and the bridge offers `read_texts` only while it is on. Reading needs
   Full Disk Access, and any failure to read is reported as that missing grant, the cause the user
   can fix.
+- **Photo places are dates and coordinates, and nothing else from a photo** (`PhotoPlaces`,
+  `PhotoTrail`). The library is read through PhotoKit, which needs the user's grant to Photos,
+  the `com.apple.security.personal-information.photos-library` entitlement (the hardened
+  runtime refuses PhotoKit without it, whatever the user answered), and
+  `NSPhotoLibraryUsageDescription`. A read takes each photo's creation date and position from
+  the user's own library — shared albums and hidden photos are left out, while what other
+  people added to a shared library counts as the user's own — and never an image,
+  file name, caption, album, or face, so **a reply holds no text anyone else wrote** and has
+  nothing to clean; a position that is not finite, is off the globe, or is (0, 0) is dropped.
+  The coordinates are the ones the photo recorded, unrounded, so a reply shows the user's home
+  and every place they photograph to the metre. **That is why the tool is a third opt-in**
+  (`provisor.readPhotoPlaces`, default off), consulted by the handler on every call as well as
+  when the tools are offered, and why it goes only to the passes the site and text tools go
+  to, behind the same sealed connector list. A reply is bounded by grouping, never by
+  rounding: `PhotoTrail` joins photos taken one after another within a distance of the first
+  into one line and picks the finest distance (50 m to 500 km) that fits the range into 400
+  lines, dropping the oldest lines past that; one read looks at the newest 500,000 photos. **A
+  line can run over days with no photo**, so it says how many of its days have one, and the
+  reply and the protocol both say the days between prove nothing. The
+  days a call names must parse as real `yyyy-MM-dd` days. The log gets the tool's name and
+  outcome, and the `photos` self-check reports counts: neither carries a date or a position.
+  The agent process is started disclaimed, so the app's grant to Photos never reaches it.
 - **The bridge serves a run's tools only to that run's own helper** (`Services/AgentBridge/`).
   The CLI starts `SuperVisor --agent-bridge` as an MCP server over stdio from a per-run
   configuration file, and the helper relays each call over `agent-bridge.sock`. The server
@@ -993,7 +1032,8 @@ names below are the code paths.
   proposes things they would want done but have not thought to ask for (an unused subscription
   still billing, a question nobody answered, senders never opened). **Off until enabled**
   (`SettingsStore.optInModules`): it reads mail and spends Claude quota. Reading texts is a
-  second, separate opt-in (`provisor.readTexts`, default off). **The app's part is
+  second, separate opt-in (`provisor.readTexts`, default off), and reading where photos were
+  taken a third (`provisor.readPhotoPlaces`, default off). **The app's part is
   deliberately thin; the judgment lives with the agent.** `ProVisorCenter` (a singleton, because
   Settings needs the live state and the registry builds a second, never-activated module set
   just to list names) starts a headless Claude Code run through
@@ -1053,11 +1093,15 @@ names below are the code paths.
     Calendar. Connectors load only for a Claude-account sign-in, not an API key. The connector
     names in the defaults follow the documented naming but vary by account — the agent's closing
     summary, shown in Settings, says when a data tool it expected was missing.
-  - **Sites and texts are two more sources, read through the bridge** by a scouting pass and a
-    follow-up pass (Untrusted Input says what bounds them). `open_site`, `follow_link`, and
-    `read_more` read pages of a granted site signed in as the user; `read_texts` reads recent
-    texts. A pass is told which sites it can read and whether texts are on, and the protocol's
-    "Sites and texts" section says how to use them. The tools are offered only while every
+  - **Sites, texts, and photo places are three more sources, read through the bridge** by a
+    scouting pass and a follow-up pass (Untrusted Input says what bounds them). `open_site`,
+    `follow_link`, and `read_more` read pages of a granted site signed in as the user;
+    `read_texts` reads recent texts; `read_photo_places` reads when and where the photos in
+    their Photos library were taken, for any range of days. **It knows only the moments a
+    photo was taken**: a day with no photo has no line, and a photo someone else took and the
+    user saved shows where that person was; the reply and the protocol both say so. A pass is
+    told which sites it can read and whether texts and photo places are on, and the protocol's
+    "Sites, texts, and photo places" section says how to use them. The tools are offered only while every
     condition under Untrusted Input holds; otherwise the pass runs without them. **A headless
     run's first turn starts before the account's connectors have connected**, so a quick run
     has no mail tool on it. Measured with the real CLI, the first turn had no Gmail tool in 4
@@ -1174,9 +1218,13 @@ names below are the code paths.
     deletes the Keychain item, the registry entry, and the cookies and site data the site's
     browse hosts left, except what another granted site shares (data is kept per registrable
     domain). It also holds **Add Site…**, the **Read my texts** toggle with a Full Disk Access
-    row that opens System Settings while a read fails, and a line naming the condition that
-    pauses site and text reading when one fails, and the **Offer to keep passwords** toggle
-    (`provisor.offerPasswords`, on by default).
+    row that opens System Settings while a read fails, the **Read where my photos were taken**
+    toggle, a line naming the condition that pauses reading sites, texts, and photo places
+    when one fails, and the **Offer to keep passwords** toggle (`provisor.offerPasswords`, on
+    by default). Turning the photo toggle on asks for access to Photos when the user has
+    never been asked (the system shows that prompt once); a row under it offers **Allow…**
+    while they have not answered and **Open System Settings** once they refused
+    (`SiteAccessCenter.PhotoPlacesStatus`).
   - **The site window** (`ProVisorSiteWindow`) is one reused window, the form on the left and
     the live page on the right. **Keep me signed in**, the default, asks for the address only:
     the user signs in on the page and the grant keeps the session and no secret; when the app
@@ -1357,7 +1405,7 @@ at runtime.
   `--agent-bridge` run before `NSApplication` exists, from `SuperVisorMain.main()`, and use
   neither AppKit nor the app's log; **the bridge helper ignores SIGPIPE itself**, since the app's
   process-wide setting does not reach it. ProVisor's side is `ProVisorBridge` (tokens, per-run
-  configuration, eligibility) and `ProVisorTools` (the four tools).
+  configuration, eligibility) and `ProVisorTools` (the five tools).
 - **`Services/Sites/`** — signed-in page reading and the app-side sign-in (rules under
   Untrusted Input): `SiteVault` (Keychain, one item per site), `SiteRegistry` (`sites.json`,
   written atomically at mode 0600, at most 50 sites; a symlink or an oversized file reads as
@@ -1403,6 +1451,12 @@ at runtime.
   current macOS and seconds on old versions, and the date filter handles both. Two reads exist
   on purpose: `messages` (as sent, for the app's own matching) and `messagesForModel` (masked,
   the only read for anything a model sees).
+- **`Services/Photos/PhotoPlaces.swift`** — when and where the photos in the user's Photos
+  library were taken (rules under Untrusted Input). `PhotoPlaces` is three closures (the
+  permission, the request for it, and the read) so that tests supply a library of their own:
+  **the test runner has no bundle, and PhotoKit asked for permission without a usage string
+  ends the process**, so no test touches `PhotoPlaces.library`. `PhotoTrail` is the pure part,
+  turning a read into stays. The read walks the library and runs off the main actor.
 - **`Services/Browsing/BrowsingHistory.swift`** — answers one question and exposes nothing else
   (no address, title, or date leaves it): has the user visited exactly this host over `https` on
   at least two distinct local days? It reads each Chromium-family profile's `History` file,
@@ -1487,8 +1541,8 @@ artifacts:
   liveness/timeline record: it exists iff an instance bound it and
   died uncleanly since; its mtime is the moment that instance's SwarmModule activated.
 
-**A pass can run without its site and text tools while nothing fails.** The `provisor` log
-carries `site and text tools off: <reason>` (`nothingGranted`, `accessNotSealed`,
+**A pass can run without its site, text, and photo-place tools while nothing fails.** The `provisor` log
+carries `bridge tools off: <reason>` (`nothingGranted`, `accessNotSealed`,
 `cliNotTrusted`, `disclaimUnavailable`, `serverFailed`) when a pass starts without them, and
 `tool <name>: <outcome>` for each call; Settings states the reason, `nothingGranted` apart. A
 bridge refusal logs `agent bridge refused: <reason>` in `agentDispatch`, written to the file

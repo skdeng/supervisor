@@ -1,10 +1,69 @@
 import Combine
 import Foundation
 import SQLite3
+import Synchronization
 import Testing
 import WebKit
 
 @testable import SuperVisor
+
+/// A Photos library of a test's own: the permission it reports, what the user answers when
+/// asked, and the photos it holds.
+final class PhotoLibraryStub: Sendable {
+    private struct State {
+        var access: PhotoPlaces.Access
+        var answer: PhotoPlaces.Access = .allowed
+        var fixes: [PhotoFix] = []
+        var requests = 0
+    }
+
+    private let state: Mutex<State>
+
+    init(access: PhotoPlaces.Access = .allowed) {
+        state = Mutex(State(access: access))
+    }
+
+    var access: PhotoPlaces.Access {
+        get { state.withLock { $0.access } }
+        set { state.withLock { $0.access = newValue } }
+    }
+
+    /// What the user answers the system's prompt with.
+    var answer: PhotoPlaces.Access {
+        get { state.withLock { $0.answer } }
+        set { state.withLock { $0.answer = newValue } }
+    }
+
+    var fixes: [PhotoFix] {
+        get { state.withLock { $0.fixes } }
+        set { state.withLock { $0.fixes = newValue } }
+    }
+
+    /// How many times the user was asked.
+    var requests: Int { state.withLock { $0.requests } }
+
+    var places: PhotoPlaces {
+        PhotoPlaces(
+            access: { self.access },
+            requestAccess: {
+                self.state.withLock { state in
+                    state.requests += 1
+                    if state.access == .notAsked { state.access = state.answer }
+                    return state.access
+                }
+            },
+            read: { start, end in
+                try self.state.withLock { state in
+                    guard state.access == .allowed else { throw PhotoPlaces.Failure.notAllowed }
+                    let found = state.fixes.filter { fix in
+                        (start.map { fix.date >= $0 } ?? true) && (end.map { fix.date < $0 } ?? true)
+                    }
+                    return PhotoReading(fixes: found, scanned: found.count, reachedScanLimit: false)
+                }
+            }
+        )
+    }
+}
 
 /// A scratch directory holding a registry path and, when asked, a Messages database with the
 /// tables the store reads.
@@ -17,6 +76,7 @@ final class SiteCenterFixture {
     let defaultsName = "site-access-center-\(UUID().uuidString)"
     let defaults: UserDefaults
     let settings: SettingsStore
+    let photos = PhotoLibraryStub()
 
     init(database makesDatabase: Bool = true) throws {
         directory = FileManager.default.temporaryDirectory
@@ -84,6 +144,7 @@ final class SiteCenterFixture {
             secretStore: store,
             registryURL: registry,
             messages: messages,
+            photoPlaces: photos.places,
             settings: settings,
             dataStore: dataStore,
             codePolling: polling,
@@ -530,6 +591,86 @@ struct SiteAccessCenterTests {
         let center = fixture.center()
         center.setTextsEnabled(true)
         #expect(center.textsStatus == .accessDenied)
+    }
+
+    // MARK: Photo places
+
+    @Test("Photo places are off while the setting is, even with Photos allowed")
+    func photoPlacesOff() throws {
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+        center.refresh()
+
+        #expect(center.photoPlacesStatus == .off)
+        #expect(!center.photoPlacesEnabled)
+        #expect(fixture.photos.requests == 0)
+    }
+
+    @Test("Turning photo places on with Photos allowed asks for nothing, and the setting is kept")
+    func photoPlacesOn() throws {
+        let fixture = try SiteCenterFixture()
+        let center = fixture.center()
+
+        center.setPhotoPlacesEnabled(true)
+        #expect(center.photoPlacesStatus == .on)
+        #expect(center.photoAccessRequest == nil)
+        #expect(fixture.photos.requests == 0)
+        #expect(fixture.defaults.bool(forKey: "provisor.readPhotoPlaces"))
+
+        center.setPhotoPlacesEnabled(false)
+        #expect(center.photoPlacesStatus == .off)
+        #expect(fixture.defaults.object(forKey: "provisor.readPhotoPlaces") as? Bool == false)
+    }
+
+    @Test("Turning photo places on before the user was asked asks them once, and follows their answer")
+    func photoPlacesAsks() async throws {
+        let allowing = try SiteCenterFixture()
+        allowing.photos.access = .notAsked
+        let center = allowing.center()
+
+        center.setPhotoPlacesEnabled(true)
+        #expect(center.photoPlacesStatus == .accessNotAsked)
+        let asking = try #require(center.photoAccessRequest)
+        // A second request while the first is unanswered is dropped.
+        center.requestPhotoAccess()
+        await asking.value
+        #expect(allowing.photos.requests == 1)
+        #expect(center.photoPlacesStatus == .on)
+        #expect(center.photoAccessRequest == nil)
+
+        let refusing = try SiteCenterFixture()
+        refusing.photos.access = .notAsked
+        refusing.photos.answer = .denied
+        let refused = refusing.center()
+        refused.setPhotoPlacesEnabled(true)
+        await refused.photoAccessRequest?.value
+        #expect(refused.photoPlacesStatus == .accessDenied)
+    }
+
+    @Test("Photo places switched on with Photos refused read as denied access, and nobody is asked")
+    func photoPlacesDenied() throws {
+        let fixture = try SiteCenterFixture()
+        fixture.photos.access = .denied
+        let center = fixture.center()
+
+        center.setPhotoPlacesEnabled(true)
+
+        #expect(center.photoPlacesStatus == .accessDenied)
+        #expect(center.photoAccessRequest == nil)
+        #expect(fixture.photos.requests == 0)
+    }
+
+    @Test("Access granted in System Settings shows at the next refresh")
+    func photoPlacesGrantedLater() throws {
+        let fixture = try SiteCenterFixture()
+        fixture.photos.access = .denied
+        let center = fixture.center()
+        center.setPhotoPlacesEnabled(true)
+
+        fixture.photos.access = .allowed
+        center.refresh()
+
+        #expect(center.photoPlacesStatus == .on)
     }
 
     // MARK: Codes

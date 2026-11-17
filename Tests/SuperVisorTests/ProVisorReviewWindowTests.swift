@@ -59,10 +59,23 @@ struct ProVisorReviewWindowTests {
     }
 
     /// Runs steps one at a time inside the application's own event loop, a few display cycles
-    /// apart, then stops the loop.
+    /// apart, then lets the loop go idle and stops it.
+    ///
+    /// **The loop goes idle before it stops, and the steps take their window off screen.** The
+    /// test process's main thread sits in one outer `CFRunLoopRun`, and the Swift runtime calls
+    /// `exit(0)` the moment that returns. AppKit's display cycle wakes its event loop with
+    /// `CFRunLoopStop`; one that fires after `NSApplication.run()` has returned stops the outer
+    /// loop instead, and the whole test run ends there with status 0 and no summary line, every
+    /// unfinished test unreported. Leaving no display work behind makes that rarer; a wake
+    /// raised by a later test's window can still do it.
     @MainActor
     private final class Stepper: NSObject {
+        /// Timer ticks the loop keeps running with nothing to do, for the display cycle of the
+        /// last step to finish inside it.
+        private static let idleTicks = 4
+
         private var remaining: ArraySlice<@MainActor () -> Void>
+        private var idleTicksLeft = Stepper.idleTicks
 
         init(_ steps: [@MainActor () -> Void]) {
             remaining = steps[...]
@@ -80,11 +93,17 @@ struct ProVisorReviewWindowTests {
             )
             RunLoop.main.add(timer, forMode: .common)
             application.run()
+            // A wake that was already on its way lands in this run of the loop.
+            CFRunLoopRunInMode(.defaultMode, 0.5, false)
         }
 
         @objc private func tick(_ timer: Timer) {
             if let step = remaining.popFirst() {
                 step()
+                return
+            }
+            if idleTicksLeft > 0 {
+                idleTicksLeft -= 1
                 return
             }
             timer.invalidate()
@@ -131,6 +150,7 @@ struct ProVisorReviewWindowTests {
         // is what keeps it out of sight of whoever is at the machine while the suite runs.
         window.alphaValue = 0
         window.ignoresMouseEvents = true
+        // The steps close the window themselves; this covers a test that stops before them.
         defer { window.close() }
 
         // Sized to its content before it is ever shown.
@@ -159,6 +179,7 @@ struct ProVisorReviewWindowTests {
                 model.isTyping = false
             },
             { heights.append(content.frame.height) },
+            { window.close() },
         ]).run()
 
         let (shown, typing, typed, back) = try #require(

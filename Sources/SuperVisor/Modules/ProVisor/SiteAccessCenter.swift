@@ -4,17 +4,19 @@ import Foundation
 import Synchronization
 import WebKit
 
-/// The app's one owner of site access: the granted sites as Settings lists them, the texts
-/// setting and whether texts can be read, and the code sources a sign-in draws on.
+/// The app's one owner of what a pass reads through the bridge: the granted sites as Settings
+/// lists them, the texts and photo-places settings and whether each can be read, and the code
+/// sources a sign-in draws on.
 ///
-/// Building it does nothing but construct objects; the registry and the Messages database are
-/// first read by `refresh()`, which Settings calls when it appears.
+/// Building it does nothing but construct objects; the registry, the Messages database, and the
+/// Photos permission are first read by `refresh()`, which Settings calls when it appears.
 @MainActor
 final class SiteAccessCenter: ObservableObject {
     static let shared = SiteAccessCenter(
         secretStore: KeychainSecretStore(service: SiteVault.service),
         registryURL: ProVisorHome.sitesURL,
         messages: MessagesStore(),
+        photoPlaces: .library,
         settings: .shared,
         dataStore: SiteBrowser.sharedStore
     )
@@ -24,6 +26,15 @@ final class SiteAccessCenter: ObservableObject {
         case on
         /// Texts are switched on and cannot be read, which is what a missing Full Disk Access
         /// grant looks like.
+        case accessDenied
+    }
+
+    enum PhotoPlacesStatus: Equatable {
+        case off
+        case on
+        /// Switched on, and the user has not yet been asked to let the app read Photos.
+        case accessNotAsked
+        /// Switched on, and the user or a device policy refused the app access to Photos.
         case accessDenied
     }
 
@@ -63,6 +74,8 @@ final class SiteAccessCenter: ObservableObject {
     @Published private(set) var awaitingSignIn: Set<String> = []
     /// Follows the setting alone until `refresh()` has tried the Messages database.
     @Published private(set) var textsStatus: TextsStatus
+    /// Follows the setting alone until `refresh()` has read the Photos permission.
+    @Published private(set) var photoPlacesStatus: PhotoPlacesStatus
 
     let access: SiteAccess
 
@@ -84,6 +97,7 @@ final class SiteAccessCenter: ObservableObject {
 
     private let vault: SiteVault
     private let messages: MessagesStore
+    private let photoPlaces: PhotoPlaces
     private let settings: SettingsStore
     private let dataStore: WKWebsiteDataStore
     /// The code sources every sign-in this center starts draws on.
@@ -91,11 +105,15 @@ final class SiteAccessCenter: ObservableObject {
     private let relay: EmailedCodeRelay
     private let textsSwitch: TextsSwitch
     private var settingsObservation: AnyCancellable?
+    /// The request for access to Photos under way. A request made while one is pending is
+    /// dropped.
+    private(set) var photoAccessRequest: Task<Void, Never>?
 
     init(
         secretStore: any SecretStore,
         registryURL: URL,
         messages: MessagesStore,
+        photoPlaces: PhotoPlaces,
         settings: SettingsStore,
         dataStore: WKWebsiteDataStore,
         codePolling: CodePolling = .standard,
@@ -115,12 +133,14 @@ final class SiteAccessCenter: ObservableObject {
         )
         self.vault = vault
         self.messages = messages
+        self.photoPlaces = photoPlaces
         self.settings = settings
         self.dataStore = dataStore
         self.relay = relay
         self.textsSwitch = textsSwitch
         self.codes = codes
         textsStatus = settings.provisorReadsTexts ? .on : .off
+        photoPlacesStatus = settings.provisorReadsPhotoPlaces ? .on : .off
         access = SiteAccess(
             vault: vault,
             registryURL: registryURL,
@@ -144,12 +164,17 @@ final class SiteAccessCenter: ObservableObject {
 
     // MARK: Sites
 
-    /// Re-reads the site list and whether texts can be read.
+    /// Re-reads the site list and whether texts and photo places can be read.
     func refresh() {
         let current = access.sites()
         if current != sites { sites = current }
         let status = Self.textsStatus(enabled: settings.provisorReadsTexts, messages: messages)
         if status != textsStatus { textsStatus = status }
+        let places = Self.photoPlacesStatus(
+            enabled: settings.provisorReadsPhotoPlaces,
+            access: photoPlaces.access
+        )
+        if places != photoPlacesStatus { photoPlacesStatus = places }
     }
 
     /// An enrollment for the site window, signing in with this center's code sources. It
@@ -252,12 +277,15 @@ final class SiteAccessCenter: ObservableObject {
 
     var textsEnabled: Bool { settings.provisorReadsTexts }
 
-    /// The tools a pass reaches through the bridge, over this center's sites and texts.
+    /// The tools a pass reaches through the bridge, over this center's sites, texts, and photo
+    /// places.
     func makeTools() -> ProVisorTools {
         ProVisorTools(
             access: access,
             messages: messages,
             textsAreOn: { [settings] in settings.provisorReadsTexts },
+            photoPlaces: photoPlaces,
+            photoPlacesAreOn: { [settings] in settings.provisorReadsPhotoPlaces },
             awaiting: { [weak self] in self?.awaitingSignIn ?? [] }
         )
     }
@@ -283,6 +311,51 @@ final class SiteAccessCenter: ObservableObject {
             return .on
         } catch {
             return .accessDenied
+        }
+    }
+
+    // MARK: Photo places
+
+    var photoPlacesEnabled: Bool { settings.provisorReadsPhotoPlaces }
+
+    /// Turning the setting on asks the user to let the app read Photos when they have not been
+    /// asked; the system shows that prompt once.
+    func setPhotoPlacesEnabled(_ enabled: Bool) {
+        settings.provisorReadsPhotoPlaces = enabled
+        refresh()
+        if photoPlacesStatus == .accessNotAsked {
+            requestPhotoAccess()
+        }
+    }
+
+    /// Asks the user to let the app read Photos, then reads the status again.
+    func requestPhotoAccess() {
+        guard photoAccessRequest == nil else { return }
+        let places = photoPlaces
+        photoAccessRequest = Task { [weak self] in
+            _ = await places.requestAccess()
+            self?.photoAccessRequest = nil
+            self?.refresh()
+        }
+    }
+
+    static func openPhotosAccessSettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Photos"
+        ) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Off when the setting is, and the permission is then left unread.
+    static func photoPlacesStatus(
+        enabled: Bool,
+        access: () -> PhotoPlaces.Access
+    ) -> PhotoPlacesStatus {
+        guard enabled else { return .off }
+        switch access() {
+        case .allowed: return .on
+        case .notAsked: return .accessNotAsked
+        case .denied: return .accessDenied
         }
     }
 

@@ -820,13 +820,15 @@ struct ProVisorCommandTests {
 
     private func bridge(
         sites: [String] = ["Bank", "City Power"],
-        texts: Bool = true
+        texts: Bool = true,
+        photoPlaces: Bool = false
     ) -> RunBridge {
         RunBridge(
             configurationPath: "/tmp/runs/0a1b2c3d.json",
             toolRules: toolRules,
             siteNames: sites,
-            textsAreOn: texts
+            textsAreOn: texts,
+            photoPlacesAreOn: photoPlaces
         )
     }
 
@@ -874,7 +876,7 @@ struct ProVisorCommandTests {
             "Edit(/proposals/**)", "Edit(/memory/**)", "Edit(/followups/**)",
             "mcp__mail__get_*",
         ] + toolRules)
-        let sentence = " You can read these sites signed in, through open_site: Bank, City Power. You can read their text messages through read_texts. The \"Sites and texts\" section of your brief says how to use them and what never to do."
+        let sentence = " You can read these sites signed in, through open_site: Bank, City Power. You can read their text messages through read_texts. The \"Sites, texts, and photo places\" section of your brief says how to use them and what never to do."
         #expect(bridged[1] == plain[1] + sentence)
         // Nothing else about the run changes.
         #expect(withoutBridge(bridged, sentence: sentence) == plain)
@@ -890,7 +892,15 @@ struct ProVisorCommandTests {
         let textsOnly = scout(bridge: bridge(sites: []))[1]
         #expect(textsOnly.contains("text messages through read_texts."))
         #expect(!textsOnly.contains("open_site"))
-        #expect(textsOnly.contains("\"Sites and texts\""))
+        #expect(!textsOnly.contains("read_photo_places"))
+        #expect(textsOnly.contains("\"Sites, texts, and photo places\""))
+
+        let photosOnly = scout(bridge: bridge(sites: [], texts: false, photoPlaces: true))[1]
+        #expect(photosOnly.hasSuffix(
+            " You can read when and where their photos were taken through read_photo_places. The \"Sites, texts, and photo places\" section of your brief says how to use them and what never to do."
+        ))
+        #expect(!photosOnly.contains("open_site"))
+        #expect(!photosOnly.contains("read_texts"))
     }
 
     @Test("A follow-up pass has the scout's confinement, a smaller allowance, and a prompt about open notes only")
@@ -932,7 +942,7 @@ struct ProVisorCommandTests {
     func followUpWithBridge() {
         let plain = followUp(bridge: nil)
         let bridged = followUp(bridge: bridge())
-        let sentence = " You can read these sites signed in, through open_site: Bank, City Power. You can read their text messages through read_texts. The \"Sites and texts\" section of your brief says how to use them and what never to do."
+        let sentence = " You can read these sites signed in, through open_site: Bank, City Power. You can read their text messages through read_texts. The \"Sites, texts, and photo places\" section of your brief says how to use them and what never to do."
 
         #expect(values(after: "--mcp-config", in: bridged) == ["/tmp/runs/0a1b2c3d.json"])
         #expect(values(after: "--allowedTools", in: bridged).suffix(4) == ArraySlice(toolRules))
@@ -1264,7 +1274,8 @@ struct ProVisorCommandTests {
         #expect(text.contains("Also keep a follow-up note for the check itself (`Status: open`, with `Check from:` today, and `Waits on: <host>` as its third line, the host you named in `site`)"))
         #expect(text.contains("its third line is `Waits on: <host>`, the host of that site in lowercase"))
         #expect(!text.contains("raise that once as a `confirm` item"))
-        let sites = try #require(text.range(of: "## Sites and texts"))
+        let sites = try #require(text.range(of: "## Sites, texts, and photo places"))
+        #expect(text.contains("- `read_photo_places` returns when and where the photos in their library were taken"))
         let proposing = try #require(text.range(of: "## Proposing actions that can actually be carried out"))
         #expect(sites.lowerBound < proposing.lowerBound)
         #expect(ProVisorCommand.closingInstructions(proposalID: "a", now: now, timeZone: losAngeles)
@@ -1840,25 +1851,37 @@ struct ProVisorSettingsTests {
         #expect(SettingsStore(defaults: defaults).provisorScoutHours == 1)
     }
 
-    @Test("Settings says why site and text reading is paused, and says nothing when it is not")
+    @Test("Photo places stay off until switched on, and the choice is kept")
+    func photoPlacesSetting() throws {
+        let name = "provisor-photo-places-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        defer { UserDefaults().removePersistentDomain(forName: name) }
+
+        #expect(!SettingsStore(defaults: defaults).provisorReadsPhotoPlaces)
+        SettingsStore(defaults: defaults).provisorReadsPhotoPlaces = true
+        #expect(SettingsStore(defaults: defaults).provisorReadsPhotoPlaces)
+        #expect(defaults.bool(forKey: "provisor.readPhotoPlaces"))
+    }
+
+    @Test("Settings says why reading sites, texts, and photo places is paused, and says nothing when it is not")
     func pauseNotices() {
         #expect(ProVisorSettingsView.pauseNotice(for: nil) == nil)
         #expect(ProVisorSettingsView.pauseNotice(for: .nothingGranted) == nil)
         #expect(
             ProVisorSettingsView.pauseNotice(for: .accessNotSealed)
-                == "Site and text reading is paused: access.json lets the scout call a tool SuperVisor doesn't know to be read-only."
+                == "Reading sites, texts, and photo places is paused: access.json lets the scout call a tool SuperVisor doesn't know to be read-only."
         )
         #expect(
             ProVisorSettingsView.pauseNotice(for: .cliNotTrusted)
-                == "Site and text reading is paused: the installed agent CLI isn't the signed build."
+                == "Reading sites, texts, and photo places is paused: the installed agent CLI isn't the signed build."
         )
         #expect(
             ProVisorSettingsView.pauseNotice(for: .disclaimUnavailable)
-                == "Site and text reading is paused: this macOS can't start the agent without SuperVisor's own permissions."
+                == "Reading sites, texts, and photo places is paused: this macOS can't start the agent without SuperVisor's own permissions."
         )
         #expect(
             ProVisorSettingsView.pauseNotice(for: .serverFailed)
-                == "Site and text reading is paused: SuperVisor couldn't open its tool channel."
+                == "Reading sites, texts, and photo places is paused: SuperVisor couldn't open its tool channel."
         )
     }
 }

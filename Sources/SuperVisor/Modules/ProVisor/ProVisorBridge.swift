@@ -1,12 +1,14 @@
 import Darwin
 import Foundation
 
-/// Decides whether a pass may carry the bridge's site and text tools, and prepares them.
+/// Decides whether a pass may carry the bridge's site, text, and photo-place tools, and prepares
+/// them.
 ///
 /// A pass gets the tools only when something is granted to read, the scout's access list is
 /// sealed (`ProVisorAccess.scoutIsSealed`: every rule on it reads and nothing else, so no
-/// connector tool can carry what a page or a text says out of the Mac), responsibility for the
-/// agent process can be disclaimed (so the app's Full Disk Access never reaches it), and the
+/// connector tool can carry what a page or a text says, or where a photo was taken, out of the
+/// Mac), responsibility for the agent process can be disclaimed (so the app's Full Disk Access
+/// and its access to Photos never reach it), and the
 /// installed agent CLI is the signed build the server will accept as a run's root. Otherwise the
 /// pass runs without them, and `lastUnavailable` says why.
 ///
@@ -21,7 +23,7 @@ import Foundation
 @MainActor
 final class ProVisorBridge {
     enum Unavailable: String, Error, Equatable, Sendable {
-        /// No site is granted and texts are off.
+        /// No site is granted, and texts and photo places are off.
         case nothingGranted
         /// The scout's access list holds a rule that is not known to be read-only.
         case accessNotSealed
@@ -110,22 +112,31 @@ final class ProVisorBridge {
 
     // MARK: Whether a pass may carry the tools
 
-    /// What a pass could read and why not, decided from the granted sites, the texts setting,
-    /// the access list, the system, and the installed CLI.
+    /// What a pass could read and why not, decided from the granted sites, the texts and photo
+    /// places settings, the access list, the system, and the installed CLI.
     private struct Eligibility {
         let sites: [SiteRecord]
         let awaiting: Set<String>
         let textsAreOn: Bool
+        let photoPlacesAreOn: Bool
     }
 
     private func eligibility(for access: ProVisorAccess) -> Result<Eligibility, Unavailable> {
         let granted = sites.access.sites()
         let textsAreOn = sites.textsEnabled
-        guard !granted.isEmpty || textsAreOn else { return .failure(.nothingGranted) }
+        let photoPlacesAreOn = sites.photoPlacesEnabled
+        guard !granted.isEmpty || textsAreOn || photoPlacesAreOn else {
+            return .failure(.nothingGranted)
+        }
         guard access.scoutIsSealed else { return .failure(.accessNotSealed) }
         guard disclaimIsAvailable() else { return .failure(.disclaimUnavailable) }
         guard cliIsTrusted() else { return .failure(.cliNotTrusted) }
-        return .success(Eligibility(sites: granted, awaiting: sites.awaitingSignIn, textsAreOn: textsAreOn))
+        return .success(Eligibility(
+            sites: granted,
+            awaiting: sites.awaitingSignIn,
+            textsAreOn: textsAreOn,
+            photoPlacesAreOn: photoPlacesAreOn
+        ))
     }
 
     /// The names of the granted sites a pass could read now, in the order they are listed; empty
@@ -173,7 +184,8 @@ final class ProVisorBridge {
         let tools = ProVisorTools.descriptors(
             sites: eligible.sites,
             awaiting: eligible.awaiting,
-            textsAreOn: eligible.textsAreOn
+            textsAreOn: eligible.textsAreOn,
+            photoPlacesAreOn: eligible.photoPlacesAreOn
         )
         let token = AgentBridgeServer.makeToken()
         let configurationURL: URL
@@ -191,7 +203,8 @@ final class ProVisorBridge {
                 configurationPath: configurationURL.path,
                 toolRules: ProVisorTools.allowedToolRules(for: tools),
                 siteNames: eligible.sites.map { ProVisorTools.siteLabel($0, awaiting: eligible.awaiting) },
-                textsAreOn: eligible.textsAreOn
+                textsAreOn: eligible.textsAreOn,
+                photoPlacesAreOn: eligible.photoPlacesAreOn
             ),
             configurationURL: configurationURL
         )
@@ -300,7 +313,7 @@ final class ProVisorBridge {
             lastUnavailable = nil
         case let .failure(reason):
             lastUnavailable = reason
-            AppLog.notice(.provisor, "site and text tools off: \(reason.rawValue)")
+            AppLog.notice(.provisor, "bridge tools off: \(reason.rawValue)")
         }
         return result
     }

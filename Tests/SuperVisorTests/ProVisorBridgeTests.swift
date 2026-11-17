@@ -275,6 +275,7 @@ struct ProVisorBridgeTests {
         ])
         #expect(sitesOnly.bridge.siteNames == ["Bank (example.com)", "City Power (power.example.org)"])
         #expect(!sitesOnly.bridge.textsAreOn)
+        #expect(!sitesOnly.bridge.photoPlacesAreOn)
         #expect(sitesOnly.bridge.configurationPath == sitesOnly.configurationURL.path)
 
         fixture.sites.settings.provisorReadsTexts = true
@@ -584,6 +585,42 @@ struct ProVisorBridgeTests {
         #expect(fixture.center.access.siteID(visit: run.token) == nil)
         let unknown = await fixture.bridge.serve(token: String(repeating: "0", count: 32), tool: "open_site", arguments: .object([:]))
         #expect(unknown == .failure("This run has ended."))
+    }
+
+    @Test("Photo places alone are enough to offer read_photo_places, and come after read_texts")
+    func photoPlacesOnly() throws {
+        let fixture = try BridgeFixture()
+        defer { fixture.tearDown() }
+        #expect(fixture.bridge.prepare(access: sealed) == .failure(.nothingGranted))
+
+        fixture.sites.settings.provisorReadsPhotoPlaces = true
+        let run = try fixture.prepared()
+        #expect(run.bridge.toolRules == ["mcp__supervisor__read_photo_places"])
+        #expect(run.bridge.photoPlacesAreOn)
+        #expect(!run.bridge.textsAreOn)
+        #expect(run.bridge.siteNames.isEmpty)
+
+        fixture.sites.settings.provisorReadsTexts = true
+        let both = try fixture.prepared()
+        #expect(both.bridge.toolRules == [
+            "mcp__supervisor__read_texts",
+            "mcp__supervisor__read_photo_places",
+        ])
+    }
+
+    @Test("A photo-places call for a live run follows the setting", .timeLimit(.minutes(1)))
+    func photoPlacesCallWhileLive() async throws {
+        let fixture = try BridgeFixture(realHandler: true)
+        defer { fixture.tearDown() }
+        fixture.sites.settings.provisorReadsPhotoPlaces = true
+        let run = try fixture.prepared()
+
+        let on = await fixture.bridge.serve(token: run.token, tool: "read_photo_places", arguments: .object([:]))
+        #expect(on == BridgeReply(text: "No photos with a position were taken in that range."))
+
+        fixture.sites.settings.provisorReadsPhotoPlaces = false
+        let off = await fixture.bridge.serve(token: run.token, tool: "read_photo_places", arguments: .object([:]))
+        #expect(off == .failure("Reading where photos were taken is switched off."))
     }
 
     @Test("A call for a live run reaches the tools", .timeLimit(.minutes(1)))

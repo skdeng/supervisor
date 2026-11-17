@@ -11,7 +11,8 @@ import Foundation
 /// earlier decisions all live with the agent: in its brief and in the notes it keeps.
 ///
 /// Scouting runs and follow-up runs, which can change nothing outside the workspace, can also
-/// read the sites and texts the user granted, through the bridge (`ProVisorBridge`). Runs that
+/// read the sites, texts, and photo places the user granted, through the bridge
+/// (`ProVisorBridge`). Runs that
 /// carry out an action never can.
 ///
 /// A singleton because Settings needs the live state and reaches no module instance: the
@@ -33,7 +34,7 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
     @Published private(set) var isScouting = false
     /// Whether a pass over the checks a decision left owed is running.
     @Published private(set) var isFollowingUp = false
-    /// Why passes did not get the site and text tools the last time one started; nil while
+    /// Why passes did not get the bridge's tools the last time one started; nil while
     /// they do, and before any pass has decided.
     @Published private(set) var siteToolsUnavailable: ProVisorBridge.Unavailable?
     /// The proposal an acting run is carrying out right now.
@@ -391,7 +392,7 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         }
     }
 
-    /// Prepares the run's site and text tools, or nothing when the conditions for them do not
+    /// Prepares the run's bridge tools, or nothing when the conditions for them do not
     /// hold, and publishes why.
     private func prepareBridge(access: ProVisorAccess) -> ProVisorBridge.PreparedRun? {
         defer { siteToolsUnavailable = bridge.lastUnavailable }
@@ -777,7 +778,7 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         }
     }
 
-    /// Re-reads why a pass would run without the site and text tools, without starting one.
+    /// Re-reads why a pass would run without the bridge's tools, without starting one.
     /// Settings asks when it appears; the center asks when `access.json` changes.
     func refreshSiteTools() {
         guard isActive, let access = try? ProVisorHome.loadAccess() else { return }

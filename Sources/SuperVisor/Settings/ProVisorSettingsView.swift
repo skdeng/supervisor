@@ -73,18 +73,50 @@ struct ProVisorSettingsView: View {
             .foregroundStyle(.secondary)
 
         if sites.textsStatus == .accessDenied {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Label("Full Disk Access is off, so texts can't be read.", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Spacer(minLength: 8)
-
-                Button("Open System Settings") { SiteAccessCenter.openFullDiskAccessSettings() }
-                    .buttonStyle(.plain)
-                    .font(.caption.weight(.medium))
+            accessRow("Full Disk Access is off, so texts can't be read.", button: "Open System Settings") {
+                SiteAccessCenter.openFullDiskAccessSettings()
             }
+        }
+
+        Toggle(
+            "Read where my photos were taken",
+            isOn: Binding(get: { sites.photoPlacesEnabled }, set: { sites.setPhotoPlacesEnabled($0) })
+        )
+        Text("ProVisor can read the date and exact coordinates of each photo in your Photos library, which shows where you have been. It never sees a photo. Needs access to Photos.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+        switch sites.photoPlacesStatus {
+        case .off, .on:
+            EmptyView()
+        case .accessNotAsked:
+            accessRow("SuperVisor hasn't been allowed to read Photos yet.", button: "Allow…") {
+                sites.requestPhotoAccess()
+            }
+        case .accessDenied:
+            accessRow("Photos access is off, so photo locations can't be read.", button: "Open System Settings") {
+                SiteAccessCenter.openPhotosAccessSettings()
+            }
+        }
+    }
+
+    /// A warning that a source is switched on and cannot be read, with the way to fix it.
+    private func accessRow(
+        _ message: String,
+        button: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 8)
+
+            Button(button, action: action)
+                .buttonStyle(.plain)
+                .font(.caption.weight(.medium))
         }
     }
 
@@ -107,7 +139,7 @@ struct ProVisorSettingsView: View {
                 .buttonStyle(.plain)
                 .font(.caption.weight(.medium))
 
-            if !sites.sites.isEmpty || sites.textsEnabled,
+            if !sites.sites.isEmpty || sites.textsEnabled || sites.photoPlacesEnabled,
                let pause = Self.pauseNotice(for: center.siteToolsUnavailable) {
                 Text(pause)
                     .font(.caption)
@@ -116,11 +148,12 @@ struct ProVisorSettingsView: View {
             }
         }
         .onAppear { refresh() }
-        // Full Disk Access is granted in System Settings, so the texts status is read again on
-        // coming back to Settings.
+        // Full Disk Access and access to Photos are granted in System Settings, so both
+        // statuses are read again on coming back to Settings.
         .onWindowBecomesKey { refresh() }
         .onChange(of: sites.sites) { center.refreshSiteTools() }
         .onChange(of: sites.textsEnabled) { center.refreshSiteTools() }
+        .onChange(of: sites.photoPlacesEnabled) { center.refreshSiteTools() }
         .confirmationDialog(
             removing.map { "Remove \($0.name)?" } ?? "",
             isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
@@ -141,26 +174,27 @@ struct ProVisorSettingsView: View {
         }
     }
 
-    /// Reads the sites and texts again, then why a pass would run without the tools for them.
+    /// Reads the sites, texts, and photo places again, then why a pass would run without the
+    /// tools for them.
     private func refresh() {
         sites.refresh()
         center.refreshSiteTools()
     }
 
-    /// The line that says why ProVisor is not reading the granted sites and texts, or nil when
-    /// it is, or when there is nothing granted for it to read.
+    /// The line that says why ProVisor is not reading the granted sites, texts, and photo
+    /// places, or nil when it is, or when there is nothing granted for it to read.
     static func pauseNotice(for reason: ProVisorBridge.Unavailable?) -> String? {
         switch reason {
         case nil, .nothingGranted?:
             nil
         case .accessNotSealed?:
-            "Site and text reading is paused: access.json lets the scout call a tool SuperVisor doesn't know to be read-only."
+            "Reading sites, texts, and photo places is paused: access.json lets the scout call a tool SuperVisor doesn't know to be read-only."
         case .cliNotTrusted?:
-            "Site and text reading is paused: the installed agent CLI isn't the signed build."
+            "Reading sites, texts, and photo places is paused: the installed agent CLI isn't the signed build."
         case .disclaimUnavailable?:
-            "Site and text reading is paused: this macOS can't start the agent without SuperVisor's own permissions."
+            "Reading sites, texts, and photo places is paused: this macOS can't start the agent without SuperVisor's own permissions."
         case .serverFailed?:
-            "Site and text reading is paused: SuperVisor couldn't open its tool channel."
+            "Reading sites, texts, and photo places is paused: SuperVisor couldn't open its tool channel."
         }
     }
 

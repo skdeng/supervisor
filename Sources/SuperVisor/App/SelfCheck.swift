@@ -36,6 +36,8 @@ enum SelfCheck {
             finish(messages(), report: report)
         case "history":
             finish(history(), report: report)
+        case "photos":
+            finish(photos(), report: report)
         case "disclaimed-exec":
             finish(disclaimedExec(), report: report)
         case "webkit":
@@ -162,6 +164,35 @@ enum SelfCheck {
             "safariSchemaOK": report.safariSchemaOK,
             "canReadProtectedData": report.canReadProtectedData,
         ]
+    }
+
+    // MARK: Photos
+
+    /// Whether the app may read Photos and, when it may, how many photos the read looked at,
+    /// how many carry a position, and how the whole library groups into stays. It asks for no
+    /// permission, and reports counts, the grouping distance, and a timing: no date and no
+    /// position.
+    private static func photos() -> [String: Any] {
+        let places = PhotoPlaces.library
+        let access = places.access()
+        var result: [String: Any] = ["check": "photos", "access": "\(access)"]
+        guard access == .allowed else { return result }
+
+        let started = Date()
+        do {
+            let reading = try places.read(nil, nil)
+            let trail = PhotoTrail(reading, timeZone: .current)
+            result["photosScanned"] = reading.scanned
+            result["photosWithPosition"] = trail.photoCount
+            result["stays"] = trail.stays.count
+            result["staysLeftOut"] = trail.omitted
+            result["groupingMetres"] = trail.radius
+            result["reachedScanLimit"] = trail.reachedScanLimit
+        } catch {
+            result["readFailed"] = true
+        }
+        result["readSeconds"] = Date().timeIntervalSince(started)
+        return result
     }
 
     // MARK: Messages and child processes
@@ -665,13 +696,16 @@ private final class ToolsCheck {
         let tools = ProVisorTools(
             access: access,
             messages: MessagesStore(path: folder.appendingPathComponent("none.db").path),
-            textsAreOn: { false }
+            textsAreOn: { false },
+            photoPlaces: .library,
+            photoPlacesAreOn: { false }
         )
         // A record is what makes the site tools appear; no grant stands behind it.
         let offered = ProVisorTools.descriptors(
             sites: [SiteRecord(id: "nowhere.example", name: "Nowhere", added: Date())],
             awaiting: [],
-            textsAreOn: false
+            textsAreOn: false,
+            photoPlacesAreOn: false
         )
 
         let token = AgentBridgeServer.makeToken()

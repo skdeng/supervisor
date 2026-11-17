@@ -28,6 +28,7 @@ public final class SettingsStore: ObservableObject {
         static let provisorScoutHours = "provisor.scoutHours"
         static let provisorReadTexts = "provisor.readTexts"
         static let provisorOfferPasswords = "provisor.offerPasswords"
+        static let provisorReadPhotoPlaces = "provisor.readPhotoPlaces"
     }
 
     /// Modules that stay off until the user turns them on. ProVisor reads the user's mail and
@@ -112,6 +113,12 @@ public final class SettingsStore: ObservableObject {
         didSet { defaults.set(provisorOffersPasswords, forKey: Key.provisorOfferPasswords) }
     }
 
+    /// ProVisor: whether the agent may read when and where the user's photos were taken. Off
+    /// by default: it needs access to Photos and shows where the user has been.
+    @Published public var provisorReadsPhotoPlaces: Bool {
+        didSet { defaults.set(provisorReadsPhotoPlaces, forKey: Key.provisorReadPhotoPlaces) }
+    }
+
     /// Per-module enabled flags, keyed by `moduleID`. Absent ids default to enabled, except
     /// opt-in modules.
     @Published public private(set) var moduleEnabled: [String: Bool]
@@ -145,6 +152,8 @@ public final class SettingsStore: ObservableObject {
             (defaults.object(forKey: Key.provisorReadTexts) as? Bool) ?? false
         self.provisorOffersPasswords =
             (defaults.object(forKey: Key.provisorOfferPasswords) as? Bool) ?? true
+        self.provisorReadsPhotoPlaces =
+            (defaults.object(forKey: Key.provisorReadPhotoPlaces) as? Bool) ?? false
 
         // Reconstruct the per-module map from any persisted keys.
         var map: [String: Bool] = [:]

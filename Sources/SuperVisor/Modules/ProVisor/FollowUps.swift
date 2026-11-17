@@ -210,6 +210,13 @@ struct LocalDay: Comparable, Equatable, Sendable {
         self.init(year: year, month: month, day: day)
     }
 
+    /// The moment the day begins in `timeZone`.
+    func start(in timeZone: TimeZone) -> Date? {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        return calendar.date(from: DateComponents(year: year, month: month, day: day))
+    }
+
     static func < (lhs: LocalDay, rhs: LocalDay) -> Bool {
         (lhs.year, lhs.month, lhs.day) < (rhs.year, rhs.month, rhs.day)
     }

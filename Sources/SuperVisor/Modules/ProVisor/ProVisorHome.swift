@@ -228,8 +228,8 @@ struct ProVisorAccess: Equatable, Sendable {
     static let maximumRules = 64
 
     /// Connector rules known to read and nothing else: none can send, invite, post, or fetch an
-    /// address. Site and text tools are attached to a run only while every scout rule is on this
-    /// list, because a tool that can carry data out would make them a way to leak it.
+    /// address. The bridge's tools are attached to a run only while every scout rule is on
+    /// this list, because a tool that can carry data out would make them a way to leak it.
     ///
     /// Beyond mail and calendar each tool is named exactly, never by pattern: these connectors
     /// mix reading and writing under one prefix, and a pattern would admit a tool added later.
@@ -363,6 +363,7 @@ struct RunBridge: Equatable, Sendable {
     /// The granted sites' names, for the prompt.
     let siteNames: [String]
     let textsAreOn: Bool
+    let photoPlacesAreOn: Bool
 }
 
 /// Composes the Claude Code command line for each kind of run.
@@ -372,7 +373,8 @@ struct RunBridge: Equatable, Sendable {
 /// directory, and ignores the user's own settings and hooks; `--permission-prompts none` denies
 /// anything not allowed below instead of waiting on a prompt nobody will answer; and the only
 /// writes allowed are inside the folders named here. What differs between runs is the list of
-/// connector tools, and whether the run reaches the bridge's site and text tools: only a pass
+/// connector tools, and whether the run reaches the bridge's site, text, and photo-place tools:
+/// only a pass
 /// that can change nothing outside its workspace (`scoutArguments`, `followUpArguments`) takes
 /// a `RunBridge`.
 ///
@@ -412,8 +414,9 @@ enum ProVisorCommand {
     ]
 
     /// The pass that looks through the user's data for things worth proposing. With a `bridge`
-    /// it can also read the granted sites and texts, and its configuration is the bridge's;
-    /// without one it carries `connectorHold`. `briefChanged` adds `briefChangedSentence`.
+    /// it can also read the granted sites, texts, and photo places, and its configuration is
+    /// the bridge's; without one it carries `connectorHold`. `briefChanged` adds
+    /// `briefChangedSentence`.
     static func scoutArguments(
         brief: String,
         access: ProVisorAccess,
@@ -508,9 +511,12 @@ enum ProVisorCommand {
         if bridge.textsAreOn {
             reach.append("You can read their text messages through read_texts.")
         }
+        if bridge.photoPlacesAreOn {
+            reach.append("You can read when and where their photos were taken through read_photo_places.")
+        }
         guard !reach.isEmpty else { return "" }
         reach.append(
-            "The \"Sites and texts\" section of your brief says how to use them and what never to do."
+            "The \"Sites, texts, and photo places\" section of your brief says how to use them and what never to do."
         )
         return " " + reach.joined(separator: " ")
     }

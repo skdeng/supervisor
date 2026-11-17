@@ -1,7 +1,8 @@
 import Foundation
 
 /// The tools a scouting or follow-up pass can call through the bridge: three that read pages on
-/// the sites the user granted, and one that reads their texts.
+/// the sites the user granted, one that reads their texts, and one that reads when and where
+/// their photos were taken.
 ///
 /// None of them can type, press a button, or go to an address. `open_site` loads a granted
 /// site's start page, `follow_link` loads a link by the number it had on the page just read, and
@@ -15,6 +16,7 @@ struct ProVisorTools {
         case followLink = "follow_link"
         case readMore = "read_more"
         case readTexts = "read_texts"
+        case readPhotoPlaces = "read_photo_places"
     }
 
     /// How a call ended, named for the log; the text of a reply never reaches it.
@@ -29,6 +31,8 @@ struct ProVisorTools {
         case nothingOpen
         case textsOff
         case textsUnreadable
+        case photoPlacesOff
+        case photoPlacesUnreadable
         case badArguments
         case notOffered
     }
@@ -36,6 +40,8 @@ struct ProVisorTools {
     let access: SiteAccess
     let messages: MessagesStore
     let textsAreOn: @MainActor () -> Bool
+    let photoPlaces: PhotoPlaces
+    let photoPlacesAreOn: @MainActor () -> Bool
     /// The ids of the sites a run was turned away from since the person last signed in.
     var awaiting: @MainActor () -> Set<String> = { [] }
     var now: @MainActor () -> Date = { Date() }
@@ -57,7 +63,8 @@ struct ProVisorTools {
     // MARK: Calls
 
     /// Runs one tool call for the visit that `visit` names, which is the run's token. The log
-    /// gets the tool's name and how the call ended, and nothing a site or a text said.
+    /// gets the tool's name and how the call ended, and nothing a site or a text said and no
+    /// position.
     func handle(visit: String, tool: String, arguments: JSONValue) async -> BridgeReply {
         let known = Tool(rawValue: tool)
         let answer: Answer
@@ -66,6 +73,7 @@ struct ProVisorTools {
         case .followLink?: answer = await followLink(visit: visit, arguments: arguments)
         case .readMore?: answer = readMore(visit: visit, arguments: arguments)
         case .readTexts?: answer = await readTexts(arguments: arguments)
+        case .readPhotoPlaces?: answer = await readPhotoPlaces(arguments: arguments)
         case nil: answer = .refused(.notOffered, Self.notOffered)
         }
         AppLog.notice(.provisor, "tool \(known?.rawValue ?? "unknown"): \(answer.outcome.rawValue)")
@@ -143,6 +151,28 @@ struct ProVisorTools {
         }
     }
 
+    private func readPhotoPlaces(arguments: JSONValue) async -> Answer {
+        guard photoPlacesAreOn() else { return .refused(.photoPlacesOff, Self.photoPlacesOff) }
+        guard let query = Self.photoQuery(arguments, timeZone: timeZone) else {
+            return .refused(.badArguments, Self.badArguments)
+        }
+        let (places, zone) = (photoPlaces, timeZone)
+        do {
+            // The read walks the library; it runs off the main actor, and ends with the call.
+            let read = Task.detached(priority: .utility) {
+                PhotoTrail(try places.read(query.start, query.end), timeZone: zone)
+            }
+            let trail = try await withTaskCancellationHandler {
+                try await read.value
+            } onCancel: {
+                read.cancel()
+            }
+            return .ok(Self.photoPlacesReply(trail, timeZone: timeZone))
+        } catch {
+            return .refused(.photoPlacesUnreadable, Self.photoPlacesUnreadable)
+        }
+    }
+
     private func answer(
         for failure: SiteAccess.Failure,
         siteName: String,
@@ -193,11 +223,12 @@ nonisolated extension ProVisorTools {
     // MARK: Descriptors
 
     /// The tools to offer a run: the three site tools when any site is granted, `read_texts`
-    /// when texts are switched on.
+    /// when texts are switched on, `read_photo_places` when photo places are.
     static func descriptors(
         sites: [SiteRecord],
         awaiting: Set<String>,
-        textsAreOn: Bool
+        textsAreOn: Bool,
+        photoPlacesAreOn: Bool
     ) -> [BridgeTool] {
         var tools: [BridgeTool] = []
         if !sites.isEmpty {
@@ -205,6 +236,9 @@ nonisolated extension ProVisorTools {
         }
         if textsAreOn {
             tools.append(readTextsTool)
+        }
+        if photoPlacesAreOn {
+            tools.append(readPhotoPlacesTool)
         }
         return tools
     }
@@ -327,6 +361,18 @@ nonisolated extension ProVisorTools {
         ], required: [])
     )
 
+    private static let readPhotoPlacesTool = BridgeTool(
+        name: Tool.readPhotoPlaces.rawValue,
+        description: "Reads when and where the photos in the person's library were taken, oldest "
+            + "first, as dates and coordinates; it shows no photo. Both arguments are optional, "
+            + "and with neither it covers the whole library. A long range is grouped coarsely, "
+            + "so ask for a shorter one to see single stops.",
+        inputSchema: schema([
+            "from": property("string", "The first day to include, as yyyy-MM-dd in their time zone."),
+            "to": property("string", "The last day to include, as yyyy-MM-dd in their time zone."),
+        ], required: [])
+    )
+
     // MARK: Replies
 
     /// The first line of every reply that carries a website's content.
@@ -344,6 +390,10 @@ nonisolated extension ProVisorTools {
     static let textsOff = "Reading texts is switched off."
     static let textsUnreadable = "Texts can't be read until SuperVisor has Full Disk Access."
     static let notOffered = "That tool is not available to this run."
+    static let photoPlacesOff = "Reading where photos were taken is switched off."
+    static let photoPlacesUnreadable =
+        "Where photos were taken can't be read until SuperVisor is allowed to read Photos."
+    static let noPhotoPlaces = "No photos with a position were taken in that range."
 
     static func unknownSite(granted: [SiteRecord], awaiting: Set<String>) -> String {
         "No granted site matches that. Granted sites: "
@@ -428,6 +478,76 @@ nonisolated extension ProVisorTools {
         return ([textsDataLine] + lines).joined(separator: "\n")
     }
 
+    /// A trail for a model to read: whose positions these are and in which time zone, how
+    /// many photos it covers, how they were grouped, and then one line a stay, oldest first.
+    /// A reply holds dates, counts, and coordinates, and no text from a photo.
+    static func photoPlacesReply(_ trail: PhotoTrail, timeZone: TimeZone) -> String {
+        guard !trail.stays.isEmpty else { return noPhotoPlaces }
+        let day = DateFormatter()
+        day.locale = Locale(identifier: "en_US_POSIX")
+        day.calendar = Calendar(identifier: .gregorian)
+        day.timeZone = timeZone
+        day.dateFormat = "yyyy-MM-dd"
+        let time = DateFormatter()
+        time.locale = day.locale
+        time.calendar = day.calendar
+        time.timeZone = timeZone
+        time.dateFormat = "HH:mm"
+
+        var lines = [
+            "When and where the photos in their library were taken, oldest first, with times in "
+                + "\(timeZone.identifier). A photo someone else took shows where that person was.",
+            "\(photos(trail.photoCount)) with a position. Each line is the photos taken one after "
+                + "another within \(distance(trail.radius)) of the first, at the first one's "
+                + "coordinates."
+                + (trail.radius == PhotoTrail.radii[0]
+                    ? ""
+                    : " Ask for a shorter range of dates to see finer stops."),
+            "A day appears only if a photo was taken on it. A line that runs over several days "
+                + "says how many of them have a photo there; the days between may have none.",
+        ]
+        if trail.omitted > 0 {
+            lines.append(
+                (trail.omitted == 1
+                    ? "The earliest line did not fit and is left out"
+                    : "The \(trail.omitted) earliest lines did not fit and are left out")
+                    + "; ask for an earlier range to see what came before."
+            )
+        }
+        if trail.reachedScanLimit {
+            lines.append("The library holds more photos in this range than one read covers, so the oldest were not read.")
+        }
+        lines += trail.stays.map { stay in
+            let firstDay = day.string(from: stay.first)
+            let lastDay = day.string(from: stay.last)
+            var when = "\(firstDay) \(time.string(from: stay.first))"
+            if stay.last != stay.first {
+                when += " to " + (lastDay == firstDay ? "" : lastDay + " ") + time.string(from: stay.last)
+            }
+            let spread = stay.dayCount > 1 ? " on \(stay.dayCount) days" : ""
+            return "\(when), \(photos(stay.count))\(spread), at \(coordinate(stay.latitude)), \(coordinate(stay.longitude))"
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func photos(_ count: Int) -> String {
+        count == 1 ? "1 photo" : "\(count) photos"
+    }
+
+    private static func distance(_ metres: Int) -> String {
+        metres < 1_000 ? "\(metres) m" : "\(metres / 1_000) km"
+    }
+
+    /// A coordinate in degrees with every digit the photo recorded, in plain decimal notation.
+    /// Swift prints a number under 0.0001 with an exponent, which this spells out.
+    static func coordinate(_ degrees: Double) -> String {
+        let shortest = "\(degrees)"
+        guard shortest.contains("e") else { return shortest }
+        var spelled = String(format: "%.15f", degrees)
+        while spelled.hasSuffix("0") { spelled.removeLast() }
+        return spelled.hasSuffix(".") ? spelled + "0" : spelled
+    }
+
     /// `scheme://host/path`, without the query or fragment. The path is shown as the address
     /// spells it, so an encoded line break stays encoded.
     static func address(of url: URL) -> String {
@@ -462,6 +582,13 @@ nonisolated extension ProVisorTools {
         let limit: Int
     }
 
+    /// The span of a `read_photo_places` call: from the start of the first day to the start of
+    /// the day after the last, with a nil bound open.
+    struct PhotoQuery: Equatable {
+        let start: Date?
+        let end: Date?
+    }
+
     /// The site named by an `open_site` call, trimmed; nil when it is missing, not text, empty,
     /// or longer than a host name.
     static func siteArgument(_ arguments: JSONValue) -> String? {
@@ -489,6 +616,42 @@ nonisolated extension ProVisorTools {
               let containing = optionalText(arguments["containing"])
         else { return nil }
         return TextQuery(hours: hours, sender: sender, containing: containing, limit: limit)
+    }
+
+    /// The span of a `read_photo_places` call. A missing, null, or blank day leaves that end
+    /// open; a member that is not text, is not a real day written `yyyy-MM-dd`, or a first day
+    /// after the last rejects the call.
+    static func photoQuery(_ arguments: JSONValue, timeZone: TimeZone) -> PhotoQuery? {
+        guard let first = optionalDay(arguments["from"]),
+              let last = optionalDay(arguments["to"])
+        else { return nil }
+        if let first, let last, last < first { return nil }
+
+        var start: Date?
+        if let first {
+            guard let date = first.start(in: timeZone) else { return nil }
+            start = date
+        }
+        var end: Date?
+        if let last {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = timeZone
+            // The day's own end, which a day added to its start overshoots where a clock
+            // change makes the day begin after midnight.
+            guard let begins = last.start(in: timeZone),
+                  let day = calendar.dateInterval(of: .day, for: begins)
+            else { return nil }
+            end = day.end
+        }
+        return PhotoQuery(start: start, end: end)
+    }
+
+    /// An optional day member. Nil rejects the call; `.some(nil)` is a member that is absent,
+    /// null, or blank.
+    private static func optionalDay(_ member: JSONValue?) -> LocalDay?? {
+        guard let text = optionalText(member) else { return nil }
+        guard let text else { return .some(nil) }
+        return LocalDay(parsing: text).map { .some($0) }
     }
 
     private static func number(

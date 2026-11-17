@@ -4,6 +4,10 @@
 <dict>
     <key>com.apple.security.personal-information.calendars</key>
     <true/>
+    <!-- Under the hardened runtime PhotoKit is refused without this, whatever the user
+         answered; ProVisor reads when and where photos were taken through it. -->
+    <key>com.apple.security.personal-information.photos-library</key>
+    <true/>
     <!-- The hardened runtime silently denies Apple Events (error -1743, no consent prompt)
          without this; SwarmVisor's teleport scripts iTerm2 through them. -->
     <key>com.apple.security.automation.apple-events</key>
