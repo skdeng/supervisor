@@ -125,8 +125,8 @@ final class SwarmModule: NotchModule, ObservableObject {
     /// The toast a session raises on entering the queue.
     ///
     /// Module `order` resolves a collision between two banners, and SwarmVisor's 15 deliberately
-    /// precedes FlowVisor's 100: a session blocked right now outranks a break nudge. The nudge
-    /// keeps its own indefinite hold while it is covered and returns once this toast retires.
+    /// precedes ProVisor's 35: a session blocked right now outranks an idea or a sign-in prompt.
+    /// The covered banner keeps its own hold and returns once this toast retires.
     func peekBanner() -> AnyView? {
         guard announcedEntry != nil else { return nil }
         return AnyView(SwarmPeekBannerView(module: self))
@@ -211,7 +211,7 @@ final class SwarmModule: NotchModule, ObservableObject {
         context?.requestPeek(.infinity)
         // With another module's banner already holding the peek, the request publishes no engine
         // change at all — the refresh is what makes the root view re-pick the banner slot's
-        // winner, or this toast never appears over a held nudge.
+        // winner, or this toast never appears over a held banner.
         context?.setNeedsCompactRefresh()
     }
 

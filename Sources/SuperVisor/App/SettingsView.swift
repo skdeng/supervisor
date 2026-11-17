@@ -72,7 +72,6 @@ struct SettingsView: View {
         case "calendar": "calendar"
         case "reminders": "checklist"
         case "fileshelf": "tray.full.fill"
-        case "flow": "brain.head.profile"
         case "swarm": "person.2.wave.2.fill"
         case "provisor": "sparkles"
         case "battery": "battery.100"
@@ -102,23 +101,6 @@ struct SettingsView: View {
             .notchTooltip("Pause music when a call starts")
             .help("Pause music when a call starts")
             Text("Detects a call from system-wide camera or microphone use. Music resumes when the call ends; a manual pause is never overridden.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case "flow":
-            Picker("Work interval", selection: $settings.flowWorkIntervalMinutes) {
-                Text("45 min").tag(45)
-                Text("60 min").tag(60)
-                Text("90 min").tag(90)
-            }
-
-            Picker("Break length", selection: $settings.flowBreakLengthMinutes) {
-                Text("3 min").tag(3)
-                Text("5 min").tag(5)
-                Text("10 min").tag(10)
-            }
-
-            Toggle("Defer nudges during meetings", isOn: $settings.flowDeferDuringMeetings)
-            Text("Uses the existing Calendar permission and reads only event start and end times.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case "swarm":

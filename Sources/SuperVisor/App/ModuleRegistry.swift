@@ -11,7 +11,6 @@ enum ModuleRegistry {
             CalendarModule(),
             RemindersModule(),
             FileShelfModule(),
-            FlowModule(),
             SwarmModule(),
             ProVisorModule(),
             BatteryModule(),

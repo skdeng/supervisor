@@ -23,9 +23,6 @@ public final class SettingsStore: ObservableObject {
         static let trueSpectrum = "media.trueSpectrum"
         static let beatAura = "media.beatAura"
         static let callAutoPauseMusic = "calls.autoPauseMusic"
-        static let flowWorkInterval = "flow.workInterval"
-        static let flowBreakLength = "flow.breakLength"
-        static let flowDeferDuringMeetings = "flow.deferDuringMeetings"
         static let swarmShowMessages = "swarm.showMessages"
         static let swarmJumpHotKey = "swarm.jumpHotKey"
         static let provisorScoutHours = "provisor.scoutHours"
@@ -82,21 +79,6 @@ public final class SettingsStore: ObservableObject {
         didSet { defaults.set(callAutoPausesMusic, forKey: Key.callAutoPauseMusic) }
     }
 
-    /// FlowVisor: minutes of heads-down work before break nudges become eligible.
-    @Published public var flowWorkIntervalMinutes: Int {
-        didSet { defaults.set(flowWorkIntervalMinutes, forKey: Key.flowWorkInterval) }
-    }
-
-    /// FlowVisor: duration in minutes of an explicitly started break.
-    @Published public var flowBreakLengthMinutes: Int {
-        didSet { defaults.set(flowBreakLengthMinutes, forKey: Key.flowBreakLength) }
-    }
-
-    /// FlowVisor: delays a break nudge until all currently overlapping calendar events end.
-    @Published public var flowDeferDuringMeetings: Bool {
-        didSet { defaults.set(flowDeferDuringMeetings, forKey: Key.flowDeferDuringMeetings) }
-    }
-
     /// SwarmVisor: show what a session actually said — the question it asked, its closing
     /// summary, an error's detail text. Off by default: the sheet floats above every other
     /// window, so session content would otherwise be on screen during a screen share.
@@ -142,16 +124,6 @@ public final class SettingsStore: ObservableObject {
         self.beatAuraEnabled = (defaults.object(forKey: Key.beatAura) as? Bool) ?? true
         self.callAutoPausesMusic =
             (defaults.object(forKey: Key.callAutoPauseMusic) as? Bool) ?? false
-        let storedWorkInterval = defaults.integer(forKey: Key.flowWorkInterval)
-        self.flowWorkIntervalMinutes = [45, 60, 90].contains(storedWorkInterval)
-            ? storedWorkInterval
-            : 60
-        let storedBreakLength = defaults.integer(forKey: Key.flowBreakLength)
-        self.flowBreakLengthMinutes = [3, 5, 10].contains(storedBreakLength)
-            ? storedBreakLength
-            : 5
-        self.flowDeferDuringMeetings =
-            (defaults.object(forKey: Key.flowDeferDuringMeetings) as? Bool) ?? true
         self.swarmShowsMessages =
             (defaults.object(forKey: Key.swarmShowMessages) as? Bool) ?? false
         self.swarmJumpHotKeyEnabled =

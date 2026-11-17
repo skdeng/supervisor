@@ -327,8 +327,8 @@ public final class NotchEngine: ObservableObject {
     /// effectively unchanged so it can't feed back into a layout loop.
     ///
     /// `hover.refresh()` is load-bearing. `HoverMonitor` re-evaluates only on
-    /// a mouse move or an explicit refresh, and an inline peek arrives precisely when the cursor is
-    /// stationary — a break nudge fires at a micro-pause, by construction. Without the refresh,
+    /// a mouse move or an explicit refresh, and an inline peek can arrive while the cursor is
+    /// stationary — a banner is raised by a background event, not by the cursor. Without the refresh,
     /// `isHovered` keeps whatever value the last mouse move left: a pill that swelled under a
     /// resting cursor and then retracted would stay detached indefinitely, because no further event
     /// would ever tell the monitor the cursor is now outside. Recursion is bounded by the epsilon
@@ -592,7 +592,7 @@ public final class NotchEngine: ObservableObject {
     /// How far past the notch strip an active peek reaches, for sizing the regions that must
     /// contain it. A below-notch banner adds its own fixed strip plus an aiming margin. An inline
     /// peek adds no second row — it swells the strip itself — so only the strip's growth beyond
-    /// the bare notch counts, and an indefinitely-held nudge leaves no click-swallowing band under
+    /// the bare notch counts, and an indefinitely-held banner leaves no click-swallowing band under
     /// the pill.
     private func peekHeightExtension(notchStripHeight: CGFloat) -> CGFloat {
         guard hasActivePeekBanner else { return 0 }

@@ -122,8 +122,8 @@ A single morphing surface, driven by a small state machine, that modules feed co
   **appears or disappears** (which changes pill size/layout) — internal value changes inside an
   already-shown compact view update automatically via `@ObservedObject`.
 - **`App/ModuleRegistry.swift`** — THE single place modules are wired in (`allModules()`).
-  Array order is irrelevant; modules sort by `order`. Currently lists 9 modules
-  (Media, Calendar, Reminders, FileShelf, Flow, SwarmVisor, ProVisor, Battery, AI Usage).
+  Array order is irrelevant; modules sort by `order`. Currently lists 8 modules
+  (Media, Calendar, Reminders, FileShelf, SwarmVisor, ProVisor, Battery, AI Usage).
 - **`Core/HoverMonitor.swift`** — hover detection through a global mouse-moved monitor, which
   wakes the process on every cursor movement anywhere on screen; its handler reads the position
   the event already carries, per the file's doc comment.
@@ -221,7 +221,7 @@ Hover growth reaches the inline pill only through `surfaceEdgePad` and the colum
 an added `hoverWidthPad`. Width is clamped to `NotchEngine.collapsedWidthLimit` (the fixed canvas
 minus 8pt), and `NotchRootView` reports the laid-out width and strip height to the engine
 (`reportCollapsedSurface`), which sizes the hit-test and hover rects from them and re-runs
-`HoverMonitor.refresh()` — a nudge arrives at a micro-pause with the cursor stationary, so absent
+`HoverMonitor.refresh()` — a banner can arrive with the cursor stationary, so absent
 that refresh no mouse event would re-evaluate hover once the pill retracts and it would stay
 detached.
 
@@ -737,7 +737,7 @@ names below are the code paths.
   devices excluded. The ad-hoc HUD says **On a call** and omits the event title, Join, and dismiss;
   a scheduled meeting wins when both signals apply, and mic auto-restore covers either call type.
   Any surfaced meeting can be dismissed from its agenda row or Meeting HUD; the occurrence is
-  excluded everywhere, including FlowVisor's meeting deferral. Dismissals live in memory in
+  excluded everywhere. Dismissals live in memory in
   `MeetingDismissalStore` (`Services/Meetings/`), keyed by event ID plus start time and pruned when
   the meeting ends; an **N dismissed** agenda footer lists them for one-tap restore and keeps the
   section visible when every meeting is dismissed. The agenda shows three upcoming meetings and
@@ -782,27 +782,6 @@ names below are the code paths.
   Untrusted Input). Drag-out, Quick Look, and thumbnails via `FileShelfStore`, `ThumbnailService`,
   `QuickLookController`, `FileActionService`; agent runner + live-operation model in
   `Services/AgentDispatch` and `Services/Operations`.
-- **Flow → "FlowVisor"** (`Modules/Flow`) — an activity-aware break coach. Derives a work/break
-  state machine from ONE permissionless signal: seconds since the last user input
-  (`CGEventSource.secondsSinceLastEventType`, content-blind, no TCC). At the configured work
-  interval (default 60 min) of continuous work it peeks a nudge — but only at a micro-pause (≥10 s
-  idle, so never mid-keystroke) and, when `flow.deferDuringMeetings` is on, only after any in-progress
-  meeting ends (`FlowTracker` makes its own EventKit query reading **only** event start/end dates);
-  dismissed meetings and all-day events do not defer nudges.
-  Breaks are forgiving: ≥180 s away is a break and silently resets the clock, whether nudged or
-  spontaneous — someone who naturally breaks never hears from it; a nudged break earns a brief
-  "recharged" compact ack on return. The nudge presents as a banner carrying the heads-down message
-  and a one-tap Take action — extending below the notch over a physical cutout, riding inside the
-  widened pill on a screen without one; the banner holds (an indefinite peek,
-  `requestPeek(.infinity)`) until Take / Snooze / Skip or a spontaneous break resolves it.
-  Compact: a break countdown ring or the ack — nothing otherwise; a work session in progress has
-  no pill presence at all (the banner is the only work-time surfacing).
-  Expanded: Take 5 / Snooze 10 / Skip in the final stretch, and a *today*
-  rhythm strip of the session-local work/break segments. Timer discipline per the idle-CPU rule: a
-  single rearming deadline task fires only at the next real boundary (60 s sampler, tightening to
-  5 s only while a nudge waits for a micro-pause) and is torn down entirely on screen lock / system
-  sleep — that suspended time counts as break credit. Settings: `flow.workInterval` (45/60/90),
-  `flow.breakLength` (3/5/10), `flow.deferDuringMeetings`.
 - **Swarm → "SwarmVisor"** (`Modules/Swarm`) — quiet-until-blocked triage for concurrent Claude
   Code sessions. The recursive session-registry watcher is the sole truth for live
   busy/idle/waiting state; hook-socket events provide only low-latency refreshes, validated tty
@@ -833,7 +812,7 @@ names below are the code paths.
   only signal that the user looked. There is no other pill
   presence and no attention count. Only a genuinely new session PID announces — an entry
   rewritten in place (a late tty, refreshed metadata) updates the toast where it stands.
-  SwarmVisor's `order` of 15 puts its toast ahead of FlowVisor's break nudge when both want the
+  SwarmVisor's `order` of 15 puts its toast ahead of ProVisor's banner when both want the
   banner. Opening the sheet or emptying the queue clears the glow, and an
   already-seen nonempty queue stays quiet until another entry is added. Queue rows (Claude-mark
   led) put blocked sessions first, then most-recent (session PID settling a tie so a retick never
@@ -1329,7 +1308,7 @@ artifacts:
 
 - The app logs lifecycle/state/helper/failure events to unified-log subsystem
   `com.supervisor.SuperVisor` (categories: `engine`, `module`, `swarm`, `calls`, `media`, `usage`,
-  `agentDispatch`, `fileShelf`, `flow`, `provisor`, `sites`) and mirrors notice/error lines to
+  `agentDispatch`, `fileShelf`, `provisor`, `sites`) and mirrors notice/error lines to
   `~/Library/Logs/SuperVisor/SuperVisor.log` (1 MiB rotation, two generations kept). Query it with
   `/usr/bin/log show --predicate 'subsystem == "com.supervisor.SuperVisor"'`.
 - A crash (`fatalError`, force-unwrap, EXC_BAD_ACCESS) writes
