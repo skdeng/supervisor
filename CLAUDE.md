@@ -42,7 +42,13 @@ them.
   `.build/debug/SuperVisor` and run `swift build`. A Unix socket path holds 104 bytes and the
   temporary directory already takes about 50, so tests name their sockets with short folder and
   file names (`ScratchFolder`). Site tests run against `SiteBrowser`'s simulated pages (see
-  `Services/Sites/` under Shared Services).
+  `Services/Sites/` under Shared Services). **`AppLog.install` captures for the whole test
+  process**, and suites run in parallel, so a test that asserts the exact lines logged, or that
+  nothing was logged, fails whenever another suite logs or installs a capture of its own
+  meanwhile; test the decision that leads to the line as a pure function. **Two `async let`
+  children start in no fixed order**, so a test may assert what each call returned but not which
+  ran last, and a bound that tells two outcomes apart sits far from both (15 s against 60 s, not
+  0.5 s against 1 s): the suite runs under load.
 - **`swift build`** alone compiles the binary but does *not* produce the bundle. The bundle is
   required because TCC permission grants (Location, Calendar, Reminders, Accessibility,
   Bluetooth, Full Disk Access) and the now-playing read only persist for a **stable, signed
