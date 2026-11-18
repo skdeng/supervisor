@@ -439,7 +439,7 @@ enum ProVisorCommand {
             prompt: prompt,
             systemPrompt: brief,
             maximumTurns: 80,
-            budget: "2.00",
+            budget: "5.00",
             writableDirectories: passDirectories,
             connectorTools: access.scout,
             mcpConfiguration: bridge?.configurationPath ?? connectorHold,

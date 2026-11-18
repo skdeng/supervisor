@@ -729,7 +729,7 @@ struct ProVisorCommandTests {
             "--no-session-persistence",
             "--tools", "Read,Write,Edit,Glob,Grep,ToolSearch",
             "--max-turns", "80",
-            "--max-budget-usd", "2.00",
+            "--max-budget-usd", "5.00",
             "--append-system-prompt", "BRIEF",
             "--allowedTools",
             "Edit(/proposals/**)", "Edit(/memory/**)", "Edit(/followups/**)",

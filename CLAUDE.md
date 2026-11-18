@@ -1159,7 +1159,7 @@ names below are the code paths.
   - **A scouting pass** runs every `provisor.scoutHours` (0 = only when asked, 1, 3, 6 default,
     24) or from **Look Now** in Settings. One sleeping task waits for the next pass; it is dropped
     on system sleep and re-armed on wake, never fires sooner than 45 s after launch or wake, and
-    backs off 15 min after a failed pass (`ProVisorSchedule`). A pass is capped at 80 turns, $2,
+    backs off 15 min after a failed pass (`ProVisorSchedule`). A pass is capped at 80 turns, $5,
     and 20 minutes; one cut off by a limit keeps the proposals it had already written.
   - **A proposal** is `title` / `why` / `action` / `kind` / `created` / optional `expires`,
     written by the agent; in place of `action` it may carry `options`, one to three
