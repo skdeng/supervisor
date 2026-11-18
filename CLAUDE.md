@@ -54,15 +54,19 @@ them.
   0.5 s against 1 s): the suite runs under load. **A run that ends with status 0 and no
   `Test run with N tests` line stopped early and proved nothing.** The test process's main
   thread sits in one outer `CFRunLoopRun`, and the Swift runtime calls `exit(0)` the moment it
-  returns. AppKit's display cycle wakes its event loop with `CFRunLoopStop`, and once a test
-  has run `NSApplication.run()` (`Stepper` in `ProVisorReviewWindowTests`) a wake that fires
-  after `run()` has returned stops the outer loop instead, and every test still waiting on the
-  main actor goes unreported. The stepper closes its window and lets the loop go idle before
-  stopping it, which makes this rarer and does not end it; run the suite again, or with
-  `--no-parallel`, when the summary line is missing. A
+  returns, with every test still waiting on the main actor unreported. **Never enter
+  `NSApplication.run()` in the process that runs the suite**: once AppKit's event loop has run
+  there, its display cycle wakes the main run loop with `CFRunLoopStop` whenever a window has
+  work, and with the event loop gone that stops the outer loop. A check that needs the
+  application's own loop runs in a child process, as an exit test
+  (`#expect(processExitsWith:)`), and ends the child from inside the loop with a status of
+  its own, so a child that stopped early fails the test; expectations recorded in the child
+  reach the parent (`ProVisorReviewWindowTests`). A
   run can also die on an uncaught `NSInternalInconsistencyException` thrown by
   `STScreenTimeConfigurationObserver` while a `WKWebView` deallocates, which is the system's
-  frameworks and leaves a `swiftpm-testing-helper` crash report.
+  frameworks and leaves a `swiftpm-testing-helper` crash report. **Run the suite with the
+  display awake**: with it off, the tests that load pages in a web view fail by the hundred
+  and a run takes about half an hour.
 - **`swift build`** alone compiles the binary but does *not* produce the bundle. The bundle is
   required because TCC permission grants (Location, Calendar, Reminders, Photos, Accessibility,
   Bluetooth, Full Disk Access) and the now-playing read only persist for a **stable, signed
