@@ -171,6 +171,9 @@ final class BundleReplacementMonitor {
         waits += 1
     }
 
+    /// Whether a wait is under way: the bundle changed and what to do about it is not settled.
+    var isWaiting: Bool { pending != nil }
+
     /// One wait runs at a time. A change that arrives during it is seen by its next look and
     /// gives the bundle its full time to become whole again.
     func bundleChanged() {

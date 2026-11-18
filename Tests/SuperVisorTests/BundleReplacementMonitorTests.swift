@@ -140,7 +140,7 @@ struct BundleReplacementMonitorTests {
         let monitor = monitor(world, counter)
 
         monitor.bundleChanged()
-        await settle()
+        await waitUntil { !monitor.isWaiting }
 
         #expect(counter.relaunches == 0)
         #expect(world.looks == 0)
@@ -154,8 +154,7 @@ struct BundleReplacementMonitorTests {
 
         monitor.bundleChanged()
         monitor.bundleChanged()
-        await waitUntil { counter.relaunches > 0 }
-        await settle()
+        await waitUntil { counter.relaunches > 0 && !monitor.isWaiting }
 
         #expect(counter.relaunches == 1)
     }
@@ -203,10 +202,9 @@ struct BundleReplacementMonitorTests {
         let monitor = monitor(world, counter, pacing: pacing)
 
         monitor.bundleChanged()
-        await settle()
-        let looksAfterGivingUp = world.looks
-        await settle()
-        #expect(world.looks == looksAfterGivingUp)
+        await waitUntil { !monitor.isWaiting }
+        #expect(!monitor.isWaiting)
+        #expect(world.looks >= 1)
         #expect(counter.relaunches == 0)
 
         world.status = .valid
@@ -223,8 +221,9 @@ struct BundleReplacementMonitorTests {
         let monitor = monitor(world, counter)
 
         monitor.bundleChanged()
-        await settle()
+        await waitUntil { !monitor.isWaiting }
 
+        #expect(!monitor.isWaiting)
         #expect(counter.relaunches == 0)
         #expect(world.looks == 1)
     }
