@@ -1949,6 +1949,18 @@ struct ProVisorSettingsTests {
         #expect(defaults.bool(forKey: "provisor.readPhotoPlaces"))
     }
 
+    @Test("A removal that fails in an app replaced on disk says to close the window, since that is what lets it reopen")
+    func removalFailureMessages() {
+        #expect(
+            ProVisorSitesView.removalFailureMessage(siteName: "Bank", appIsIntact: true)
+                == "Couldn't remove Bank. Try again."
+        )
+        #expect(
+            ProVisorSitesView.removalFailureMessage(siteName: "Bank", appIsIntact: false)
+                == "Couldn't remove Bank: SuperVisor was updated and has to reopen first. Close this window, wait a few seconds, and try again."
+        )
+    }
+
     @Test("Settings says why reading sites, texts, and photo places is paused, and says nothing when it is not")
     func pauseNotices() {
         #expect(ProVisorSettingsView.pauseNotice(for: nil) == nil)

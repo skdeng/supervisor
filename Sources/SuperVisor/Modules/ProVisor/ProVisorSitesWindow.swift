@@ -151,11 +151,24 @@ struct ProVisorSitesView: View {
             .controlSize(.small)
 
             if removalFailures.contains(site.id) {
-                Text("Couldn't remove \(site.name). Try again.")
-                    .font(.callout)
-                    .foregroundStyle(.red)
+                Text(Self.removalFailureMessage(
+                    siteName: site.name,
+                    appIsIntact: PeerIdentity.runningCodeIsIntact()
+                ))
+                .font(.callout)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    /// What a failed removal says. An app whose bundle was replaced under it is refused by the
+    /// Keychain until it relaunches, and it relaunches only once its windows are closed, so the
+    /// sentence says to close this one.
+    static func removalFailureMessage(siteName: String, appIsIntact: Bool) -> String {
+        appIsIntact
+            ? "Couldn't remove \(siteName). Try again."
+            : "Couldn't remove \(siteName): SuperVisor was updated and has to reopen first. Close this window, wait a few seconds, and try again."
     }
 
     @ViewBuilder
