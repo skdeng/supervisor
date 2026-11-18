@@ -39,9 +39,19 @@ final class BundleReplacementMonitor {
         var agentRuns = 0
         var hasOpenWindow = false
         var sheetIsOpen = false
-        var isHeld = false
+        /// The modules holding something a relaunch would lose (`RelaunchHolds`).
+        var holders: Set<String> = []
 
-        var isBusy: Bool { agentRuns > 0 || hasOpenWindow || sheetIsOpen || isHeld }
+        var isBusy: Bool { !waitingOn.isEmpty }
+
+        /// What is in progress, by name, for the log.
+        var waitingOn: [String] {
+            var names: [String] = []
+            if agentRuns > 0 { names.append("agent run") }
+            if hasOpenWindow { names.append("open window") }
+            if sheetIsOpen { names.append("open sheet") }
+            return names + holders.sorted().map { "\($0) hold" }
+        }
     }
 
     /// `bundle` is nil while the bundle has not been looked at, which it is not while busy.
@@ -175,7 +185,7 @@ final class BundleReplacementMonitor {
     }
 
     private func followThrough() async {
-        var saidWaiting = false
+        var saidWaitingOn: String?
         while !Task.isCancelled {
             let (intactCheck, statusCheck, url) = (runningCodeIsIntact, bundleStatus, bundleURL)
             let intact = await Task.detached(priority: .utility) { intactCheck() }.value
@@ -194,9 +204,10 @@ final class BundleReplacementMonitor {
             case .nothing:
                 return
             case .waitUntilIdle:
-                if !saidWaiting {
-                    AppLog.notice(.engine, "the bundle on disk was replaced; relaunching once nothing is in progress")
-                    saidWaiting = true
+                let waitingOn = activity().waitingOn.joined(separator: ", ")
+                if waitingOn != saidWaitingOn {
+                    AppLog.notice(.engine, "the bundle on disk was replaced; relaunching after: \(waitingOn)")
+                    saidWaitingOn = waitingOn
                 }
                 try? await Task.sleep(for: pacing.idleRecheck)
             case .waitForBundle:

@@ -34,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 $0.styleMask.contains(.titled) && ($0.isVisible || $0.isMiniaturized)
             },
             sheetIsOpen: self?.engine.state == .expanded,
-            isHeld: RelaunchHolds.shared.isHeld
+            holders: RelaunchHolds.shared.owners
         )
     }
 

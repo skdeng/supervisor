@@ -1457,11 +1457,14 @@ at runtime.
   descriptor watch would be left on the removed file; nothing else runs while the bundle is
   intact. **"Nothing in progress" is an agent run, an ordinary window open or minimized, the
   sheet open, or a module's hold** (`RelaunchHolds`): modules hold while they keep something a
-  relaunch would lose or undo, which is files on the shelf (in memory, and a generated one is
-  deleted at the next launch), a call in progress (quitting restores a microphone the notch
+  relaunch would lose or undo, which is what the person put on the shelf or the app made for them
+  (in memory, and a generated file is deleted at the next launch; screenshots stage
+  themselves and stay in the screenshot folder, so a shelf of only those is no hold, or it
+  would seldom be empty), a call in progress (quitting restores a microphone the notch
   muted), and music the app paused for a call. State the app reads back at launch (the
   sessions SwarmVisor lists, the sites ProVisor waits on) is no hold. The bundle is validated
-  only once the app is idle, because validating reads every file in it. **The relaunch is a
+  only once the app is idle, because validating reads every file in it; while it waits the
+  `engine` log names what it waits on (`relaunching after: open window, fileshelf hold`). **The relaunch is a
   shell that outlives the app** (`relaunchCommand`): it waits for the process to exit, waits
   for the bundle to verify against the app's requirement again (another build may have begun
   since the check, and a half-built bundle would launch as an unsigned copy), and opens it

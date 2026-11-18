@@ -42,10 +42,14 @@ final class FileShelfModule: NotchModule, ObservableObject {
             context?.setNeedsCompactRefresh()
         }
         // Staged files live in memory, and a generated one is deleted from disk at the next
-        // launch, so a relaunch waits for the shelf to empty and its operations to end.
+        // launch, so a relaunch waits for what the person put on the shelf, what the app made
+        // for them, and any running operation. Screenshots stage themselves and stay in the
+        // screenshot folder, so a shelf that holds only those is no reason to wait: it would
+        // seldom be empty.
         holdCancellable = store.$files.combineLatest(store.$activeOperationCount)
             .sink { [moduleID] files, operations in
-                RelaunchHolds.shared.set(!files.isEmpty || operations > 0, for: moduleID)
+                let holdsWork = files.contains { $0.source != .screenshot }
+                RelaunchHolds.shared.set(holdsWork || operations > 0, for: moduleID)
             }
         store.beginActivation()
     }

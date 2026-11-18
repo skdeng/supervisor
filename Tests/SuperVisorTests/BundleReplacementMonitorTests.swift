@@ -17,7 +17,11 @@ struct BundleReplacementMonitorTests {
         #expect(Activity(agentRuns: 1).isBusy)
         #expect(Activity(hasOpenWindow: true).isBusy)
         #expect(Activity(sheetIsOpen: true).isBusy)
-        #expect(Activity(isHeld: true).isBusy)
+        #expect(Activity(holders: ["fileshelf"]).isBusy)
+        #expect(
+            Activity(agentRuns: 2, hasOpenWindow: true, sheetIsOpen: true, holders: ["media", "calendar"]).waitingOn
+                == ["agent run", "open window", "open sheet", "calendar hold", "media hold"]
+        )
     }
 
     @Test("The app relaunches only when its code was replaced, nothing is in progress, and the bundle is whole and its own")
@@ -160,7 +164,7 @@ struct BundleReplacementMonitorTests {
     func busyThenIdle() async {
         let (world, counter) = (World(), Counter())
         world.intact = false
-        counter.activity = Activity(isHeld: true)
+        counter.activity = Activity(holders: ["fileshelf"])
         let monitor = monitor(world, counter)
 
         monitor.bundleChanged()
