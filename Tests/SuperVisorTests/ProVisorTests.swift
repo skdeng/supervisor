@@ -1847,6 +1847,46 @@ struct ProVisorSettingsTests {
         )
     }
 
+    @Test("The access row lists the sites and each other source that is switched on")
+    func accessSummary() {
+        #expect(ProVisorSettingsView.accessSummary(siteCount: 0, texts: false, photoPlaces: false) == "Nothing yet")
+        #expect(ProVisorSettingsView.accessSummary(siteCount: 1, texts: false, photoPlaces: false) == "1 site")
+        #expect(ProVisorSettingsView.accessSummary(siteCount: 0, texts: true, photoPlaces: false) == "texts")
+        #expect(
+            ProVisorSettingsView.accessSummary(siteCount: 3, texts: true, photoPlaces: true)
+                == "3 sites, texts, photo places"
+        )
+    }
+
+    @Test("The access row warns while a row under it needs the person")
+    func accessNeedsAttention() {
+        let added = Date(timeIntervalSince1970: 1_800_000_000)
+        let bank = SiteRecord(id: "bank.example.com", name: "Bank", added: added)
+        var clinic = SiteRecord(id: "clinic.example.com", name: "Clinic", added: added)
+        clinic.needsPerson = true
+
+        func needsAttention(
+            sites: [SiteRecord] = [bank],
+            awaiting: Set<String> = [],
+            texts: SiteAccessCenter.TextsStatus = .on,
+            photoPlaces: SiteAccessCenter.PhotoPlacesStatus = .on,
+            paused: Bool = false
+        ) -> Bool {
+            ProVisorSettingsView.accessNeedsAttention(
+                sites: sites, awaiting: awaiting, texts: texts, photoPlaces: photoPlaces, paused: paused
+            )
+        }
+
+        #expect(!needsAttention())
+        #expect(!needsAttention(sites: [], texts: .off, photoPlaces: .off))
+        #expect(needsAttention(sites: [bank, clinic]))
+        #expect(needsAttention(awaiting: ["bank.example.com"]))
+        #expect(needsAttention(texts: .accessDenied))
+        #expect(needsAttention(photoPlaces: .accessNotAsked))
+        #expect(needsAttention(photoPlaces: .accessDenied))
+        #expect(needsAttention(paused: true))
+    }
+
     @Test("A failed pass is described in the app's words, never the agent's or its process's")
     @MainActor
     func failureSentences() {

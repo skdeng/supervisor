@@ -1255,7 +1255,14 @@ names below are the code paths.
     CLI refused means running the CLI by hand. What the agent says when a scouting or
     follow-up pass ends is kept nowhere: the protocol tells it, over whatever a seeded
     charter still says about a closing summary, that its notes under `memory/` are the
-    record of a run, and **Open Folder** is how the user reads them. The pane also holds a **Sites** row with a count ("2 sites, 1 needs you",
+    record of a run, and **Open Folder** is how the user reads them. What ProVisor may read sits under one
+    collapsible **Access** row, closed when Settings opens. **The row itself says what a
+    closed group would hide**: what is granted ("1 site, texts, photo places",
+    `accessSummary`), or **Needs attention** while a site waits for a sign-in, a source is
+    switched on that macOS will not let the app read, or reading is paused
+    (`accessNeedsAttention`). The refreshes of those statuses hang on that row, which is
+    mounted open or closed; the rows under it are unmounted while it is closed. Under it are a
+    **Sites** row with a count ("2 sites, 1 needs you",
     `ProVisorSettingsView.sitesSummary`) and **Manage Sites…**, the **Read my texts** toggle
     with a Full Disk Access row that opens System Settings while a read fails, the **Read
     where my photos were taken** toggle, a line naming the condition that pauses reading

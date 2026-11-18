@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 /// ProVisor's options: how often it looks, a way to make it look now, how the last pass ended,
-/// a door into the folder holding its brief and its tool access, a door into the window where
-/// its sites are managed, and what else it may read.
+/// a door into the folder holding its brief and its tool access, and a group that folds away
+/// what it may read: the door into the window where its sites are managed, and the other sources.
 ///
 /// **Nothing here is the agent's account of a pass.** What the agent says is drawn from mail
 /// anyone can send, so a failed pass is described by `ProVisorCenter.failureSentence` in the
@@ -13,6 +13,8 @@ struct ProVisorSettingsView: View {
     @ObservedObject var settings: SettingsStore
     @ObservedObject var center: ProVisorCenter
     @ObservedObject var sites: SiteAccessCenter
+
+    @State private var showsAccess = false
 
     var body: some View {
         Picker("Look for ideas", selection: $settings.provisorScoutHours) {
@@ -54,46 +56,142 @@ struct ProVisorSettingsView: View {
                 .foregroundStyle(.secondary)
         }
 
-        siteList
+        DisclosureGroup(isExpanded: $showsAccess) {
+            // A disclosure group lays its content out as one form row, so the settings under
+            // it carry their own spacing.
+            VStack(alignment: .leading, spacing: 12) {
+                siteList
 
-        Toggle("Offer to keep passwords", isOn: $settings.provisorOffersPasswords)
-        Text("After you sign in to a site yourself, SuperVisor can offer to keep the password you typed, in the Keychain, so it can sign in again by itself. It reads what you type into a site's user name and password fields while its sign-in window is open.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
+                accessSetting("After you sign in to a site yourself, SuperVisor can offer to keep the password you typed, in the Keychain, so it can sign in again by itself. It reads what you type into a site's user name and password fields while its sign-in window is open.") {
+                    Toggle("Offer to keep passwords", isOn: $settings.provisorOffersPasswords)
+                }
 
-        Toggle(
-            "Read my texts",
-            isOn: Binding(get: { sites.textsEnabled }, set: { sites.setTextsEnabled($0) })
-        )
-        Text("ProVisor can read your recent texts; sign-in codes in them are hidden from it. SuperVisor also uses texted codes to sign in to sites that send them. Needs Full Disk Access.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
+                accessSetting("ProVisor can read your recent texts; sign-in codes in them are hidden from it. SuperVisor also uses texted codes to sign in to sites that send them. Needs Full Disk Access.") {
+                    Toggle(
+                        "Read my texts",
+                        isOn: Binding(get: { sites.textsEnabled }, set: { sites.setTextsEnabled($0) })
+                    )
+                } warning: {
+                    if sites.textsStatus == .accessDenied {
+                        accessRow("Full Disk Access is off, so texts can't be read.", button: "Open System Settings") {
+                            SiteAccessCenter.openFullDiskAccessSettings()
+                        }
+                    }
+                }
 
-        if sites.textsStatus == .accessDenied {
-            accessRow("Full Disk Access is off, so texts can't be read.", button: "Open System Settings") {
-                SiteAccessCenter.openFullDiskAccessSettings()
+                accessSetting("ProVisor can read the date and exact coordinates of each photo in your Photos library, which shows where you have been. It never sees a photo. Needs access to Photos.") {
+                    Toggle(
+                        "Read where my photos were taken",
+                        isOn: Binding(get: { sites.photoPlacesEnabled }, set: { sites.setPhotoPlacesEnabled($0) })
+                    )
+                } warning: {
+                    switch sites.photoPlacesStatus {
+                    case .off, .on:
+                        EmptyView()
+                    case .accessNotAsked:
+                        accessRow("SuperVisor hasn't been allowed to read Photos yet.", button: "Allow…") {
+                            sites.requestPhotoAccess()
+                        }
+                    case .accessDenied:
+                        accessRow("Photos access is off, so photo locations can't be read.", button: "Open System Settings") {
+                            SiteAccessCenter.openPhotosAccessSettings()
+                        }
+                    }
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            accessLabel
+        }
+    }
+
+    /// The row that opens the access settings. It carries what is granted, or a warning when
+    /// something under it needs the person, so a closed group hides neither.
+    ///
+    /// The refreshes hang here because this row is mounted whether the group is open or
+    /// closed; on a row inside the group they would stop while it is closed and the warning
+    /// would go stale.
+    private var accessLabel: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("Access")
+            Spacer(minLength: 8)
+            if accessNeedsAttention {
+                Label("Needs attention", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+            } else {
+                Text(Self.accessSummary(
+                    siteCount: sites.sites.count,
+                    texts: sites.textsEnabled,
+                    photoPlaces: sites.photoPlacesEnabled
+                ))
+                .foregroundStyle(.secondary)
             }
         }
+        .onAppear { refresh() }
+        // Full Disk Access and access to Photos are granted in System Settings, so both
+        // statuses are read again on coming back to Settings.
+        .onWindowBecomesKey { refresh() }
+        .onChange(of: sites.sites) { center.refreshSiteTools() }
+        .onChange(of: sites.textsEnabled) { center.refreshSiteTools() }
+        .onChange(of: sites.photoPlacesEnabled) { center.refreshSiteTools() }
+    }
 
-        Toggle(
-            "Read where my photos were taken",
-            isOn: Binding(get: { sites.photoPlacesEnabled }, set: { sites.setPhotoPlacesEnabled($0) })
+    private var accessNeedsAttention: Bool {
+        Self.accessNeedsAttention(
+            sites: sites.sites,
+            awaiting: sites.awaitingSignIn,
+            texts: sites.textsStatus,
+            photoPlaces: sites.photoPlacesStatus,
+            paused: pauseNotice != nil
         )
-        Text("ProVisor can read the date and exact coordinates of each photo in your Photos library, which shows where you have been. It never sees a photo. Needs access to Photos.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
+    }
 
-        switch sites.photoPlacesStatus {
-        case .off, .on:
-            EmptyView()
-        case .accessNotAsked:
-            accessRow("SuperVisor hasn't been allowed to read Photos yet.", button: "Allow…") {
-                sites.requestPhotoAccess()
-            }
-        case .accessDenied:
-            accessRow("Photos access is off, so photo locations can't be read.", button: "Open System Settings") {
-                SiteAccessCenter.openPhotosAccessSettings()
-            }
+    /// What the access row says is granted: the number of sites, then each other source that
+    /// is switched on.
+    static func accessSummary(siteCount: Int, texts: Bool, photoPlaces: Bool) -> String {
+        var parts: [String] = []
+        if siteCount > 0 { parts.append(siteCount == 1 ? "1 site" : "\(siteCount) sites") }
+        if texts { parts.append("texts") }
+        if photoPlaces { parts.append("photo places") }
+        return parts.isEmpty ? "Nothing yet" : parts.joined(separator: ", ")
+    }
+
+    /// Whether a row under the access group is asking for the person: a site waiting for a
+    /// sign-in, a source switched on that macOS will not let the app read, or reading paused.
+    static func accessNeedsAttention(
+        sites: [SiteRecord],
+        awaiting: Set<String>,
+        texts: SiteAccessCenter.TextsStatus,
+        photoPlaces: SiteAccessCenter.PhotoPlacesStatus,
+        paused: Bool
+    ) -> Bool {
+        paused
+            || texts == .accessDenied
+            || photoPlaces == .accessNotAsked
+            || photoPlaces == .accessDenied
+            || sites.contains { SiteAccessCenter.SiteStatus($0, awaiting: awaiting) == .needsYou }
+    }
+
+    /// Why reading is paused, when something is granted for a pass to read.
+    private var pauseNotice: String? {
+        guard !sites.sites.isEmpty || sites.textsEnabled || sites.photoPlacesEnabled else { return nil }
+        return Self.pauseNotice(for: center.siteToolsUnavailable)
+    }
+
+    /// One setting under the access group: its control, what it lets the app read, and a
+    /// warning while that cannot be read.
+    private func accessSetting(
+        _ explanation: String,
+        @ViewBuilder control: () -> some View,
+        @ViewBuilder warning: () -> some View = { EmptyView() }
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            control()
+            Text(explanation)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            warning()
         }
     }
 
@@ -119,7 +217,7 @@ struct ProVisorSettingsView: View {
 
     /// How many sites are granted, with the way into the window that manages them.
     private var siteList: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("Sites")
                 Spacer(minLength: 8)
@@ -133,21 +231,13 @@ struct ProVisorSettingsView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if !sites.sites.isEmpty || sites.textsEnabled || sites.photoPlacesEnabled,
-               let pause = Self.pauseNotice(for: center.siteToolsUnavailable) {
-                Text(pause)
+            if let pauseNotice {
+                Text(pauseNotice)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .onAppear { refresh() }
-        // Full Disk Access and access to Photos are granted in System Settings, so both
-        // statuses are read again on coming back to Settings.
-        .onWindowBecomesKey { refresh() }
-        .onChange(of: sites.sites) { center.refreshSiteTools() }
-        .onChange(of: sites.textsEnabled) { center.refreshSiteTools() }
-        .onChange(of: sites.photoPlacesEnabled) { center.refreshSiteTools() }
     }
 
     /// The count beside the Sites row: how many sites are granted, and how many of them are
