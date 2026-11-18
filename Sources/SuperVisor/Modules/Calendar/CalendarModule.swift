@@ -100,6 +100,7 @@ final class CalendarModule: NotchModule, ObservableObject {
         if weMuted && mic.isMuted { mic.setMuted(false) }
         wasInCallContext = false
         weMuted = false
+        RelaunchHolds.shared.set(false, for: moduleID)
         SectionUrgencyCenter.shared.set(false, for: moduleID)
         mic.stop()
         audioOutput.stop()
@@ -156,6 +157,8 @@ final class CalendarModule: NotchModule, ObservableObject {
             mic.setMuted(false)
             weMuted = false
         }
+        // Quitting during a call would restore a microphone this module muted.
+        RelaunchHolds.shared.set(inCallContext || weMuted, for: moduleID)
     }
 
     // MARK: Actions

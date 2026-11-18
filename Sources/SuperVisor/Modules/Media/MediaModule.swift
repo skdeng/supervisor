@@ -154,7 +154,10 @@ final class MediaModule: NotchModule, ObservableObject {
         var phase: AutoPausePhase
     }
 
-    private var autoPauseClaim: AutoPauseClaim?
+    private var autoPauseClaim: AutoPauseClaim? {
+        // The claim is what resumes the music after the call, and it lives in memory.
+        didSet { RelaunchHolds.shared.set(autoPauseClaim != nil, for: moduleID) }
+    }
 
     init() {
         self.bridge = MediaRemoteBridge()
@@ -226,6 +229,7 @@ final class MediaModule: NotchModule, ObservableObject {
     }
 
     func deactivate() {
+        RelaunchHolds.shared.set(false, for: moduleID)
         SheetTakeoverCenter.shared.dismiss(id: Self.sessionsTakeoverID)
         stream.stop()
         stream.onCapture = nil

@@ -16,13 +16,17 @@ them.
 - **`./make-app.sh --release`** — builds, bundles, and signs `build/SuperVisor.app`.
   (`--run` also launches it; drop `--release` for a debug build.) It prefers Developer ID
   Application, then Apple Development, and falls back to ad-hoc signing. Set
-  `SIGNING_IDENTITY` to override selection. **Building over a running app breaks that app
-  until it is relaunched**: the process keeps running the old code while the bundle on disk
-  is the new one, and anything that checks the process against its bundle refuses it. The
-  bridge helper is started from the bundle on disk and makes that check, so every ProVisor
-  pass loses its site, text, and photo-place tools while each pass still finishes normally.
-  Quit and reopen the app after every build (`codesign --verify <pid>` answers "the code on
-  disk does not match what is running" while it is stale).
+  `SIGNING_IDENTITY` to override selection. **Building over a running app leaves that app on the old code**: the process keeps running
+  what it was launched with while the bundle on disk is the new build, and anything that
+  checks the process against its bundle refuses it. The bridge helper is started from the
+  bundle on disk and makes that check, so every ProVisor pass would lose its site, text, and
+  photo-place tools while still finishing normally. **The app therefore relaunches itself**
+  (`App/BundleReplacementMonitor.swift`): it watches its bundle and, once the running code
+  is no longer the code on disk, waits until nothing is in progress and the bundle is whole
+  and signed to its own designated requirement, then quits and reopens. An ad-hoc build is
+  never relaunched into (its requirement names one exact build), so after one, quit and
+  reopen by hand; `codesign --verify <pid>` answers "the code on disk does not match what is
+  running" while an app is out of date.
 - **`open build/SuperVisor.app`** — launch. It is an **`LSUIElement`** menu-bar agent
   (`.accessory` activation policy): no Dock icon, no main window. A status-bar item
   (`visionpro` glyph) hosts the **Settings…** and **Quit** menu. **The app still installs a
@@ -1443,6 +1447,21 @@ at runtime.
   queue, so neither may be called from it. `sun_path` holds 104 bytes: a home directory long
   enough to overrun it fails the bind (`pathTooLong`, logged), the bridge helper takes
   `SUPERVISOR_BRIDGE_SOCKET` as an override, and tests keep their socket paths short.
+- **`App/BundleReplacementMonitor.swift` and `Services/Process/RelaunchHolds.swift`** — the
+  relaunch after the bundle is replaced (see Build & Run). One file-system event stream
+  follows the bundle's path, since a build removes the bundle and assembles it again and a
+  descriptor watch would be left on the removed file; nothing else runs while the bundle is
+  intact. **"Nothing in progress" is an agent run, an ordinary window open or minimized, the
+  sheet open, or a module's hold** (`RelaunchHolds`): modules hold while they keep something a
+  relaunch would lose or undo, which is files on the shelf (in memory, and a generated one is
+  deleted at the next launch), a call in progress (quitting restores a microphone the notch
+  muted), and music the app paused for a call. State the app reads back at launch (the
+  sessions SwarmVisor lists, the sites ProVisor waits on) is no hold. The bundle is validated
+  only once the app is idle, because validating reads every file in it. **The relaunch is a
+  shell that outlives the app** (`relaunchCommand`): it waits for the process to exit, waits
+  for the bundle to verify against the app's requirement again (another build may have begun
+  since the check, and a half-built bundle would launch as an unsigned copy), and opens it
+  unless a copy is already running.
 - **`Services/Process/`** — `ProcessResponsibility` (the disclaim call by symbol, reporting when
   it is absent so a caller can refuse to proceed), `DisclaimedExec` (`--exec-disclaimed`),
   `ChildEnvironment` (the fixed environment), and `ProcessAncestry` (a process's parent and

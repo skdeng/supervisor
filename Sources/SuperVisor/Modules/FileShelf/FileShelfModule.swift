@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// FileShelf stages dropped files, screenshots, and generated results in one local inbox.
@@ -8,6 +9,7 @@ final class FileShelfModule: NotchModule, ObservableObject {
     let order = 40
 
     private let store = FileShelfStore()
+    private var holdCancellable: AnyCancellable?
     private var context: NotchContext?
 
     /// True while a file is being dragged onto the notch, so the shelf surfaces its drop UI
@@ -39,10 +41,18 @@ final class FileShelfModule: NotchModule, ObservableObject {
         store.operations.onPresenceChanged = { [weak context] in
             context?.setNeedsCompactRefresh()
         }
+        // Staged files live in memory, and a generated one is deleted from disk at the next
+        // launch, so a relaunch waits for the shelf to empty and its operations to end.
+        holdCancellable = store.$files.combineLatest(store.$activeOperationCount)
+            .sink { [moduleID] files, operations in
+                RelaunchHolds.shared.set(!files.isEmpty || operations > 0, for: moduleID)
+            }
         store.beginActivation()
     }
 
     func deactivate() {
+        holdCancellable = nil
+        RelaunchHolds.shared.set(false, for: moduleID)
         store.endActivation()
         store.onCompactPresenceChanged = nil
         store.onDropPeek = nil

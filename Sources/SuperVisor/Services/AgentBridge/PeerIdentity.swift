@@ -49,8 +49,53 @@ enum PeerIdentity {
         return SecCodeCheckValidity(code, [], nil) == errSecSuccess
     }
 
+    /// What a bundle on disk is, to this app.
+    enum BundleStatus: Equatable, Sendable {
+        /// Whole, its nested code included, and signed to this app's own requirement.
+        case valid
+        /// Not a whole signed bundle: one a build has not finished assembling or signing.
+        case incomplete
+        /// Whole, and signed to some other requirement: another signer, or an ad-hoc build,
+        /// whose requirement names one exact build.
+        case otherSigner
+    }
+
+    static func bundleStatus(at url: URL) -> BundleStatus {
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode) == errSecSuccess,
+              let staticCode
+        else { return .incomplete }
+        let flags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSCheckNestedCode)
+        guard SecStaticCodeCheckValidity(staticCode, flags, nil) == errSecSuccess else {
+            return .incomplete
+        }
+        guard let requirement = ownRequirement,
+              SecStaticCodeCheckValidity(staticCode, [], requirement) == errSecSuccess
+        else { return .otherSigner }
+        return .valid
+    }
+
+    /// Touches `ownRequirement`, which is resolved on its first use in the process and never
+    /// again. Called at launch, it makes that first use happen while the code on disk is still
+    /// the code that was launched.
+    static func resolveOwnRequirement() {
+        _ = ownRequirement
+    }
+
+    /// This app's designated requirement as text, in the form `codesign -R` reads.
+    static var ownRequirementText: String? {
+        guard let requirement = ownRequirement else { return nil }
+        var text: CFString?
+        guard SecRequirementCopyString(requirement, [], &text) == errSecSuccess, let text else {
+            return nil
+        }
+        return text as String
+    }
+
     /// Resolved once. A `SecRequirement` is an immutable Core Foundation object, safe to share
-    /// across threads.
+    /// across threads. **It is read from the bundle on disk** (the running code's static code),
+    /// so a first use after the bundle was replaced yields the replacement's requirement, not
+    /// the launched app's; `resolveOwnRequirement` at launch closes that.
     private nonisolated(unsafe) static let ownRequirement: SecRequirement? = {
         var code: SecCode?
         var staticCode: SecStaticCode?

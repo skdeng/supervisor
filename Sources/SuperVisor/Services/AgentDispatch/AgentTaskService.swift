@@ -285,6 +285,10 @@ final class AgentTaskService {
 
     var hasUnresolvedTask: Bool { continuation != nil }
 
+    /// How many agent runs are under way across every service, from the start of `execute`
+    /// until its result or failure is returned.
+    private(set) static var liveRuns = 0
+
     /// `executableOverride` replaces the discovered CLI, and `disclaim` the call that disclaims
     /// responsibility, so a test can start a stand-in and make the disclaim fail.
     init(
@@ -383,6 +387,8 @@ final class AgentTaskService {
         environment extra: [String: String] = [:],
         onLaunch: (@MainActor (pid_t) -> Void)? = nil
     ) async throws -> AgentTaskResult {
+        Self.liveRuns += 1
+        defer { Self.liveRuns -= 1 }
         runStartedAt = Date()
         AppLog.notice(.agentDispatch, "agent task started")
 

@@ -27,6 +27,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
 
+    private lazy var bundleMonitor = BundleReplacementMonitor { [weak self] in
+        BundleReplacementMonitor.Activity(
+            agentRuns: AgentTaskService.liveRuns,
+            hasOpenWindow: NSApp.windows.contains {
+                $0.styleMask.contains(.titled) && ($0.isVisible || $0.isMiniaturized)
+            },
+            sheetIsOpen: self?.engine.state == .expanded,
+            isHeld: RelaunchHolds.shared.isHeld
+        )
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // The app writes to pipes and sockets whose peer can vanish at any moment — the codex
         // app-server helper, the headless agent CLI, the perl now-playing adapter, and hook
@@ -55,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         updaterController.startUpdater()
         AppLog.notice(.engine, "updater started")
+        bundleMonitor.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
