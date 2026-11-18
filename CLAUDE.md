@@ -586,7 +586,8 @@ sink. Preserve these guards when touching the relevant code:
     (a granted site's saved address, or a host the browsing-history check recognised), and
     only while `provisor.offerPasswords` is on (`SiteBrowser.Observation.typingAndCredentials`,
     reached only through `SiteAccessCenter.makeRecordingEnrollment`). The Add Site form, a
-    window that asks for a typed address, and every hidden browser never record.
+    window that asks for a typed address, a window opened on a requested host the history
+    does not know, and every hidden browser never record.
     The window says so before anything is typed.
   - **The script** runs in the app's isolated world, in the main frame only, and reports a
     trusted `input` event into a password field or a user-name field: the value, the field's
@@ -695,16 +696,23 @@ sink. Preserve these guards when touching the relevant code:
   ASCII host name, lowercased as ASCII alone (Unicode case mapping would turn a look-alike
   letter into a real one); a bad value drops the field and keeps the proposal. The text is
   model output shaped by mail from anyone, and a look-alike address placed in the app's own
-  sign-in window would arrive with the app's authority. So a request for a site (the review window's **Sign In to <host>…** button, a notch prompt)
-  opens the sign-in window, which **loads the host's page by itself only when that
-  exact host is in the user's own browsing history on two different local days**, checked
-  again as the window opens
+  sign-in window would arrive with the app's authority. A request for a site (the review
+  window's **Sign In to <host>…** button, which shows the host before the click, or a notch
+  prompt) opens the sign-in window on `https://<host>`, and **the app vouches for that host
+  only when the exact host is in the user's own browsing history on two different local
+  days**, checked again as the window opens
   (`BrowsingHistory`: `https` pages on that host alone, across Chromium-family profiles and
   Safari; a parent, a subdomain, a port, or an `http` page counts for nothing, and days are
-  counted, not visits, since one click can count twice). Otherwise the window is titled plainly, its address field starts empty, and a
-  sentence names the host for the user to type. **Only a Keychain grant or that history check
-  vouches for an address**: a granted site kept by its session opens its grant's saved
-  sign-in address, one with a saved password opens the Sign In Again form, and one whose
+  counted, not visits, since one click can count twice). **A host the history does not know
+  still opens, as unrecognised** (`Start.opensUnrecognisedPage`): the window's sentence turns
+  to an orange caution that names the host for the user to check, nothing typed there is
+  recorded, and no offer to keep a password is made. What stands between a look-alike host
+  and the user's password in that window is the user reading the host, on the button, in the
+  caution, and in the bar above the page. A value that is not a plain host name opens no
+  page: the address field starts empty and a sentence names what was asked for. **Only a
+  Keychain grant or that history check vouches for an address**: a granted site kept by its
+  session opens its grant's saved sign-in address, one with a saved password opens there with
+  the app filling it, and one whose
   grant cannot be read opens the Add Site form with an empty address, because the record's
   id and name come from `sites.json`, which anything running as the user can edit
   (`ProVisorSiteWindow.opening`). Saving settles the proposal as a **compare-and-set against the file on
@@ -715,7 +723,7 @@ sink. Preserve these guards when touching the relevant code:
   or sheet row, names only a granted site (by the user's own name for it) or a requested host
   that same history check recognises** (`SignInDemand.Item.isAnnounceable`). A requested host
   the history does not know is never a prompt: it stays an ordinary queue item counted among
-  the new ideas, with an address the user types. A request is held out of both the prompts
+  the new ideas, opened from its review window. A request is held out of both the prompts
   and the count until its lookup answers (`HostRecognition`, off the main actor, kept per
   local day), so it is announced once, as one or the other. Saving a site from any window
   settles the earliest open request that names it (`SignInDemand.effectOfSaving`).
@@ -1310,7 +1318,7 @@ names below are the code paths.
     Sign In Again,
     for any site whose stored sign-in can be read. It shares the site window and its live page
     (`SiteWindowParts.swift`) and shows a title, one sentence, **Done**, and Cancel, with an
-    address field only when no address is vouched for (see Untrusted Input). The user signs in
+    address field only when it has no address to open (see Untrusted Input). The user signs in
     on the page and presses Done once. **Done is always pressable and never presses itself**:
     it turns to the brand style while the app believes the user is signed in
     (`SiteEnrollment.appearsSignedIn`, advice only), and nothing closes the window but Done
@@ -1546,8 +1554,8 @@ at runtime.
   Access**: touching them without it can put a consent prompt in front of the user, so they are
   skipped unless Safari's file opens (`canReadProtectedData`), while the other browsers' folders
   are read regardless. Anything that keeps a file from being read (missing, no access, another
-  schema, busy) reads as no visits, so an unfamiliar browser layout fails into an empty address
-  field. The `history` self-check confirms both layouts.
+  schema, busy) reads as no visits, so an unfamiliar browser layout fails into the cautioned,
+  unrecorded sign-in window. The `history` self-check confirms both layouts.
 
 ## Theme & Settings
 

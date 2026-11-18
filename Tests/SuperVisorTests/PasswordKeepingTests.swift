@@ -139,7 +139,7 @@ struct PasswordKeepingTests {
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = model(flow)
         #expect(model.recordsCredentials)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await signInByHand(flow)
 
         #expect(await model.done(using: flow.enrollment, into: flow.center) == .savedAndAsking)
@@ -175,7 +175,7 @@ struct PasswordKeepingTests {
         let flow = try flow { $0.flow = .twoStep }
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await type(
             ["user": flow.bank.username],
             reporting: [try username(flow.bank.username, passwordFields: 0)],
@@ -205,7 +205,7 @@ struct PasswordKeepingTests {
         let flow = try flow { $0.prefillsUsername = true }
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await type(
             ["pass": flow.bank.password],
             reporting: [try password(flow.bank.password)],
@@ -232,7 +232,7 @@ struct PasswordKeepingTests {
         let flow = try flow()
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await signInByHand(flow)
         #expect(await model.done(using: flow.enrollment, into: flow.center) == .savedAndAsking)
         let session = try #require(flow.center.storedGrant(for: "example.com"))
@@ -263,7 +263,7 @@ struct PasswordKeepingTests {
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         #expect(!flow.enrollment.recordsCredentials)
         let model = model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await signInByHand(flow)
 
         #expect(await model.done(using: flow.enrollment, into: flow.center) == .saved)
@@ -283,18 +283,20 @@ struct PasswordKeepingTests {
         #expect(!SiteSignInModel.recordsCredentials(start: .opensPage(loginURL), offersPasswords: false))
         #expect(!SiteSignInModel.recordsCredentials(start: .asksForAddress(host: "example.com"), offersPasswords: true))
         #expect(!SiteSignInModel.recordsCredentials(start: .asksForAddress(host: "example.com"), offersPasswords: false))
+        #expect(!SiteSignInModel.recordsCredentials(start: .opensUnrecognisedPage(loginURL), offersPasswords: true))
 
         let settingOff = model(flow, offersPasswords: false)
         let typedAddress = model(flow, start: .asksForAddress(host: "example.com"))
+        let unrecognised = model(flow, start: .opensUnrecognisedPage(loginURL))
         let on = model(flow)
-        for (model, records) in [(settingOff, false), (typedAddress, false), (on, true)] {
+        for (model, records) in [(settingOff, false), (typedAddress, false), (unrecognised, false), (on, true)] {
             let enrollment = ProVisorSiteWindow.signInEnrollment(for: model, center: flow.center)
             #expect(enrollment.recordsCredentials == records)
             enrollment.cancel()
         }
 
         // A model that may not record shows no panel even on an enrollment that recorded.
-        await settingOff.beginIfTrusted(using: flow.enrollment)
+        await settingOff.openStartPage(using: flow.enrollment)
         try await signInByHand(flow)
         #expect(await settingOff.done(using: flow.enrollment, into: flow.center) == .saved)
         #expect(settingOff.panel == nil)
@@ -306,7 +308,7 @@ struct PasswordKeepingTests {
         let flow = try flow()
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await type(
             ["user": flow.bank.username, "pass": flow.bank.password],
             reporting: [],
@@ -326,7 +328,7 @@ struct PasswordKeepingTests {
         let flow = try flow()
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await signInByHand(flow, newPassword: true)
 
         #expect(await model.done(using: flow.enrollment, into: flow.center) == .savedAndAsking)
@@ -343,7 +345,7 @@ struct PasswordKeepingTests {
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = model(flow)
         #expect(model.recordsCredentials)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await signInByHand(flow)
 
         flow.fixture.settings.provisorOffersPasswords = false
@@ -361,7 +363,7 @@ struct PasswordKeepingTests {
         let flow = try flow()
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = model(flow, offerTimeout: .milliseconds(200))
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await signInByHand(flow)
         #expect(await model.done(using: flow.enrollment, into: flow.center) == .savedAndAsking)
         #expect(flow.holds.isHeld)
@@ -379,7 +381,7 @@ struct PasswordKeepingTests {
         let flow = try flow()
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = model(flow, offerTimeout: .milliseconds(300))
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await signInByHand(flow)
         #expect(await model.done(using: flow.enrollment, into: flow.center) == .savedAndAsking)
 
@@ -422,7 +424,7 @@ struct PasswordKeepingTests {
         let flow = try flow()
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await signInByHand(flow)
         #expect(await model.done(using: flow.enrollment, into: flow.center) == .savedAndAsking)
         #expect(flow.holds.isHeld)
@@ -469,7 +471,7 @@ struct PasswordKeepingTests {
             }
         }
         let model = model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await signInByHand(flow)
 
         #expect(await model.done(using: flow.enrollment, into: flow.center) == .savedAndAsking)
@@ -490,7 +492,7 @@ struct PasswordKeepingTests {
         let flow = try flow()
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await signInByHand(flow)
         #expect(await model.done(using: flow.enrollment, into: flow.center) == .savedAndAsking)
         let panel = model.panel
@@ -515,7 +517,7 @@ struct PasswordKeepingTests {
         let flow = try flow()
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await signInByHand(flow)
 
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: flow.fixture.directory.path)

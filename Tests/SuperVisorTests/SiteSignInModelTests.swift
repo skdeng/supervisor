@@ -71,7 +71,7 @@ struct SiteSignInModelTests {
             == .fillsSavedPassword(password))
         // The grant alone decides: a request for a host that is not granted never fills.
         #expect(Start.decide(host: "example.com", record: nil, grant: password) { _ in false }
-            == .asksForAddress(host: "example.com"))
+            == .opensUnrecognisedPage(URL(string: "https://example.com")!))
         #expect(asked == 0)
     }
 
@@ -92,7 +92,7 @@ struct SiteSignInModelTests {
             followUps: FollowUpHoldsStub()
         )
 
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         await model.retry(using: enrollment)
 
         #expect(!model.hasOpenedPage)
@@ -112,10 +112,15 @@ struct SiteSignInModelTests {
         #expect(asked == ["example.com"])
     }
 
-    @Test("A requested host the history does not recognise asks for the address")
+    @Test("A requested host the history does not recognise opens at that host as unrecognised")
     func startUnrecognised() {
-        let start = Start.decide(host: "examp1e-login.com", record: nil, grant: nil) { _ in false }
-        #expect(start == .asksForAddress(host: "examp1e-login.com"))
+        var asked: [String] = []
+        let start = Start.decide(host: "examp1e-login.com", record: nil, grant: nil) { host in
+            asked.append(host)
+            return false
+        }
+        #expect(start == .opensUnrecognisedPage(URL(string: "https://examp1e-login.com")!))
+        #expect(asked == ["examp1e-login.com"])
     }
 
     @Test("A requested host that is not a host name asks for the address without reading the history")
@@ -173,21 +178,41 @@ struct SiteSignInModelTests {
         #expect(model.proposalID == "2026-11-17-check")
     }
 
-    @Test("An unrecognised request names its host only in a cautioning sentence, and the address field starts empty")
+    @Test("An unrecognised request names its host in a cautioning sentence, shows no address field, and never records typing")
     func unrecognisedSentence() {
         let model = SiteSignInModel(
             host: "examp1e-login.com",
             record: nil,
-            start: .asksForAddress(host: "examp1e-login.com"),
+            start: .opensUnrecognisedPage(URL(string: "https://examp1e-login.com")!),
             proposalID: "2026-11-17-check",
             needsPerson: false,
-            offersPasswords: false,
+            offersPasswords: true,
+            followUps: FollowUpHoldsStub()
+        )
+        #expect(model.title == "Sign in to examp1e-login.com")
+        #expect(model.sentence == "ProVisor asked for examp1e-login.com. SuperVisor hasn't seen that address in your browser history, so check it is the site you expect before you sign in.")
+        #expect(model.sentenceIsCaution)
+        #expect(!model.asksForAddress)
+        #expect(!model.recordsCredentials)
+        #expect(!model.canPressDone)
+    }
+
+    @Test("A request that is not a host name is named only in a cautioning sentence, and the address field starts empty")
+    func unopenableSentence() {
+        let model = SiteSignInModel(
+            host: "example.com:8443",
+            record: nil,
+            start: .asksForAddress(host: "example.com:8443"),
+            proposalID: "2026-11-17-check",
+            needsPerson: false,
+            offersPasswords: true,
             followUps: FollowUpHoldsStub()
         )
         #expect(model.title == "Sign in")
-        #expect(model.sentence == "ProVisor asked for examp1e-login.com. SuperVisor hasn't seen that address in your browser history, so type the site's address yourself.")
+        #expect(model.sentence == "ProVisor asked for example.com:8443. SuperVisor can't open that address by itself, so type the site's address yourself.")
         #expect(model.sentenceIsCaution)
         #expect(model.asksForAddress)
+        #expect(!model.recordsCredentials)
         #expect(model.address.isEmpty)
         #expect(!model.canOpenTypedAddress)
         #expect(!model.canPressDone)
@@ -253,7 +278,7 @@ struct SiteSignInModelTests {
         let model = trusted(loginURL)
         #expect(!model.canPressDone)
 
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
 
         #expect(model.hasOpenedPage)
         #expect(model.problem == nil)
@@ -263,12 +288,40 @@ struct SiteSignInModelTests {
         #expect(bank.site.posts.isEmpty)
 
         // A second call opens nothing more.
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         #expect(bank.site.requests(to: "/login").count == 1)
     }
 
-    @Test("An unrecognised request opens nothing by itself, and opens only the address the person typed", .timeLimit(.minutes(1)))
-    func unrecognisedOpensOnlyTheTypedAddress() async throws {
+    @Test("An unrecognised start opens its page by itself, and Done is pressable before the sign-in", .timeLimit(.minutes(1)))
+    func unrecognisedStartOpens() async throws {
+        let (fixture, _, bank, enrollment) = try flow()
+        defer {
+            enrollment.cancel()
+            withExtendedLifetime((fixture, bank)) {}
+        }
+        let model = SiteSignInModel(
+            host: "example.com",
+            record: nil,
+            start: .opensUnrecognisedPage(loginURL),
+            proposalID: "p",
+            needsPerson: false,
+            offersPasswords: true,
+            followUps: FollowUpHoldsStub()
+        )
+        #expect(!model.canPressDone)
+
+        await model.openStartPage(using: enrollment)
+
+        #expect(model.hasOpenedPage)
+        #expect(model.problem == nil)
+        #expect(model.canPressDone)
+        #expect(enrollment.currentHost == "example.com")
+        #expect(bank.site.requests(to: "/login").count == 1)
+        #expect(bank.site.posts.isEmpty)
+    }
+
+    @Test("A start that asks for the address opens nothing by itself, and opens only the address the person typed", .timeLimit(.minutes(1)))
+    func askedAddressOpensOnlyTheTypedAddress() async throws {
         let (fixture, _, bank, enrollment) = try flow()
         defer {
             enrollment.cancel()
@@ -284,7 +337,7 @@ struct SiteSignInModelTests {
             followUps: FollowUpHoldsStub()
         )
 
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         #expect(!model.hasOpenedPage)
         #expect(bank.site.requests.isEmpty)
         #expect(enrollment.currentHost == nil)
@@ -316,7 +369,7 @@ struct SiteSignInModelTests {
         var heard: [(String, Bool)] = []
         center.onSiteSaved = { record, wasAwaited in heard.append((record.id, wasAwaited)) }
         let model = trusted(loginURL)
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         try await signInOnPage(enrollment, bank)
 
         #expect(await model.done(using: enrollment, into: center) == .saved)
@@ -341,7 +394,7 @@ struct SiteSignInModelTests {
             withExtendedLifetime((fixture, bank)) {}
         }
         let model = trusted(loginURL)
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
 
         #expect(await model.done(using: enrollment, into: center) == .notSaved)
         #expect(model.problem == .notSignedIn)
@@ -359,7 +412,7 @@ struct SiteSignInModelTests {
             withExtendedLifetime((fixture, bank)) {}
         }
         let model = trusted(URL(string: "https://example.com/account")!)
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
 
         // An answer given before the question was put counts for nothing.
         #expect(await model.done(using: enrollment, into: center, confirmingSignIn: true) == .notSaved)
@@ -388,7 +441,7 @@ struct SiteSignInModelTests {
             withExtendedLifetime((fixture, bank)) {}
         }
         let model = trusted(URL(string: "https://example.com/account")!)
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
 
         // An answer given before the question was put counts for nothing.
         #expect(await model.done(using: enrollment, into: center, confirmingSignIn: true) == .notSaved)
@@ -435,7 +488,7 @@ struct SiteSignInModelTests {
             withExtendedLifetime((fixture, bank)) {}
         }
         let model = trusted(URL(string: "https://example.com/account")!)
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         #expect(await model.done(using: enrollment, into: center) == .notSaved)
         #expect(model.problem == .signInNotSeen)
 
@@ -483,7 +536,7 @@ struct SiteSignInModelTests {
             withExtendedLifetime((fixture, bank)) {}
         }
         let model = trusted(URL(string: "https://example.com/home")!)
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
 
         #expect(await model.done(using: enrollment, into: center) == .notSaved)
         #expect(model.problem == nil)
@@ -516,7 +569,7 @@ struct SiteSignInModelTests {
             followUps: FollowUpHoldsStub()
         )
         #expect(model.sentence == "My Bank needs you to sign in again.")
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         try await signInOnPage(enrollment, bank)
 
         #expect(await model.done(using: enrollment, into: center) == .saved)
@@ -532,7 +585,7 @@ struct SiteSignInModelTests {
         let (fixture, center, bank, enrollment) = try flow()
         defer { withExtendedLifetime((fixture, bank)) {} }
         let model = trusted(loginURL)
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         try await signInOnPage(enrollment, bank)
         enrollment.cancel()
 
@@ -546,7 +599,7 @@ struct SiteSignInModelTests {
         let (fixture, center, bank, enrollment) = try flow()
         defer { withExtendedLifetime((fixture, bank)) {} }
         let model = trusted(loginURL)
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         try await signInOnPage(enrollment, bank)
 
         let saving = Task { @MainActor in await model.done(using: enrollment, into: center) }
@@ -698,7 +751,7 @@ struct SiteSignInModelTests {
         }
         let model = trusted(URL(string: "https://example.com/start")!)
 
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         #expect(model.problem == .pageDidNotLoad)
         #expect(model.problem?.signInWindowMessage == "The page did not finish loading.")
         #expect(model.offersRetry)
@@ -737,7 +790,7 @@ struct SiteSignInModelTests {
             withExtendedLifetime((fixture, bank)) {}
         }
         let model = trusted(loginURL)
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         try await signInOnPage(enrollment, bank)
 
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: fixture.directory.path)
@@ -767,7 +820,7 @@ struct SiteSignInModelTests {
         var saves = 0
         center.onSiteSaved = { _, _ in saves += 1 }
         let model = trusted(loginURL)
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         try await signInOnPage(enrollment, bank)
 
         let first = Task { @MainActor in await model.done(using: enrollment, into: center) }
@@ -850,7 +903,7 @@ struct SiteSignInModelTests {
             try? FileManager.default.removeItem(at: directory)
         }
         let model = trusted(loginURL)
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         try await signInOnPage(enrollment, bank)
 
         #expect(await model.done(using: enrollment, into: center) == .saved)
@@ -874,7 +927,7 @@ struct SiteSignInModelTests {
             settle?(record, wasAwaited)
         }
         let model = trusted(loginURL)
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         try await signInOnPage(enrollment, bank)
         enrollment.cancel()
 
@@ -897,7 +950,7 @@ struct SiteSignInModelTests {
         var outcomes: [SiteRequests.Outcome] = []
         settleOnSave(center, in: directory) { outcomes.append($0) }
         let model = trusted(loginURL)
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         try await signInOnPage(enrollment, bank)
 
         #expect(await model.done(using: enrollment, into: center) == .saved)

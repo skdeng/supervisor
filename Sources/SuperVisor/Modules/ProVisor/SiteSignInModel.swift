@@ -6,11 +6,12 @@ import Foundation
 /// kept by its session, the person signs in on the page and presses Done, and the session is
 /// saved as the site's grant, holding no secret. The window's view only lays this out.
 ///
-/// **The page opens by itself only at an address the app can vouch for** (`Start.decide`): a
-/// granted site's own sign-in address, or a requested host the person's own browsers have
-/// visited (`BrowsingHistory`). The agent's request is model output shaped by mail from anyone,
-/// so any other host it names is only named in a sentence, and the address field starts empty
-/// for the person to type the address themselves.
+/// **The page opens by itself** (`Start.decide`): at a granted site's own sign-in address, or
+/// at `https://<host>` for a host a request named. The agent's request is model output shaped
+/// by mail from anyone, and only the Keychain or the person's own browsing vouches for an
+/// address (`BrowsingHistory`). A requested host the browsers do not know opens with a
+/// cautioning sentence that names it for the person to check, and the window records nothing
+/// typed there (`Start.opensUnrecognisedPage`).
 ///
 /// Done saves through `SiteAccessCenter.save`, or records a sign-in through
 /// `SiteAccessCenter.personSignedIn`, which is what settles a request for the site and owes the
@@ -44,7 +45,8 @@ import Foundation
 ///
 /// **A window may offer to keep the password the person typed** (`recordsCredentials`): only
 /// when the setting allows it and the page opened by itself at an address the app vouches for.
-/// A window that asks for the address never records and never offers. Such a window is given an
+/// A window that asks for the address, or that opened a host the person's browsers do not
+/// know, never records and never offers. A window that may offer is given an
 /// enrollment that records (`SiteEnrollment.recordingCredentials`); Done saves the session as
 /// any window does, then, if the setting still allows it, shows the enrollment's offer or,
 /// unless nothing was typed, why there is none (`panel`), and the window stays open until the
@@ -60,8 +62,12 @@ import Foundation
 final class SiteSignInModel: ObservableObject {
     /// How the window starts.
     enum Start: Equatable {
-        /// The page opens at this address as the window appears.
+        /// The page opens as the window appears, at an address the Keychain or the person's
+        /// own browsing vouches for.
         case opensPage(URL)
+        /// The page opens as the window appears, at the address of a requested host the
+        /// person's browsers do not know. The window cautions the person to check the address.
+        case opensUnrecognisedPage(URL)
         /// The person types the address; `host` is the one asked for, named in a sentence only.
         case asksForAddress(host: String)
         /// The page opens at the saved sign-in address of a granted site whose grant keeps a
@@ -76,16 +82,15 @@ final class SiteSignInModel: ObservableObject {
         var savedGrant: SiteGrant? {
             switch self {
             case let .fillsSavedPassword(grant), let .withholdsSavedPassword(grant): grant
-            case .opensPage, .asksForAddress: nil
+            case .opensPage, .opensUnrecognisedPage, .asksForAddress: nil
             }
         }
 
-        /// Where a sign-in to `host` starts. The page opens by itself only at an address the
-        /// Keychain or the person's own browsing vouches for: the saved sign-in address of a
-        /// granted site, or `https://<host>` for a host that is not granted, is a plain host
-        /// name, and that `hasVisited` finds in the history. `hasVisited` is asked only about
-        /// such a host. A granted site whose grant keeps a saved password fills it, unless the
-        /// record says the site turned it away.
+        /// Where a sign-in to `host` starts. A granted site opens at its saved sign-in address;
+        /// one whose grant keeps a saved password fills it, unless the record says the site
+        /// turned it away. A host that is not granted and is a plain host name opens at
+        /// `https://<host>`, vouched for when `hasVisited` finds it in the history and
+        /// unrecognised otherwise. `hasVisited` is asked only about such a host.
         ///
         /// A granted site with no readable grant asks for the address: its record comes from
         /// `sites.json`, which anything running as the user can edit. The window never shows it
@@ -102,15 +107,13 @@ final class SiteSignInModel: ObservableObject {
                 guard grant.remembersPassword else { return .opensPage(grant.signInURL) }
                 return record.passwordRejected ? .withholdsSavedPassword(grant) : .fillsSavedPassword(grant)
             }
-            guard let url = trustedAddress(host), hasVisited(host) else {
-                return .asksForAddress(host: host)
-            }
-            return .opensPage(url)
+            guard let url = address(ofHost: host) else { return .asksForAddress(host: host) }
+            return hasVisited(host) ? .opensPage(url) : .opensUnrecognisedPage(url)
         }
 
         /// `https://<host>`, for a plain host name.
         @MainActor
-        private static func trustedAddress(_ host: String) -> URL? {
+        private static func address(ofHost host: String) -> URL? {
             guard SiteHost.isValid(host) else { return nil }
             return SiteEnrollment.normalisedAddress(host)
         }
@@ -196,7 +199,11 @@ final class SiteSignInModel: ObservableObject {
     static let recognisedRequestMessage = "ProVisor asked for this site. It matches a site in your browser history."
 
     static func unrecognisedRequestMessage(host: String) -> String {
-        "ProVisor asked for \(host). SuperVisor hasn't seen that address in your browser history, so type the site's address yourself."
+        "ProVisor asked for \(host). SuperVisor hasn't seen that address in your browser history, so check it is the site you expect before you sign in."
+    }
+
+    static func unopenableRequestMessage(host: String) -> String {
+        "ProVisor asked for \(host). SuperVisor can't open that address by itself, so type the site's address yourself."
     }
 
     static func needsSignInMessage(name: String) -> String {
@@ -235,7 +242,7 @@ final class SiteSignInModel: ObservableObject {
         guard offersPasswords else { return false }
         switch start {
         case .opensPage, .fillsSavedPassword, .withholdsSavedPassword: return true
-        case .asksForAddress: return false
+        case .opensUnrecognisedPage, .asksForAddress: return false
         }
     }
 
@@ -269,7 +276,7 @@ final class SiteSignInModel: ObservableObject {
     let title: String
     /// Why the person is asked, or nil when they asked themselves.
     let sentence: String?
-    /// The sentence names a host the app cannot vouch for.
+    /// The sentence names a host neither the Keychain nor the person's browsing vouches for.
     let sentenceIsCaution: Bool
     /// Whether the window records what the person types and may offer to keep the password.
     let recordsCredentials: Bool
@@ -353,9 +360,13 @@ final class SiteSignInModel: ObservableObject {
                 title = "Sign in to \(host)"
                 sentence = proposalID == nil ? nil : Self.recognisedRequestMessage
                 sentenceIsCaution = false
+            case .opensUnrecognisedPage:
+                title = "Sign in to \(host)"
+                sentence = Self.unrecognisedRequestMessage(host: host)
+                sentenceIsCaution = true
             case let .asksForAddress(asked):
                 title = "Sign in"
-                sentence = Self.unrecognisedRequestMessage(host: asked)
+                sentence = Self.unopenableRequestMessage(host: asked)
                 sentenceIsCaution = true
             }
         }
@@ -413,16 +424,16 @@ final class SiteSignInModel: ObservableObject {
 
     // MARK: Opening the page
 
-    /// Opens the page as the window appears, when the start is an address the app vouches for.
-    func beginIfTrusted(using enrollment: SiteEnrollment) async {
+    /// Opens the page as the window appears, when the start names an address to open.
+    func openStartPage(using enrollment: SiteEnrollment) async {
         guard !hasOpenedPage else { return }
         await retry(using: enrollment)
     }
 
-    /// Opens the trusted address again, after a load that did not finish.
+    /// Opens the start's address again, after a load that did not finish.
     func retry(using enrollment: SiteEnrollment) async {
         switch start {
-        case let .opensPage(url):
+        case let .opensPage(url), let .opensUnrecognisedPage(url):
             await openPage(url.absoluteString, using: enrollment)
         case let .fillsSavedPassword(grant):
             await signIn(with: SiteFormModel.SignInRequest(saved: grant), using: enrollment)

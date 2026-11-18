@@ -222,7 +222,7 @@ struct SavedPasswordSignInTests {
         retypesUsername: Bool = true,
         arrivingAt arrival: String = "/home"
     ) async throws {
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         #expect(flow.bank.site.posts.filter { $0.path == "/session" }.count == 1)
         #expect(!flow.bank.signedIn)
         let path = try #require(flow.enrollment.browser.currentURL?.path)
@@ -423,7 +423,7 @@ struct SavedPasswordSignInTests {
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = try model(flow)
 
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await waitFor { flow.bank.signedIn && flow.enrollment.browser.currentURL?.path == "/home" }
         await flow.enrollment.idle()
         // A run marks the password turned away while the window is open.
@@ -463,7 +463,7 @@ struct SavedPasswordSignInTests {
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = try model(flow)
 
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         #expect(flow.bank.site.posts.map(\.path) == ["/identify"])
         #expect(flow.enrollment.browser.currentURL?.path == "/challenge")
         #expect(model.canPressDone)
@@ -490,7 +490,7 @@ struct SavedPasswordSignInTests {
         }
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = try model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         #expect(flow.enrollment.browser.currentURL?.path == "/challenge")
 
         // The person types into the password page's field before the app reaches it.
@@ -514,7 +514,7 @@ struct SavedPasswordSignInTests {
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = try model(flow)
 
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await waitFor { flow.bank.signedIn && flow.enrollment.browser.currentURL?.path == "/home" }
         await flow.enrollment.idle()
 
@@ -599,7 +599,7 @@ struct SavedPasswordSignInTests {
         let flow = try await flow(stored: .changed) { moveSignIn($0) }
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = try model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         // The saved user name is held to the saved password's hosts, and is the first fill refused.
         #expect(flow.enrollment.unvettedFill == AssistedSignInSession.UnvettedFill(host: "login.example.com", kind: .username))
         #expect(flow.bank.site.posts.isEmpty)
@@ -627,7 +627,7 @@ struct SavedPasswordSignInTests {
         let flow = try await flow(stored: .changed) { moveSignIn($0, asksForCode: true) }
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = try model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await type(
             ["pass": flow.bank.password],
             reporting: [try password(flow.bank.password, path: "/signin", host: "login.example.com")],
@@ -652,7 +652,7 @@ struct SavedPasswordSignInTests {
         }
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = try model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await type(
             ["pass": flow.bank.password],
             reporting: [try password(flow.bank.password, path: "/signin", host: "login.example.com")],
@@ -701,7 +701,7 @@ struct SavedPasswordSignInTests {
         let flow = try await flow(stored: .changed) { $0.prefillsUsername = true }
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = try model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await type(
             ["pass": flow.bank.password],
             reporting: [try password(flow.bank.password, newPassword: true)],
@@ -758,7 +758,7 @@ struct SavedPasswordSignInTests {
         let flow = try await flow()
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = try model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await waitFor { flow.bank.signedIn && flow.enrollment.browser.currentURL?.path == "/home" }
         await flow.enrollment.idle()
         flow.enrollment.browser.noteTyped(into: .password)
@@ -799,7 +799,7 @@ struct SavedPasswordSignInTests {
         let flow = try await flow(stored: .changed)
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = try model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         let before = try storedBytes(flow)
 
         #expect(await model.done(using: flow.enrollment, into: flow.center) == .notSaved)
@@ -862,7 +862,7 @@ struct SavedPasswordSignInTests {
         #expect(model.start == .withholdsSavedPassword(flow.stored))
         #expect(model.sentence == "My Bank didn't accept the saved password. Sign in on the page; SuperVisor can keep the password you type.")
 
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         // The app fills the user name page, and leaves the password page alone.
         #expect(flow.bank.site.posts.map(\.path) == ["/identify"])
         #expect(flow.enrollment.browser.currentURL?.path == "/password")
@@ -886,7 +886,7 @@ struct SavedPasswordSignInTests {
         let flow = try await flow(stored: .changed, rejected: true) { $0.flow = .twoStep }
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = try model(flow)
-        await model.beginIfTrusted(using: flow.enrollment)
+        await model.openStartPage(using: flow.enrollment)
         try await type(["pass": flow.bank.password], reporting: [], in: flow, arrivingAt: "/home")
 
         #expect(await model.done(using: flow.enrollment, into: flow.center) == .signedInKeepingSavedPassword)
@@ -947,7 +947,7 @@ struct SavedPasswordSignInTests {
         }) { $0.requiresCode = true }
         defer { withExtendedLifetime(flow) { flow.enrollment.cancel() } }
         let model = try model(flow)
-        let opening = Task { await model.beginIfTrusted(using: flow.enrollment) }
+        let opening = Task { await model.openStartPage(using: flow.enrollment) }
         try await waitFor { codes.calls.filter { $0.hasPrefix("texted") }.count == 1 }
         #expect(flow.enrollment.browser.currentURL?.path == "/verify")
 
@@ -1117,7 +1117,7 @@ struct SavedPasswordSignInTests {
             offersPasswords: true,
             followUps: FollowUpHoldsStub()
         )
-        await model.beginIfTrusted(using: enrollment)
+        await model.openStartPage(using: enrollment)
         #expect(site.posts.isEmpty)
         _ = try await enrollment.browser.run("""
             document.getElementById('user').value = 'alice@example.com';

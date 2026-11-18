@@ -338,7 +338,7 @@ final class SiteEnrollmentWindow: NSWindow {
             }
             .id(ObjectIdentifier(enrollment))
         )
-        Task { await model.beginIfTrusted(using: enrollment) }
+        Task { await model.openStartPage(using: enrollment) }
     }
 
     private func replace(with enrollment: SiteEnrollment, content: Content, requestID: String?) {

@@ -30,9 +30,9 @@ enum SignInDemand {
         /// Whether the app may put this site in front of the person as a sign-in, on the banner
         /// or as a sheet row: a granted site, named as the person named it, or a requested host
         /// the person's own browsers have visited. A host the agent names that they never
-        /// visited stays an ordinary proposal, whose address they type themselves: the agent
-        /// reads mail from anyone, and a look-alike host shown as a sign-in would carry the
-        /// app's authority.
+        /// visited stays an ordinary proposal, whose review window opens its page with a
+        /// caution: the agent reads mail from anyone, and a look-alike host shown as a sign-in
+        /// prompt would carry the app's authority.
         var isAnnounceable: Bool {
             switch kind {
             case .signedOut, .requested(recognised: true):

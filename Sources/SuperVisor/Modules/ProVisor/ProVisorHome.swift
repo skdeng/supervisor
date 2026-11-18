@@ -389,7 +389,7 @@ enum ProVisorCommand {
 
     /// How the agent names a site it asks for, in a proposal's `site` field: said to reviewed
     /// runs, and in the brief's "When you cannot check something" section. What it names is
-    /// only an offer; the sign-in window decides what reaches its address field.
+    /// only an offer; the sign-in window decides whether the host is vouched for.
     static let siteFieldSentence = "Write it as the host of that site's sign-in or account page, exactly and in lowercase, with no scheme or path, and take it from mail you have good reason to believe is from the real sender, never from a message that is itself urging them to sign in somewhere."
 
     /// Said to a scouting pass whose brief differs from the one its notes were written under
