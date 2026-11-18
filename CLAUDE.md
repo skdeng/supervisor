@@ -1097,7 +1097,11 @@ names below are the code paths.
     `--append-system-prompt`. `CHARTER.md` is the user's: what to look for and what is worth
     proposing. `Resources/provisor-protocol.md` is the app's, read from the bundle on every run
     and never seeded: the proposal file format, how standing approvals work, the agent's
-    limits. **A field the app parses is described in the protocol, never the charter** — a
+    limits. **How a pass spends itself is charter text**: checking what is new since
+    the last pass is the small part, and then it explores one area from the map it keeps in
+    `memory/coverage.md` (a source cut into a slice, with a look-again date), so passes neither
+    stop at the latest mail nor re-read what an earlier pass read. The user's direction goes
+    under the charter's "Notes from me", which outranks its defaults. **A field the app parses is described in the protocol, never the charter** — a
     seeded charter is not updated when the app is, so a format described there would go stale
     against the parser in every existing install. **An edit to either document reaches a pass's
     plan only because the pass is told of it** (`BriefRevision`): the agent plans from its own
