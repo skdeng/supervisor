@@ -39,6 +39,7 @@ private func record(_ host: String = "example.com", name: String = "Bank") -> Si
 private final class Conditions {
     var cliIsTrusted = true
     var disclaimIsAvailable = true
+    var appIsIntact = true
 }
 
 /// A bridge over a site center on simulated pages, a server on a socket in a scratch folder, and
@@ -100,7 +101,8 @@ private final class BridgeFixture {
             configurationFolder: self.runs,
             executablePath: executablePath,
             cliIsTrusted: { conditions.cliIsTrusted },
-            disclaimIsAvailable: { conditions.disclaimIsAvailable }
+            disclaimIsAvailable: { conditions.disclaimIsAvailable },
+            appIsIntact: { conditions.appIsIntact }
         )
     }
 
@@ -197,12 +199,33 @@ struct ProVisorBridgeTests {
         #expect(fixture.bridge.availableSiteNames(access: sealed).isEmpty)
     }
 
+    @Test("An app whose bundle was replaced under it keeps the bridge off, and comes back when it is intact again")
+    func appReplaced() throws {
+        let fixture = try BridgeFixture()
+        defer { fixture.tearDown() }
+        try fixture.grantSite()
+        fixture.conditions.appIsIntact = false
+
+        #expect(fixture.bridge.prepare(access: sealed) == .failure(.appReplaced))
+        #expect(fixture.bridge.lastUnavailable == .appReplaced)
+        #expect(fixture.configurationFiles.isEmpty)
+        #expect(fixture.bridge.availableSiteNames(access: sealed).isEmpty)
+
+        fixture.conditions.appIsIntact = true
+        guard case .success = fixture.bridge.prepare(access: sealed) else {
+            Issue.record("the bridge stayed off once the app was intact")
+            return
+        }
+        #expect(fixture.bridge.lastUnavailable == nil)
+    }
+
     @Test("The reasons are reported in a fixed order, each only when the ones before it hold")
     func reasonOrder() throws {
         let fixture = try BridgeFixture()
         defer { fixture.tearDown() }
         fixture.conditions.cliIsTrusted = false
         fixture.conditions.disclaimIsAvailable = false
+        fixture.conditions.appIsIntact = false
 
         // Nothing granted outranks everything.
         #expect(fixture.bridge.prepare(access: unsealed) == .failure(.nothingGranted))
@@ -212,6 +235,8 @@ struct ProVisorBridgeTests {
         fixture.conditions.disclaimIsAvailable = true
         #expect(fixture.bridge.prepare(access: sealed) == .failure(.cliNotTrusted))
         fixture.conditions.cliIsTrusted = true
+        #expect(fixture.bridge.prepare(access: sealed) == .failure(.appReplaced))
+        fixture.conditions.appIsIntact = true
         _ = try fixture.prepared()
         #expect(fixture.bridge.lastUnavailable == nil)
     }

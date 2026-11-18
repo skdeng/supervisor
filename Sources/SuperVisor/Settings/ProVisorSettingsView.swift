@@ -182,6 +182,8 @@ struct ProVisorSettingsView: View {
             "Reading sites, texts, and photo places is paused: the installed agent CLI isn't the signed build."
         case .disclaimUnavailable?:
             "Reading sites, texts, and photo places is paused: this macOS can't start the agent without SuperVisor's own permissions."
+        case .appReplaced?:
+            "Reading sites, texts, and photo places is paused: SuperVisor was rebuilt or updated while it was running. Quit and reopen it."
         case .serverFailed?:
             "Reading sites, texts, and photo places is paused: SuperVisor couldn't open its tool channel."
         }

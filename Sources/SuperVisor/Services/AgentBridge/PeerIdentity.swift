@@ -38,6 +38,17 @@ enum PeerIdentity {
         return SecCodeCheckValidity(guest, [], requirement) == errSecSuccess
     }
 
+    /// Whether this process is still running the code its bundle holds on disk. A bundle
+    /// rebuilt or replaced under a running app leaves the process valid by its signature and
+    /// no longer the code on disk, which `SecCodeCheckValidity` reports as a failure. The
+    /// bridge helper is started from the bundle on disk and makes this same check on the app
+    /// before it sends anything, so while it fails no run can reach a tool.
+    static func runningCodeIsIntact() -> Bool {
+        var code: SecCode?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return false }
+        return SecCodeCheckValidity(code, [], nil) == errSecSuccess
+    }
+
     /// Resolved once. A `SecRequirement` is an immutable Core Foundation object, safe to share
     /// across threads.
     private nonisolated(unsafe) static let ownRequirement: SecRequirement? = {

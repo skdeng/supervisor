@@ -43,6 +43,10 @@ final class AgentBridgeServer: @unchecked Sendable {
     private enum Refusal: String, Sendable {
         case busy
         case requestUnreadable
+        /// The caller closed the connection without sending a request. A helper does this when
+        /// it cannot verify the app, as when the bundle it was started from is not the code the
+        /// app is running.
+        case callerLeft
         case requestTooLong
         case requestMalformed
         case runUnknown
@@ -60,7 +64,7 @@ final class AgentBridgeServer: @unchecked Sendable {
         var sentence: String {
             switch self {
             case .busy: "SuperVisor is busy. Try again."
-            case .requestUnreadable, .requestTooLong, .requestMalformed:
+            case .requestUnreadable, .callerLeft, .requestTooLong, .requestMalformed:
                 "SuperVisor could not read the request."
             case .runUnknown: "SuperVisor does not recognize this run."
             case .versionMismatch: AgentBridgeServer.updatedWhileRunningSentence
@@ -249,7 +253,7 @@ final class AgentBridgeServer: @unchecked Sendable {
         case .timedOut:
             return refuse(connection, .requestUnreadable)
         case .closed, .failed:
-            return log(.requestUnreadable)
+            return log(.callerLeft)
         }
 
         guard let request = try? JSONDecoder().decode(BridgeRequest.self, from: line),

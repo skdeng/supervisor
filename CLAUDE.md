@@ -16,7 +16,13 @@ them.
 - **`./make-app.sh --release`** — builds, bundles, and signs `build/SuperVisor.app`.
   (`--run` also launches it; drop `--release` for a debug build.) It prefers Developer ID
   Application, then Apple Development, and falls back to ad-hoc signing. Set
-  `SIGNING_IDENTITY` to override selection.
+  `SIGNING_IDENTITY` to override selection. **Building over a running app breaks that app
+  until it is relaunched**: the process keeps running the old code while the bundle on disk
+  is the new one, and anything that checks the process against its bundle refuses it. The
+  bridge helper is started from the bundle on disk and makes that check, so every ProVisor
+  pass loses its site, text, and photo-place tools while each pass still finishes normally.
+  Quit and reopen the app after every build (`codesign --verify <pid>` answers "the code on
+  disk does not match what is running" while it is stale).
 - **`open build/SuperVisor.app`** — launch. It is an **`LSUIElement`** menu-bar agent
   (`.accessory` activation policy): no Dock icon, no main window. A status-bar item
   (`visionpro` glyph) hosts the **Settings…** and **Quit** menu. **The app still installs a
@@ -1585,10 +1591,14 @@ artifacts:
 
 **A pass can run without its site, text, and photo-place tools while nothing fails.** The `provisor` log
 carries `bridge tools off: <reason>` (`nothingGranted`, `accessNotSealed`,
-`cliNotTrusted`, `disclaimUnavailable`, `serverFailed`) when a pass starts without them, and
+`cliNotTrusted`, `disclaimUnavailable`, `appReplaced`, `serverFailed`) when a pass starts
+without them (`appReplaced`: the bundle on disk is not the code the app is running, checked
+before each pass by `PeerIdentity.runningCodeIsIntact`), and
 `tool <name>: <outcome>` for each call; Settings states the reason, `nothingGranted` apart. A
 bridge refusal logs `agent bridge refused: <reason>` in `agentDispatch`, written to the file
-once per reason per 30 s with the rest at debug level in the unified log, and a sign-in logs
+once per reason per 30 s with the rest at debug level in the unified log (`callerLeft` is a
+helper that connected and hung up without a request, which is what a helper does when it
+cannot verify the app), and a sign-in logs
 `sign-in for <host>: <result>` in `sites`. A pass or an acting run that failed logs
 `<kind> failed: <name>`, where a run stopped by its own allowance reads `turn limit` or
 `spending limit` (it has still written what it reached) and any other failed result reads

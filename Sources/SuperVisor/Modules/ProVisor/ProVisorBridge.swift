@@ -31,6 +31,9 @@ final class ProVisorBridge {
         case cliNotTrusted
         /// The system cannot start the agent process responsible for itself.
         case disclaimUnavailable
+        /// The bundle on disk is not the code this process is running, so the helper a run
+        /// starts from that bundle cannot verify the app and reaches no tool.
+        case appReplaced
         /// The tool channel or the run's configuration could not be set up.
         case serverFailed
     }
@@ -86,12 +89,14 @@ final class ProVisorBridge {
     private let executablePath: String
     private let cliIsTrusted: @MainActor () -> Bool
     private let disclaimIsAvailable: () -> Bool
+    private let appIsIntact: () -> Bool
     private var liveRuns: [String: PreparedRun] = [:]
     private var holdURL: URL?
 
     /// `server` is built on first use, by `makeServer`, when nil. The remaining seams are the
-    /// trust check on the installed CLI, whether responsibility can be disclaimed, where
-    /// configurations are written, and the executable the CLI starts as the helper.
+    /// trust check on the installed CLI, whether responsibility can be disclaimed, whether the
+    /// running app is still the code on disk, where configurations are written, and the
+    /// executable the CLI starts as the helper.
     init(
         sites: SiteAccessCenter,
         server: AgentBridgeServer? = nil,
@@ -99,7 +104,8 @@ final class ProVisorBridge {
         configurationFolder: URL = ProVisorHome.runsURL,
         executablePath: String = Bundle.main.executablePath ?? "",
         cliIsTrusted: @escaping @MainActor () -> Bool = InstalledCLITrust().isTrusted,
-        disclaimIsAvailable: @escaping () -> Bool = { ProcessResponsibility.isAvailable }
+        disclaimIsAvailable: @escaping () -> Bool = { ProcessResponsibility.isAvailable },
+        appIsIntact: @escaping () -> Bool = PeerIdentity.runningCodeIsIntact
     ) {
         self.sites = sites
         self.server = server
@@ -108,6 +114,7 @@ final class ProVisorBridge {
         self.executablePath = executablePath
         self.cliIsTrusted = cliIsTrusted
         self.disclaimIsAvailable = disclaimIsAvailable
+        self.appIsIntact = appIsIntact
     }
 
     // MARK: Whether a pass may carry the tools
@@ -131,6 +138,7 @@ final class ProVisorBridge {
         guard access.scoutIsSealed else { return .failure(.accessNotSealed) }
         guard disclaimIsAvailable() else { return .failure(.disclaimUnavailable) }
         guard cliIsTrusted() else { return .failure(.cliNotTrusted) }
+        guard appIsIntact() else { return .failure(.appReplaced) }
         return .success(Eligibility(
             sites: granted,
             awaiting: sites.awaitingSignIn,
