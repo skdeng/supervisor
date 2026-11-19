@@ -39,9 +39,18 @@ JSON object:
   see "When you cannot check something" below.
 
 Leave `status`, `result`, `decided`, `decidedLocal`, `cleared`, `standingDecision`, `automatic`,
-`chose`, `instructed`, `handedOff`, `handedOffLocal`, and `returned` alone; SuperVisor writes those. The one exception: when a proposal that is still
-`proposed` has stopped being true — they replied on their own, the trial already lapsed — set
-its `"status"` to `"withdrawn"` so it leaves the queue.
+`chose`, `instructed`, `handedOff`, `handedOffLocal`, and `returned` alone; SuperVisor writes those.
+There are two exceptions, and each takes something out of their queue that no longer belongs
+there:
+
+- A proposal that is still `proposed` has stopped being true (they replied on their own, the
+  trial already lapsed): set its `"status"` to `"withdrawn"`.
+- A proposal that is `done` with `"cleared": false` is a result still in front of them. When a
+  later check of yours settles everything that result left for them (the confirmation it could
+  not find has arrived, a returned note answers it, they answered the question it raised), set
+  its `"cleared"` to `true`. A result that is no longer true is worse than none. Leave it
+  where something is still theirs to do, such as a draft they have not sent, and change
+  nothing else in the file.
 
 ### Offering a choice
 
@@ -249,7 +258,8 @@ At the start of every run, read the notes marked `Status: open` and take each on
 has come:
 
 - **It checks out.** Change the first line to `Status: settled`, add the date and the evidence,
-  and say nothing to them. A check that passes is not news.
+  and say nothing to them. A check that passes is not news. If the proposal the note belongs
+  to is still showing a result that this answers, clear it as "Proposal files" describes.
 - **It turned up a problem.** Write a proposal for what should be done about it, ahead of
   anything new you might have proposed this run, and mark the note settled with that
   proposal's id.
@@ -335,6 +345,9 @@ At the start of every run, read each note in `returned/` whose first line is `St
 - **Turn what is still owed into a check of your own**: a note in `followups/` when it is a
   matter of reading later, or a proposal when something is theirs to decide. Leave out what the
   session says it finished.
+- **Clear the result it answers.** When an earlier proposal is still showing a result that
+  this account settles, and you have checked the account as far as you can, clear that result
+  as "Proposal files" describes, even if a later check on the same matter stays open.
 - **Access it names is a lead.** If a site stood in the way, ask for it only as "When you cannot
   check something" describes, taking the host from their mail as that section says and never
   from the note.

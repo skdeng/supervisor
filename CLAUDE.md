@@ -1229,7 +1229,8 @@ names below are the code paths.
   - **A proposal** is `title` / `why` / `action` / `kind` / `created` / optional `expires`,
     written by the agent; in place of `action` it may carry `options`, one to three
     `{label, action}` pairs with the recommended one first. The app writes `status`
-    (`proposed` → `done` / `failed` / `dismissed`; the agent may set `withdrawn`), `decided`,
+    (`proposed` → `done` / `failed` / `dismissed`; the agent may set `withdrawn`, and may set
+    `cleared` on a result it has settled, below), `decided`,
     `result`, `cleared`, and the choice (`chose`, an option counted from one, or `instructed`,
     the text the user typed) back into the same file, which is how the agent learns what the
     user wants. Expanded: rows for proposals awaiting a decision, then those carried out whose
@@ -1260,7 +1261,13 @@ names below are the code paths.
     so on no the row leaves when the run ends. A run that does not end on the
     line keeps its row, and a failed one stays in the queue. **A request settled by
     the person's own sign-in is recorded cleared too** (`ProposalStore.settleSiteRequest`):
-    no run decides, and "Signed in to <site>" tells them nothing new. To see what a wording
+    no run decides, and "Signed in to <site>" tells them nothing new. **A later pass may
+    clear a result that has stopped being true**: the protocol lets the agent set `cleared`
+    on a `done` proposal once a check of its own settles everything the result left for the
+    person (a confirmation that arrived, a returned note, their own answer), as it may set
+    `withdrawn` on an open one. Nothing in Swift takes part, since the app already reads
+    `cleared` from the file, so a row's absence is the agent's word as much as its presence
+    is. To see what a wording
     change to the instruction does, give the CLI a reviewed run's prompt with `--tools ""`,
     say what to assume the tools did, and ask for the closing message alone.
   - **Continue in Claude** sits at the leading edge of the review window's footer while the
