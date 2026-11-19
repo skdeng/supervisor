@@ -1223,7 +1223,7 @@ names below are the code paths.
     ledgers are in `UserDefaults`). The told sites and the charge are consumed only once the
     pass has launched, so one that fails to start stays owed. It waits while a scouting pass or another follow-up pass runs, is dropped
     on sleep and re-armed on wake like the scouting timer, carries the scout's confinement and
-    bridge with a smaller allowance (30 turns, $0.75, 10 minutes), looks for nothing beyond the
+    bridge with fewer turns and less time (30 turns, $5, 10 minutes), looks for nothing beyond the
     owed checks, and leaves the scouting status in Settings alone. Proposals it writes are
     admitted and announced like a scout's, and **a standing approval admitted from one draws on
     the scouting pass's allowance of five**: only a scouting pass resets that count

@@ -913,7 +913,7 @@ struct ProVisorCommandTests {
         #expect(!photosOnly.contains("read_texts"))
     }
 
-    @Test("A follow-up pass has the scout's confinement, a smaller allowance, and a prompt about open notes only")
+    @Test("A follow-up pass has the scout's confinement and spending limit, fewer turns, and a prompt about open notes only")
     func followUpArguments() {
         let scoutRun = scout(bridge: nil)
         let run = followUp(bridge: nil)
@@ -928,7 +928,7 @@ struct ProVisorCommandTests {
             #expect(run.contains(flag), "\(flag)")
         }
         #expect(values(after: "--max-turns", in: run) == ["30"])
-        #expect(values(after: "--max-budget-usd", in: run) == ["0.75"])
+        #expect(values(after: "--max-budget-usd", in: run) == ["5.00"])
         #expect(values(after: "--append-system-prompt", in: run) == ["BRIEF"])
 
         let prompt = run[1]

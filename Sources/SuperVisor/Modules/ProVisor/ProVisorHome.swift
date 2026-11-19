@@ -472,8 +472,10 @@ enum ProVisorCommand {
         )
     }
 
-    /// The pass that works through the checks a decision left owed. It has the scout's
-    /// confinement and a smaller allowance, and looks for nothing new. `justSignedIn` names the
+    /// The pass that works through the checks a decision left owed and the notes handed-off
+    /// sessions left. It has the scout's confinement and spending limit with fewer turns, and
+    /// looks for nothing new. The limit is the scout's because folding in a returned note,
+    /// starting with nothing cached, costs several times what a look at the due notes does. `justSignedIn` names the
     /// granted sites the person signed in to since the last pass, each as `ProVisorTools.siteLabel` writes it.
     static func followUpArguments(
         brief: String,
@@ -500,7 +502,7 @@ enum ProVisorCommand {
             prompt: prompt,
             systemPrompt: brief,
             maximumTurns: 30,
-            budget: "0.75",
+            budget: "5.00",
             writableDirectories: passDirectories,
             connectorTools: access.scout,
             mcpConfiguration: bridge?.configurationPath ?? connectorHold,
