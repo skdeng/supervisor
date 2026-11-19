@@ -408,6 +408,13 @@ enum ProVisorCommand {
     /// The CLI's alias for its small model, used for lookups that need no judgement.
     static let utilityModel = "haiku"
 
+    /// The CLI's model alias and effort level for every pass and acting run. A run that names
+    /// no model takes the account's default, and `--restricted` keeps the user's settings
+    /// from choosing another. Each run re-reads the brief and the agent's notes before it
+    /// looks at anything new, so the model's price per token is most of what a run costs.
+    static let runModel = "opus"
+    static let runEffort = "medium"
+
     private static let gmailRulePrefix = "mcp__claude_ai_Gmail__"
 
     /// How the agent names a site it asks for, in a proposal's `site` field: said to reviewed
@@ -902,6 +909,8 @@ enum ProVisorCommand {
             // A scout's transcript is the user's mail; it is not kept on disk a second time.
             "--no-session-persistence",
             "--tools", builtInTools,
+            "--model", runModel,
+            "--effort", runEffort,
             "--max-turns", String(maximumTurns),
             "--max-budget-usd", budget,
         ]

@@ -1242,6 +1242,16 @@ names below are the code paths.
     on system sleep and re-armed on wake, never fires sooner than 45 s after launch or wake, and
     backs off 15 min after a failed pass (`ProVisorSchedule`). A pass is capped at 80 turns, $5,
     and 20 minutes; one cut off by a limit keeps the proposals it had already written.
+  - **Every pass and acting run names its model and effort** (`ProVisorCommand.runModel` and
+    `runEffort`: Opus at medium); the emailed-code lookup names the small model. **A run that
+    names no model takes the account's default**, because `--restricted` ignores the user's
+    settings, and nothing fails: on a plan whose default is its top model, every run is
+    priced at that model's rate and counted against its own weekly limit. A run's cost is
+    mostly the model's price per token, since it re-reads the brief and everything under
+    `memory/` before it looks at anything new, and neither the log nor the workspace records
+    what a run cost. To see which model a set of flags gets, run the CLI in a scratch
+    directory with those flags, `--tools ""`, `--max-turns 1`, and `--output-format json`,
+    and read `modelUsage` in the result.
   - **A proposal** is `title` / `why` / `action` / `kind` / `created` / optional `expires`,
     written by the agent; in place of `action` it may carry `options`, one to three
     `{label, action}` pairs with the recommended one first. The app writes `status`

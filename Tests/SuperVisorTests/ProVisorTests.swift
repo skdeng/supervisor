@@ -729,6 +729,8 @@ struct ProVisorCommandTests {
             "--permission-prompts", "none",
             "--no-session-persistence",
             "--tools", "Read,Write,Edit,Glob,Grep,ToolSearch",
+            "--model", "opus",
+            "--effort", "medium",
             "--max-turns", "80",
             "--max-budget-usd", "5.00",
             "--append-system-prompt", "BRIEF",
@@ -911,6 +913,41 @@ struct ProVisorCommandTests {
         ))
         #expect(!photosOnly.contains("open_site"))
         #expect(!photosOnly.contains("read_texts"))
+    }
+
+    @Test("Every pass and acting run names the same model and effort")
+    func runModelAndEffort() {
+        let runs: [(name: String, arguments: [String])] = [
+            ("scout", scout(bridge: nil)),
+            ("follow-up", followUp(bridge: nil)),
+            ("approved", ProVisorCommand.approvedArguments(
+                proposal: proposal,
+                option: proposal.options[0],
+                access: access,
+                now: now,
+                timeZone: losAngeles
+            )),
+            ("instructed", ProVisorCommand.instructedArguments(
+                proposal: proposal,
+                instruction: "Archive the receipts.",
+                reference: proposal.options[0],
+                access: access
+            )),
+            ("automatic", ProVisorCommand.automaticArguments(
+                proposal: proposal,
+                rule: rule,
+                access: access,
+                now: now,
+                timeZone: losAngeles
+            )),
+        ]
+
+        #expect(ProVisorCommand.runModel == "opus")
+        #expect(ProVisorCommand.runEffort == "medium")
+        for run in runs {
+            #expect(values(after: "--model", in: run.arguments) == ["opus"], "\(run.name)")
+            #expect(values(after: "--effort", in: run.arguments) == ["medium"], "\(run.name)")
+        }
     }
 
     @Test("A follow-up pass has the scout's confinement and spending limit, fewer turns, and a prompt about open notes only")
