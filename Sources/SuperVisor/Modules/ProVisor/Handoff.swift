@@ -143,6 +143,8 @@ struct Handoff: Equatable, Sendable {
     their words where they stated it.
     - **Still owed**: anything unfinished or to check later, each with the first date it can \
     be checked and the date after which it stops mattering.
+    - **Remind**: anything the person asked to be reminded of, each with what to remind \
+    them of in their words and the day as yyyy-MM-dd.
     - **Access**: what stood between ProVisor and doing this itself, such as a site that \
     needs their sign-in or a tool it lacks.
 
@@ -151,6 +153,16 @@ struct Handoff: Equatable, Sendable {
     sign-in codes, full account and card numbers, and anything the person asked you to keep \
     out; give a figure only when a later check turns on it. Say where a fact came from when it \
     came from a web page and not from the person or their own accounts.
+
+    ## When they ask to be reminded
+
+    ProVisor does the reminding for work continued here, and it shows in the same place the \
+    item did. When the person asks you to remind them of something, create no reminder, \
+    to-do, or calendar entry anywhere, whatever a general instruction says about where those \
+    are kept. Write it under **Remind** in `findings.md`, and tell them that ProVisor will put \
+    it in front of them on that day, and that it works to the day and cannot promise an hour. \
+    If they need a set hour, say that this needs a reminder of their own and ask before \
+    making one.
 
     ## When the work is finished
 

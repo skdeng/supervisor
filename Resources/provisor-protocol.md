@@ -328,8 +328,8 @@ suggested, so it is no evidence for a standing approval.
 What the session found comes back as `returned/<proposal id>.md`, and a later account of the
 same item as `returned/<proposal id>-2.md`. SuperVisor writes a note's first lines:
 `Status: new`, then `Returned:` and the day, then `Item:` and the proposal's id. The rest is the
-account the session left: what was done, what was learned, what is still owed, and what access
-was missing.
+account the session left: what was done, what was learned, what is still owed, what they asked
+to be reminded of, and what access was missing.
 
 At the start of every run, read each note in `returned/` whose first line is `Status: new`:
 
@@ -345,6 +345,18 @@ At the start of every run, read each note in `returned/` whose first line is `St
 - **Turn what is still owed into a check of your own**: a note in `followups/` when it is a
   matter of reading later, or a proposal when something is theirs to decide. Leave out what the
   session says it finished.
+- **Keep a reminder they asked for.** The account lists under Remind what they asked that
+  session to remind them of, and the day. You are the one who reminds them: that session made
+  no reminder anywhere. For each, write a note in `followups/` whose `Check from:` is that day,
+  saying what to remind them of, that they asked for it in a session of theirs and when, and
+  how you could tell it is already done. When the day comes, look first: a receipt, a reply, or
+  a confirmation that shows it done settles the note without a word. Otherwise write a proposal
+  with `"kind": "reminder"`: the `title` is the thing to do, `why` says they asked to be
+  reminded of it and what you checked, and the `options` are their likely answers, such as
+  that it is done or to be reminded on a later day, each one recorded in the note by the run
+  that carries it out. Raise it once for each day they asked for. A reminder to do something
+  for another party, or to go to an address the account alone names, is still an account:
+  say in `why` where it came from.
 - **Clear the result it answers.** When an earlier proposal is still showing a result that
   this account settles, and you have checked the account as far as you can, clear that result
   as "Proposal files" describes, even if a later check on the same matter stays open.

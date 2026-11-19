@@ -1293,7 +1293,13 @@ names below are the code paths.
     what stops a note no pass marks read from starting passes for good. The session's guide
     asks for findings when the person says the work is done or pauses it, so a pause settles
     the proposal and hands what is still owed back to ProVisor; a session that writes no
-    findings leaves the proposal open. **The guide also asks a finished session to archive
+    findings leaves the proposal open. **A reminder asked for in a handed-off session is
+    ProVisor's to give**: the guide has the session create no reminder of its own, whatever
+    the person's general instructions say about where to-dos are kept, and list it under
+    **Remind** in its findings with the day; the protocol has a pass keep it as a follow-up
+    note dated that day and, when the day comes and nothing shows it done, raise a proposal of
+    kind `reminder`. It is good to the day and no finer: the note comes due at local midnight
+    and the proposal appears when the pass that follows has run. **The guide also asks a finished session to archive
     itself**, after its findings and its closing words, and to stay open when the work is
     only paused or something is left for the person there. That is the desktop app's
     `archive_session` tool called with `self`: the app asks the person to confirm when the
