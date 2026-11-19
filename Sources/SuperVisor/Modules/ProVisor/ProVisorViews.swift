@@ -255,8 +255,8 @@ private struct ProVisorSignInMarker: View {
     }
 }
 
-/// One proposal: what it would achieve and the evidence for it. The row opens the review
-/// window and can dismiss; it deliberately cannot approve. Approval lives where the action is
+/// One proposal: what it would achieve and the evidence for it. A click on its text opens the
+/// review window, and its one button dismisses; it deliberately cannot approve. Approval lives where the action is
 /// spelled out in full, so what runs is always something the user had in front of them.
 @MainActor
 private struct ProVisorRow: View {
@@ -288,10 +288,8 @@ private struct ProVisorRow: View {
             .notchTooltip("Review")
             .help("Review")
 
-            // A proposal being carried out can be neither reviewed into a second approval nor
-            // dismissed out from under its run.
+            // A proposal being carried out stays where it is until its run ends.
             if state != .working, state != .queued {
-                ProVisorIconButton(systemName: "chevron.right", tooltip: "Review", action: onOpen)
                 ProVisorIconButton(
                     systemName: "xmark",
                     tooltip: state == .done ? "Clear" : "Dismiss",
