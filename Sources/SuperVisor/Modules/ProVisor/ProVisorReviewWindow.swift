@@ -286,8 +286,9 @@ final class FittedWindow: NSWindow {
 /// rewrite would run the scout's words as the user's.
 ///
 /// **Continue in Claude** takes the proposal into a session the person directs
-/// (`ProVisorCenter.handOff`), with whatever is in the text box as their direction. It decides
-/// nothing and runs nothing, and like an approval it is live only for the pinned text.
+/// (`ProVisorCenter.handOff`), which starts on the selected option, or on what is in the text
+/// box. It starts no run of ProVisor's own, and like an approval it is live only for the
+/// pinned text.
 ///
 /// A proposal that asks for a site also offers a button that opens the sign-in window for it.
 /// The button decides nothing: the proposal is settled only when the site is saved there. Its
@@ -645,7 +646,7 @@ struct ProVisorReviewView: View {
                         title: "Continue in Claude",
                         isEnabled: !isStale && (!isCustom || ProposalReview.overflow(of: typed) == 0)
                     ) {
-                        report(center.handOff(proposal, option: index, direction: isCustom ? typed : nil))
+                        report(center.handOff(proposal, option: index, typed: isCustom ? typed : nil))
                     }
                 }
                 Spacer(minLength: 0)

@@ -836,8 +836,17 @@ sink. Preserve these guards when touching the relevant code:
     `.claude`. The folders further up (`Application Support`, `Library`, the home folder) are
     shared with every session the person runs and are not checked. The folder holds the app's
     fixed guide as `CLAUDE.md`, and `brief.md`: the title, the reasons, and the one action
-    that was on screen, from the copy the tap carried, all under a heading the brief's
-    opening marks as an assistant's account of mail. **Of what a model wrote, the link's
+    that was on screen, from the copy the tap carried. **What the person chose leads the
+    brief as what they want done, and the guide has the session start on it without asking**
+    (`Handoff.Request`): the option that was selected, or their own words from the text box.
+    Selecting an option there is what approving one is, with the same pinned text on screen,
+    but the step is then carried out by a session with a browser and whatever tools the
+    person's Claude has, where an acting run has a fixed list; the guide has it ask before
+    anything that sends, pays, deletes, or cannot be undone, and hand ProVisor's own
+    bookkeeping back in its findings. Everything else sits under a heading the brief's
+    opening marks as an assistant's account of mail, and with the text box selected and
+    empty nothing is chosen: the option is listed there as a suggestion and the session
+    waits for a go-ahead. **Of what a model wrote, the link's
     prompt holds the proposal's title and nothing more**, because it is sent in the person's
     name: it is the app's words, the title quoted as the item's name, and what the person
     typed in the review window's text box (`Proposal.typedText`). The title is there because
@@ -1282,9 +1291,9 @@ names below are the code paths.
   - **Continue in Claude** sits at the leading edge of the review window's footer while the
     Claude desktop app is installed (`ProVisorCenter.canHandOff`, read as the window opens).
     It hands the proposal to a session the person directs, for work that needs a real browser
-    or their judgment at each step; Untrusted Input says what bounds it. Whatever is in the
-    **Something else…** box goes along as their direction. **It decides nothing and starts no
-    run**: the proposal stays open under a caption saying when it was continued, and can
+    or their judgment at each step; Untrusted Input says what bounds it. The session starts
+    on the selected option, or on what is in the **Something else…** box, once the person
+    sends the draft's prompt. **It starts no run of ProVisor's own**: the proposal stays open under a caption saying when it was continued, and can
     still be approved, dismissed, or handed off again. **Every handoff draws the desktop
     app's "Trust this workspace?" dialog**, because every handoff's folder is new. When the
     session's `findings.md` comes back, the proposal is recorded `done` with the fixed result

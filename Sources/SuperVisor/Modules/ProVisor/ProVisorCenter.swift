@@ -921,30 +921,22 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
 
     /// Takes a proposal into a session the person directs in the Claude desktop app
     /// (`Handoff`): makes the handoff's folder with its brief, records the handoff, and opens
-    /// the draft of a new session there. `index` is the option on screen, and `typed` what was
-    /// in the review window's text box, which goes into the draft's prompt as their direction.
-    /// Returns why nothing was opened, or nil when the draft is opening.
+    /// the draft of a new session there. `index` is the option on screen. `typed` is what the
+    /// review window's text box held, or nil when that option was selected in its place; the
+    /// session is told to start on whichever the person chose (`Handoff.Request`). Returns why
+    /// nothing was opened, or nil when the draft is opening.
     ///
     /// The proposal stays open: handing it off starts no run and decides nothing. It is
     /// recorded done when that session's findings come back (`admitReturnedFindings`).
     @discardableResult
-    func handOff(_ displayed: Proposal, option index: Int, direction typed: String?) -> DecisionRefusal? {
+    func handOff(_ displayed: Proposal, option index: Int, typed: String?) -> DecisionRefusal? {
         if let refusal = refusal(for: displayed) { return refusal }
-        guard displayed.options.indices.contains(index) else { return .unavailable }
-        var direction: String?
-        if let typed, !typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            guard let cleaned = ProposalReview.instruction(from: typed) else { return .unavailable }
-            direction = cleaned
-        }
+        guard displayed.options.indices.contains(index),
+              let request = Handoff.Request(option: displayed.options[index], typed: typed)
+        else { return .unavailable }
 
         let now = Date()
-        let handoff = Handoff(
-            proposal: displayed,
-            option: displayed.options[index],
-            direction: direction,
-            now: now,
-            timeZone: .current
-        )
+        let handoff = Handoff(proposal: displayed, request: request, now: now, timeZone: .current)
         guard let link = handoff.link(root: ProVisorHome.handoffsURL),
               let application = link.applicationURL()
         else { return .appMissing }
