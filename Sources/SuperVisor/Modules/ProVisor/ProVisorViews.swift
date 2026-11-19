@@ -73,17 +73,8 @@ struct ProVisorSectionView: View {
             onReview: item.proposalID.map { id in { onReview(id) } },
             onPostpone: {
                 center.postponeSignIn(item)
-            },
-            onDismiss: dismissal(of: item.proposalID)
+            }
         )
-    }
-
-    /// Dismisses the proposal behind a sign-in row, unless it is being carried out, which a
-    /// dismissal must not pull out from under its run.
-    private func dismissal(of proposalID: String?) -> (() -> Void)? {
-        guard let proposalID, center.actingID != proposalID, !center.queuedIDs.contains(proposalID)
-        else { return nil }
-        return { center.dismiss(proposalID) }
     }
 
     private func row(_ proposal: Proposal) -> some View {
@@ -96,9 +87,6 @@ struct ProVisorSectionView: View {
             ),
             onOpen: {
                 onReview(proposal.id)
-            },
-            onDismiss: {
-                center.dismiss(proposal.id)
             }
         )
     }
@@ -148,15 +136,14 @@ private struct FoldedList<Item: Identifiable, Row: View>: View {
 }
 
 /// A site waiting on the person's sign-in. Its text opens the review of the proposal that asked
-/// for it, when one did. A granted site can be put off; a requested one is declined by its
-/// proposal's Dismiss.
+/// for it, when one did. A granted site can be put off; a requested one is declined in that
+/// review, where the request can be read first.
 @MainActor
 private struct ProVisorSignInRow: View {
     let item: SignInDemand.Item
     let onSignIn: () -> Void
     let onReview: (() -> Void)?
     let onPostpone: () -> Void
-    let onDismiss: (() -> Void)?
 
     var body: some View {
         HStack(spacing: NotchTheme.rowMarkerGap) {
@@ -180,17 +167,12 @@ private struct ProVisorSignInRow: View {
                 action: onSignIn
             )
 
-            switch item.kind {
-            case .signedOut:
+            if case .signedOut = item.kind {
                 ProVisorTextButton(
                     title: "Not now",
                     tooltip: "Hide until ProVisor next needs this site",
                     action: onPostpone
                 )
-            case .requested:
-                if let onDismiss {
-                    ProVisorIconButton(systemName: "xmark", tooltip: "Dismiss", action: onDismiss)
-                }
             }
         }
     }
@@ -256,14 +238,14 @@ private struct ProVisorSignInMarker: View {
 }
 
 /// One proposal: what it would achieve and the evidence for it. A click on its text opens the
-/// review window, and its one button dismisses; it deliberately cannot approve. Approval lives where the action is
+/// review window, and the row does nothing else: approving and dismissing both happen there,
+/// where the proposal can be read first. Approval lives where the action is
 /// spelled out in full, so what runs is always something the user had in front of them.
 @MainActor
 private struct ProVisorRow: View {
     let proposal: Proposal
     let state: ProposalRowState
     let onOpen: () -> Void
-    let onDismiss: () -> Void
 
     var body: some View {
         HStack(spacing: NotchTheme.rowMarkerGap) {
@@ -287,15 +269,6 @@ private struct ProVisorRow: View {
             .buttonStyle(.plain)
             .notchTooltip("Review")
             .help("Review")
-
-            // A proposal being carried out stays where it is until its run ends.
-            if state != .working, state != .queued {
-                ProVisorIconButton(
-                    systemName: "xmark",
-                    tooltip: state == .done ? "Clear" : "Dismiss",
-                    action: onDismiss
-                )
-            }
         }
     }
 

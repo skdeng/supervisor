@@ -1243,7 +1243,9 @@ names below are the code paths.
     user wants. Expanded: rows for proposals awaiting a decision, then those carried out whose
     result the person still needs to see (next bullet), three unprompted and the rest behind
     **N more**. A row opens the **review
-    window** (`ProVisorReviewWindow`) or dismisses; it cannot approve. The review is an
+    window** (`ProVisorReviewWindow`) on a click and does nothing else: approving, dismissing,
+    and clearing a result all happen there, where the proposal can be read first. The same
+    holds for a sign-in row a proposal asked for. The review is an
     ordinary window because deciding can involve typing and the notch panel never takes
     keyboard focus; opening it closes the sheet. **The window sizes itself to its content
     (`FittedWindow`) and its hosting controller carries no sizing options**: with
