@@ -225,9 +225,21 @@ final class QuotaMonitor: ObservableObject {
                 try? await Task.sleep(for: .seconds(delay))
             }
             guard let self, !Task.isCancelled, self.isRunning, self.isClaudeActive else { return }
+            // A read that failed while this one waited has set a wait of its own and
+            // scheduled the retry that ends it.
+            guard Self.mayStartRequestedRead(at: Date(), allowedAt: self.nextRequestAllowedAt) else {
+                return
+            }
             self.lastRequestAt = Date()
             self.client.requestSnapshot()
         }
+    }
+
+    /// Whether a read a session change asked for may start at `now`: once any wait a failed
+    /// read set has passed. The wait is checked as the read starts, since it can be set after
+    /// the read was asked for.
+    static func mayStartRequestedRead(at now: Date, allowedAt: Date?) -> Bool {
+        allowedAt.map { $0 <= now } ?? true
     }
 
     /// An endpoint read is the account's current state and always replaces what is shown.

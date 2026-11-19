@@ -414,6 +414,17 @@ struct QuotaMonitorTests {
         #expect(!h.monitor.showsRow)
     }
 
+    @Test("A read a session change asked for starts only once a failed read's wait has passed")
+    func requestedReadWaitsOutBackoff() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        #expect(QuotaMonitor.mayStartRequestedRead(at: now, allowedAt: nil))
+        #expect(QuotaMonitor.mayStartRequestedRead(at: now, allowedAt: now))
+        #expect(QuotaMonitor.mayStartRequestedRead(at: now, allowedAt: now.addingTimeInterval(-1)))
+        #expect(!QuotaMonitor.mayStartRequestedRead(at: now, allowedAt: now.addingTimeInterval(0.001)))
+        #expect(!QuotaMonitor.mayStartRequestedRead(at: now, allowedAt: now.addingTimeInterval(60)))
+    }
+
     @Test("A sign-in without the profile scope leaves the row to the capture file")
     func unscopedCredentialSkipsEndpoint() async {
         let h = Harness(credential: Self.credential(scopes: ["user:inference"], expiresAt: nil))
