@@ -70,12 +70,12 @@ struct HandoffTests {
         #expect(asked.lowerBound < item.lowerBound)
     }
 
-    @Test("The prompt is the app's words alone: nothing of the proposal, its id included")
+    @Test("The prompt names the item by its title, and holds nothing else of the proposal")
     func prompt() {
         let prompt = handoff().prompt
 
-        #expect(prompt == "Continue a ProVisor item with me: read `brief.md` in this folder first. Then propose how to start, and wait for my go-ahead.")
-        for words in ["Plan for tax", "Five mails", "follow-up note", "accountant", "patreon"] {
+        #expect(prompt == "Continue the ProVisor item \"Plan for tax on the share sale\" with me: read `brief.md` in this folder first. Then propose how to start, and wait for my go-ahead.")
+        for words in ["Five mails", "follow-up note", "accountant", "patreon"] {
             #expect(!prompt.contains(words), "\(words)")
         }
     }
@@ -84,7 +84,7 @@ struct HandoffTests {
     func promptWithDirection() {
         #expect(
             handoff(direction: "Find my cost basis in Carta").prompt
-                == "Continue a ProVisor item with me: read `brief.md` in this folder first. What I want: Find my cost basis in Carta"
+                == "Continue the ProVisor item \"Plan for tax on the share sale\" with me: read `brief.md` in this folder first. What I want: Find my cost basis in Carta"
         )
     }
 
@@ -161,6 +161,12 @@ struct HandoffTests {
             #expect(guide.contains(part), "\(part)")
         }
         #expect(guide.contains("Leave out passwords, sign-in codes, full account and card numbers"))
+        // A finished session archives itself, after the findings and only when nothing is left.
+        let finished = guide.range(of: "## When the work is finished")!.lowerBound
+        #expect(finished > guide.range(of: "## Handing back")!.lowerBound)
+        #expect(guide.contains("When the work is finished and `findings.md` says so, tell them in a few sentences what was done, then archive this session itself"))
+        #expect(guide.contains("which is their agreement to archiving this one"))
+        #expect(guide.contains("Leave the session open when the work is only paused, when you are waiting on the person, or when something is left for them to do here."))
         // Each of these runs across a continued line of the source.
         for joined in [
             "inside the SuperVisor app. It reads the person's mail",
@@ -172,7 +178,7 @@ struct HandoffTests {
         }
     }
 
-    @Test("Writing a handoff makes a new folder holding the guide and the brief, and nothing else")
+    @Test("Writing a handoff makes a new folder holding the guide, the brief, and the session settings, and nothing else")
     func folder() throws {
         let scratch = ScratchFolder()
         defer { scratch.remove() }
@@ -182,7 +188,15 @@ struct HandoffTests {
         try HandoffFolder.write(item, in: root)
 
         let made = root.appendingPathComponent("2026-11-15-0a1b2c3d", isDirectory: true)
-        #expect(try FileManager.default.contentsOfDirectory(atPath: made.path).sorted() == ["CLAUDE.md", "brief.md"])
+        #expect(try FileManager.default.contentsOfDirectory(atPath: made.path).sorted() == [".claude", "CLAUDE.md", "brief.md"])
+        #expect(try FileManager.default.contentsOfDirectory(atPath: made.appendingPathComponent(".claude").path) == ["settings.json"])
+        let settings = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: made.appendingPathComponent(".claude/settings.json"))
+        ) as? [String: Any]
+        #expect(settings?["model"] as? String == "opus")
+        #expect(settings?["availableModels"] as? [String] == ["opus"])
+        #expect(settings?["effortLevel"] as? String == "medium")
+        #expect(settings?.count == 3)
         #expect(try String(contentsOf: made.appendingPathComponent("CLAUDE.md"), encoding: .utf8) == Handoff.guide)
         #expect(try String(contentsOf: made.appendingPathComponent("brief.md"), encoding: .utf8) == item.brief)
 

@@ -837,10 +837,17 @@ sink. Preserve these guards when touching the relevant code:
     shared with every session the person runs and are not checked. The folder holds the app's
     fixed guide as `CLAUDE.md`, and `brief.md`: the title, the reasons, and the one action
     that was on screen, from the copy the tap carried, all under a heading the brief's
-    opening marks as an assistant's account of mail. **The link's prompt holds no text a
-    model wrote**, the proposal's id included, because it is sent in the person's name: it is
-    the app's words, plus what the person typed in the review window's text box
-    (`Proposal.typedText`). The link is `claude://code/new?q=…&folder=…`
+    opening marks as an assistant's account of mail. **Of what a model wrote, the link's
+    prompt holds the proposal's title and nothing more**, because it is sent in the person's
+    name: it is the app's words, the title quoted as the item's name, and what the person
+    typed in the review window's text box (`Proposal.typedText`). The title is there because
+    the desktop app titles a session from its first message, and one fixed prompt gave every
+    handed-off session the same title; it is at most 100 cleaned characters, shown in the
+    review window and again in the unsent draft. The folder also holds
+    `.claude/settings.json` (`Handoff.sessionSettings`), which has the session run on Opus at
+    medium effort. **`availableModels` is what moves the model**: with `model` alone the
+    desktop app keeps the model its own picker remembers, while `effortLevel` is followed as
+    written (both seen in a draft on a test folder). The link is `claude://code/new?q=…&folder=…`
     (`SessionLink.claudeDesktopNewSession`), opened only in the app with that bundle
     identifier, with every character outside the unreserved set percent-encoded: the app
     decodes the query as a form, where a bare `+` reads as a space. The app shows the prompt
@@ -1286,7 +1293,13 @@ names below are the code paths.
     what stops a note no pass marks read from starting passes for good. The session's guide
     asks for findings when the person says the work is done or pauses it, so a pause settles
     the proposal and hands what is still owed back to ProVisor; a session that writes no
-    findings leaves the proposal open.
+    findings leaves the proposal open. **The guide also asks a finished session to archive
+    itself**, after its findings and its closing words, and to stay open when the work is
+    only paused or something is left for the person there. That is the desktop app's
+    `archive_session` tool called with `self`: the app asks the person to confirm when the
+    session is on screen, and may archive without asking in auto mode when it is not. Nothing
+    in SuperVisor depends on it, since findings are read from the folder, which archiving
+    leaves in place.
   - **Standing approvals** are how "ask me" becomes "just do it", and **both the rule and its
     condition are the agent's to work out from the decision history** — there is no per-kind
     switch and no condition grammar in Swift. A rule is two sentences, a condition and an

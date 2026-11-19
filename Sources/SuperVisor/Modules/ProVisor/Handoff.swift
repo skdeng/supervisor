@@ -7,8 +7,8 @@ import Foundation
 ///
 /// That session is unconfined and reads the open web, so the two directions are bounded
 /// differently. Outward, the session gets the proposal as a file marked as background, in a
-/// folder made for this one handoff, and a prompt that holds only the app's words and the
-/// person's. Back, what the session writes reaches ProVisor only as a note the app has bounded
+/// folder made for this one handoff, and a prompt that holds the app's words, the person's,
+/// and the proposal's title. Back, what the session writes reaches ProVisor only as a note the app has bounded
 /// and cleaned (`HandoffFindings`), which a confined pass weighs as it weighs mail.
 ///
 /// **What keeps the session out of ProVisor's own files is the desktop app's permission
@@ -28,6 +28,22 @@ struct Handoff: Equatable, Sendable {
     static let findingsFileName = "findings.md"
     static let guideFileName = "CLAUDE.md"
 
+    /// The folder's project settings, which decide the model and effort a session opened
+    /// there runs with: Opus at medium effort. **`availableModels` is what moves the model**:
+    /// the desktop app's own model choice outranks a project's `model`, and gives way only
+    /// when the project allows no other; `effortLevel` is followed as written. The person can
+    /// pick no other model in such a session.
+    static let sessionSettings = """
+    {
+      "model": "opus",
+      "availableModels": ["opus"],
+      "effortLevel": "medium"
+    }
+
+    """
+    static let settingsFolderName = ".claude"
+    static let settingsFileName = "settings.json"
+
     /// Anchored with `\A` and `\z`: ICU's `$` also matches before a trailing line terminator.
     static func isValidFolderName(_ name: String) -> Bool {
         name.range(of: #"\A[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f]{8}\z"#, options: .regularExpression) != nil
@@ -38,8 +54,13 @@ struct Handoff: Equatable, Sendable {
     /// box, already cleaned (`ProposalReview.instruction`).
     ///
     /// The brief holds only what was on screen: the title, the reasons, and that one action,
-    /// all under the heading its opening names as the assistant's account. The prompt holds
-    /// nothing a model wrote, since it is sent in the person's name.
+    /// all under the heading its opening names as the assistant's account.
+    ///
+    /// The prompt is sent in the person's name, so of everything a model wrote it holds the
+    /// title alone, quoted as the item's name: the desktop app titles a session from its first
+    /// message, and sessions opened with one fixed prompt would all carry one title. The title
+    /// is at most `Proposal.titleLimit` characters with control and format characters removed,
+    /// was on screen in the review window, and is on screen again in the unsent draft.
     init(
         proposal: Proposal,
         option: ProposalOption,
@@ -71,7 +92,8 @@ struct Handoff: Equatable, Sendable {
         Item id: \(proposal.id)
 
         """
-        let opening = "Continue a ProVisor item with me: read `\(Self.briefFileName)` in this folder first."
+        let opening = "Continue the ProVisor item \"\(proposal.title)\" with me: "
+            + "read `\(Self.briefFileName)` in this folder first."
         prompt = direction.map { "\(opening) What I want: \($0)" }
             ?? "\(opening) Then propose how to start, and wait for my go-ahead."
     }
@@ -87,6 +109,10 @@ struct Handoff: Equatable, Sendable {
     /// What a handed-off session is told, as its folder's project instructions. It is the
     /// app's text alone: a proposal's words go in the brief, where they are marked as
     /// background.
+    ///
+    /// Its last part has a finished session archive itself. That is a request to the session
+    /// and to the desktop app, which asks the person to confirm when the session is on screen;
+    /// nothing here depends on it happening, since findings are read from the folder.
     static let guide = """
     # A ProVisor handoff
 
@@ -126,6 +152,16 @@ struct Handoff: Equatable, Sendable {
     out; give a figure only when a later check turns on it. Say where a fact came from when it \
     came from a web page and not from the person or their own accounts.
 
+    ## When the work is finished
+
+    The person asked SuperVisor to have these sessions archived once their work is finished, \
+    which is their agreement to archiving this one. When the work is finished and \
+    `findings.md` says so, tell them in a few sentences what was done, then archive this \
+    session itself with the app's tool for archiving a session, if you have one. The app may \
+    ask them to confirm. The folder and `findings.md` stay where they are, and the session can \
+    be reopened from the archive. Leave the session open when the work is only paused, when \
+    you are waiting on the person, or when something is left for them to do here.
+
     """
 }
 
@@ -152,7 +188,8 @@ enum HandoffFolder {
     /// The names project instructions are loaded from in a folder above a session's own.
     static let instructionNames: Set<String> = ["CLAUDE.md", "CLAUDE.local.md", ".claude"]
 
-    /// Makes the handoff's folder under `root` and writes the guide and the brief into it.
+    /// Makes the handoff's folder under `root` and writes the guide, the brief, and the
+    /// session settings into it.
     /// Throws `foreignEntry` when `root` holds anything but handoff folders or the folder above
     /// it holds project instructions, and `notCreated` when the handoff's folder already exists
     /// or cannot be made.
@@ -177,6 +214,12 @@ enum HandoffFolder {
         )
         try Data(handoff.brief.utf8).write(
             to: item.appendingPathComponent(Handoff.briefFileName, isDirectory: false),
+            options: .withoutOverwriting
+        )
+        let settings = item.appendingPathComponent(Handoff.settingsFolderName, isDirectory: true)
+        guard mkdir(settings.path, 0o700) == 0 else { throw HandoffFolderError.notCreated }
+        try Data(Handoff.sessionSettings.utf8).write(
+            to: settings.appendingPathComponent(Handoff.settingsFileName, isDirectory: false),
             options: .withoutOverwriting
         )
     }
