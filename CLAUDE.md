@@ -430,7 +430,8 @@ sink. Preserve these guards when touching the relevant code:
   first request (248,000 tokens for seven connectors, measured), the run ends on its spending
   limit after one turn, and the only symptom is "The agent reached its spending limit before
   finishing". It grants nothing: looking a tool up does not allow calling it. The **scout** is
-  allowed writes only under `proposals/`, `memory/`, and `followups/` (`Edit(/proposals/**)` —
+  allowed writes only under `proposals/`, `memory/`, `followups/`, and `returned/`, where it
+  marks a note read (`Edit(/proposals/**)` —
   a leading slash on a command-line rule anchors at the working directory, and `Edit` rules
   cover every file-writing tool) plus the **read** connector tools in `access.json`, so no
   connector tool it holds can send, change, or delete. **Tools that change mail go only to an
@@ -819,6 +820,58 @@ sink. Preserve these guards when touching the relevant code:
   started through `SuperVisor --exec-disclaimed <absolute path> args…` (`DisclaimedExec`),
   which replaces the app's executable with that program, disclaimed, with only the standard
   streams open; any failure ends it with status 127 and one fixed line on stderr.
+- **A proposal handed to a Claude session leaves confinement, and only bounded text comes
+  back** (`Handoff`, `HandoffFindings`). **Continue in Claude** in the review window opens the
+  draft of a new session in the Claude desktop app, which the person directs with a real
+  browser and which nothing in this app confines. **What keeps that session out of ProVisor's
+  files is the desktop app's permission prompts alone**: it runs as the user.
+  - **Outward.** Each handoff gets a folder made new under
+    `~/Library/Application Support/SuperVisor/Handoffs/`, beside `ProVisor/` and never inside
+    it, named by the local day and eight hex digits the app draws (`mkdir`, which fails on a
+    name that exists). **A folder shared between handoffs would let a page that steered one
+    session leave project instructions or hooks for every later one**, since the desktop app
+    loads those from a session's folder and every folder above it. For the same reason a
+    handoff is refused (`handoffFolder`) while `Handoffs/` holds anything but handoff folders,
+    `.DS_Store` apart, or `SuperVisor/` above it holds `CLAUDE.md`, `CLAUDE.local.md`, or
+    `.claude`. The folders further up (`Application Support`, `Library`, the home folder) are
+    shared with every session the person runs and are not checked. The folder holds the app's
+    fixed guide as `CLAUDE.md`, and `brief.md`: the title, the reasons, and the one action
+    that was on screen, from the copy the tap carried, all under a heading the brief's
+    opening marks as an assistant's account of mail. **The link's prompt holds no text a
+    model wrote**, the proposal's id included, because it is sent in the person's name: it is
+    the app's words, plus what the person typed in the review window's text box
+    (`Proposal.typedText`). The link is `claude://code/new?q=…&folder=…`
+    (`SessionLink.claudeDesktopNewSession`), opened only in the app with that bundle
+    identifier, with every character outside the unreserved set percent-encoded: the app
+    decodes the query as a form, where a bare `+` reads as a space. The app shows the prompt
+    unsent and asks the person to trust the folder. The tap passes an approval's refusal
+    first, and the folder, the ledger entry, and the proposal's `handedOff` stamp are written
+    before the link opens; a link that fails to open takes the stamp off again. A failed open
+    is logged by the error's domain and code, since its description can quote the link.
+  - **Back.** `findings.md` is read only from a folder in the app's own ledger
+    (`ProVisor/handoffs.json`, `HandoffLedger`, which neither the workspace nor a session's
+    folder holds, read at start and held in memory by the center). **The ledger, never the
+    proposal's `handedOff` stamp, says what was handed off**: the scout can rewrite a
+    proposal's file, so the stamp serves only the agent and the review window's caption. A
+    folder is read within 14 days of its handoff, once the file has gone 60 s unchanged.
+    **The app may hold Full Disk Access, so the read follows no link**: the folder and the
+    file are each opened by name relative to the folder above with `O_NOFOLLOW`, and a file
+    with a second hard link is refused. At most 32 KiB is read and 8,000 characters kept, cut with a
+    line the app writes; control and format characters are removed and line breaks kept. The
+    note lands in `workspace/returned/` as a new file each time (`<proposal id>.md`, then
+    `<proposal id>-2.md`), never over one a pass has marked read, with the app's lines first
+    (`Status: new`, `Returned:`, `Item:`, and a sentence ranking it with mail from a stranger)
+    and the session's text last. The fingerprint of a findings file is recorded only once its
+    note is written, so a write that fails is tried again a minute later. A proposal's notes
+    take at most 50 names.
+  - **What comes back ranks with mail.** The protocol has a pass keep what matters in
+    `memory/` under a `(returned <id>, <day>)` mark, never count it as one of the person's
+    decisions when weighing a standing approval, never take a `site` from it, and then set
+    the note's first line to `Status: read`. That is the model's judgment. The guarantee is
+    that a returned note buys what hostile mail already could: a proposal the person reviews,
+    or a sign-in request the browsing-history check judges. A proposal the ledger names is
+    never admitted under a standing approval (`admitStandingActions`), and a reviewed acting
+    run can read `returned/` as it can read mail.
 - **An emailed sign-in code is read by a run that can read mail and nothing else**
   (`EmailedCodeLookup`, `ProVisorCommand.emailedCodeArguments`). The run holds the CLI's
   small-model alias, `--tools ToolSearch` (no file tools), only the Gmail read rules found on
@@ -1080,12 +1133,15 @@ names below are the code paths.
     secrets and the hosts those may go to are in the Keychain), `runs/` (one tool-channel
     configuration per run that carries the bridge, holding that run's token, deleted when the
     run ends and swept at launch if a crash left one, beside the shared token-free
-    `connector-hold.json`), and `workspace/` — the run's working directory — holding
+    `connector-hold.json`), `handoffs.json` (the handoffs the app made, below), and
+    `workspace/` — the run's working directory — holding
     `proposals/` (one JSON file each), `memory/` (the agent's own notes: what it has learned
     about the user, what it has already examined), `followups/` (checks owed after a decision,
-    one short note each), and `raised/` (items a reviewed run wants put to the user, which the
-    app admits into `proposals/` itself). Each run starts with no recollection, so those notes
-    and the statuses on past proposals are all it knows.
+    one short note each), `raised/` (items a reviewed run wants put to the user, which the
+    app admits into `proposals/` itself), and `returned/` (what a handed-off session found,
+    which the app admits). Each run starts with no recollection, so those notes
+    and the statuses on past proposals are all it knows. Handed-off sessions work in
+    `SuperVisor/Handoffs/`, beside this folder.
   - **The agent does the checking, and the user hears only when a check goes wrong.** A run
     never hands the user something it could look up (`ProVisorCommand.closingInstructions`,
     and "Do the checking yourself" in the protocol). What a reviewed run cannot confirm yet —
@@ -1150,7 +1206,8 @@ names below are the code paths.
     or unreadable date leaves the note due (`FollowUpNotes`). **A note that waits on a site is
     due only while that site can be read** (granted, not flagged, not turned away): a pass
     started for it would be turned away at once, up to six times a day, with nothing changed
-    until the person signs in. A pass is owed when a note is open and due, or once after the
+    until the person signs in. A pass is owed when a note is open and due, while a note in
+    `returned/` is new (`ReturnedNotes`, under "Continue in Claude" below), or once after the
     user signed in to a site that was in demand (below), so the check that waited on it is
     made with it (`FollowUpDemand`). A note-driven pass starts a minute after it is owed, at
     least ten minutes after the last start, and at most six a local day; **a pass owed by a
@@ -1206,6 +1263,23 @@ names below are the code paths.
     no run decides, and "Signed in to <site>" tells them nothing new. To see what a wording
     change to the instruction does, give the CLI a reviewed run's prompt with `--tools ""`,
     say what to assume the tools did, and ask for the closing message alone.
+  - **Continue in Claude** sits at the leading edge of the review window's footer while the
+    Claude desktop app is installed (`ProVisorCenter.canHandOff`, read as the window opens).
+    It hands the proposal to a session the person directs, for work that needs a real browser
+    or their judgment at each step; Untrusted Input says what bounds it. Whatever is in the
+    **Something else…** box goes along as their direction. **It decides nothing and starts no
+    run**: the proposal stays open under a caption saying when it was continued, and can
+    still be approved, dismissed, or handed off again. **Every handoff draws the desktop
+    app's "Trust this workspace?" dialog**, because every handoff's folder is new. When the
+    session's `findings.md` comes back, the proposal is recorded `done` with the fixed result
+    "Continued in Claude." and cleared (`ProposalStore.recordReturn`, decided by the status on
+    disk, which leaves alone a proposal already decided or one a run is carrying out), and a
+    follow-up pass is owed while a note in `returned/` says `Status: new` and came back
+    within three days (`ReturnedNotes`), on the note-driven schedule. The three-day bound is
+    what stops a note no pass marks read from starting passes for good. The session's guide
+    asks for findings when the person says the work is done or pauses it, so a pause settles
+    the proposal and hands what is still owed back to ProVisor; a session that writes no
+    findings leaves the proposal open.
   - **Standing approvals** are how "ask me" becomes "just do it", and **both the rule and its
     condition are the agent's to work out from the decision history** — there is no per-kind
     switch and no condition grammar in Swift. A rule is two sentences, a condition and an
@@ -1629,6 +1703,13 @@ artifacts:
 - The swarm socket (`~/Library/Application Support/SuperVisor/agent-hooks.sock`) doubles as a
   liveness/timeline record: it exists iff an instance bound it and
   died uncleanly since; its mtime is the moment that instance's SwarmModule activated.
+
+**A handoff's log lines** are in `provisor`: `handoff opened`, `handoff findings admitted <n>`,
+and for what went wrong `handoff refused: foreign entry in the handoff folder`, `handoff not
+recorded`, `handoff link not opened` (beside `session link open failed: <domain> <code>`),
+`handoff ledger not saved`, and `handoff return not recorded`. Findings that never arrive are
+a `findings.md` the session did not write, one in a folder the ledger does not name, or one
+still inside its 60 s of quiet.
 
 **A pass can run without its site, text, and photo-place tools while nothing fails.** The `provisor` log
 carries `bridge tools off: <reason>` (`nothingGranted`, `accessNotSealed`,

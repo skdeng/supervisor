@@ -84,6 +84,15 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
     /// its agent process.
     private var followUpLaunched = false
     private var accessWatcher: FileChangeWatcher?
+    /// The handoffs the app made, read from disk at start and saved on every change. The copy
+    /// here is the one sweeps work from, so a save that fails cannot bring the same findings
+    /// in twice while the app runs.
+    private var handoffLedger = HandoffLedger()
+    /// Follows the folders handed-off sessions work in, for the findings they leave.
+    private var handoffWatcher: DirectoryTreeWatcher?
+    /// Waits to read a findings file that was still changing at the last look
+    /// (`HandoffFindings.quietSeconds`).
+    private var findingsLookTask: Task<Void, Never>?
     private var signInSubscription: AnyCancellable?
     private var signInAnnouncer = SignInAnnouncer()
     private var postponements = SignInPostponements()
@@ -168,8 +177,20 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         }
 
         standingRules = StandingApprovals.load(from: ProVisorHome.standingURL)
-        // Items a run raised just before the app last quit are still waiting in the folder.
+        // Items a run raised just before the app last quit are still waiting in the folder,
+        // and so is anything a handed-off session wrote while the app was not looking.
         admitRaisedItems()
+        handoffLedger = HandoffLedger.load(from: ProVisorHome.handoffLedgerURL)
+        admitReturnedFindings()
+        let handoffWatcher = DirectoryTreeWatcher(url: ProVisorHome.handoffsURL, debounce: 2) { [weak self] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.admitReturnedFindings()
+                }
+            }
+        }
+        self.handoffWatcher = handoffWatcher
+        handoffWatcher.start()
         bridge.removeStaleConfigurations()
         SiteAccessCenter.shared.emailedCode = { [weak self] sender, since in
             await self?.lookUpEmailedCode(sender: sender, since: since)
@@ -241,6 +262,11 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         stopWatchingSignInDemand()
         accessWatcher?.stop()
         accessWatcher = nil
+        handoffWatcher?.stop()
+        handoffWatcher = nil
+        findingsLookTask?.cancel()
+        findingsLookTask = nil
+        handoffLedger = HandoffLedger()
         siteToolsUnavailable = nil
         cadenceSubscription?.cancel()
         cadenceSubscription = nil
@@ -546,17 +572,19 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         followUpTask = nil
     }
 
-    /// Whether a pass is owed: a sign-in is waiting on one, or a note is due. A note that waits
-    /// on a site is due only while the site can be read.
+    /// Whether a pass is owed: a sign-in is waiting on one, a note is due, or a handed-off
+    /// session left findings no pass has read (`ReturnedNotes`). A note that waits on a site is
+    /// due only while the site can be read.
     private func isFollowUpOwed(now: Date) -> Bool {
         let sites = SiteAccessCenter.shared
         let (granted, awaiting) = (sites.access.sites(), sites.awaitingSignIn)
+        let today = LocalDay(now, timeZone: .current)
         return followUpDemand.isOwed(
             hasDueNote: FollowUpNotes.hasDueNote(
                 in: ProVisorHome.followUpsURL,
-                on: LocalDay(now, timeZone: .current),
+                on: today,
                 readable: { FollowUpNotes.isReadable($0, granted: granted, awaiting: awaiting) }
-            )
+            ) || ReturnedNotes.hasNew(in: ProVisorHome.returnedURL, on: today)
         )
     }
 
@@ -883,6 +911,118 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         ) ? nil : .notSaved
     }
 
+    /// Whether a proposal can be handed to a session in the Claude desktop app: the app is on
+    /// this Mac.
+    var canHandOff: Bool {
+        NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: SessionLink.claudeDesktopBundleIdentifier
+        ) != nil
+    }
+
+    /// Takes a proposal into a session the person directs in the Claude desktop app
+    /// (`Handoff`): makes the handoff's folder with its brief, records the handoff, and opens
+    /// the draft of a new session there. `index` is the option on screen, and `typed` what was
+    /// in the review window's text box, which goes into the draft's prompt as their direction.
+    /// Returns why nothing was opened, or nil when the draft is opening.
+    ///
+    /// The proposal stays open: handing it off starts no run and decides nothing. It is
+    /// recorded done when that session's findings come back (`admitReturnedFindings`).
+    @discardableResult
+    func handOff(_ displayed: Proposal, option index: Int, direction typed: String?) -> DecisionRefusal? {
+        if let refusal = refusal(for: displayed) { return refusal }
+        guard displayed.options.indices.contains(index) else { return .unavailable }
+        var direction: String?
+        if let typed, !typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard let cleaned = ProposalReview.instruction(from: typed) else { return .unavailable }
+            direction = cleaned
+        }
+
+        let now = Date()
+        let handoff = Handoff(
+            proposal: displayed,
+            option: displayed.options[index],
+            direction: direction,
+            now: now,
+            timeZone: .current
+        )
+        guard let link = handoff.link(root: ProVisorHome.handoffsURL),
+              let application = link.applicationURL()
+        else { return .appMissing }
+        // The records come before the link, as a decision's does before its run: findings are
+        // read only from a folder the ledger names.
+        do {
+            try HandoffFolder.write(handoff, in: ProVisorHome.handoffsURL)
+            var ledger = handoffLedger
+            ledger.record(handoff, at: now)
+            try ledger.save(to: ProVisorHome.handoffLedgerURL)
+            handoffLedger = ledger
+            try ProposalStore.recordHandoff(id: displayed.id, in: ProVisorHome.proposalsURL, now: now)
+        } catch HandoffFolderError.foreignEntry {
+            AppLog.error(.provisor, "handoff refused: foreign entry in the handoff folder")
+            return .handoffFolder
+        } catch {
+            AppLog.error(.provisor, "handoff not recorded")
+            return .notSaved
+        }
+        reloadSoon()
+        let id = displayed.id
+        link.open(at: application, category: .provisor) { [weak self] in
+            // No session opened, so the proposal must not say one did.
+            AppLog.error(.provisor, "handoff link not opened")
+            try? ProposalStore.removeHandoff(id: id, in: ProVisorHome.proposalsURL)
+            self?.reloadSoon()
+        }
+        AppLog.notice(.provisor, "handoff opened")
+        return nil
+    }
+
+    /// Brings in what handed-off sessions wrote since the last look (`HandoffFindings`), marks
+    /// each proposal returned, and arms the pass that reads the notes. A proposal still
+    /// awaiting a decision is recorded done, unless a run is already carrying it out. A file
+    /// that was still changing is looked at again once it has had time to settle.
+    private func admitReturnedFindings() {
+        guard isActive else { return }
+        findingsLookTask?.cancel()
+        findingsLookTask = nil
+        let ledger = handoffLedger
+        let sweep = HandoffFindings.admit(
+            ledger: ledger,
+            from: ProVisorHome.handoffsURL,
+            into: ProVisorHome.returnedURL
+        )
+        if let nextLook = sweep.nextLook {
+            findingsLookTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(max(1, nextLook.timeIntervalSinceNow)))
+                guard let self, !Task.isCancelled else { return }
+                self.admitReturnedFindings()
+            }
+        }
+        guard sweep.ledger != ledger else { return }
+        handoffLedger = sweep.ledger
+        do {
+            try sweep.ledger.save(to: ProVisorHome.handoffLedgerURL)
+        } catch {
+            // After a relaunch the findings are read once more, into a second note.
+            AppLog.error(.provisor, "handoff ledger not saved")
+        }
+        guard !sweep.admitted.isEmpty else { return }
+        for id in sweep.admitted {
+            let isBusy = actingID == id || queuedIDs.contains(id)
+            do {
+                _ = try ProposalStore.recordReturn(
+                    id: id,
+                    in: ProVisorHome.proposalsURL,
+                    settlesOpen: !isBusy
+                )
+            } catch {
+                AppLog.error(.provisor, "handoff return not recorded")
+            }
+        }
+        reloadSoon()
+        AppLog.notice(.provisor, "handoff findings admitted \(sweep.admitted.count)")
+        armFollowUp()
+    }
+
     private func refusal(for displayed: Proposal) -> DecisionRefusal? {
         ProposalReview.refusal(
             displayed: displayed,
@@ -983,6 +1123,9 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         let now = Date()
         let candidates = loaded.filter { proposal in
             !automaticIDs.contains(proposal.id)
+                // One the person took into a session is theirs; no rule acts on it. The
+                // ledger says which those are, since the agent can rewrite a proposal's stamp.
+                && !handoffLedger.proposals.contains(proposal.id)
                 && actingID != proposal.id
                 && !queuedIDs.contains(proposal.id)
                 && StandingApprovals.rule(for: proposal, in: standingRules, now: now) != nil

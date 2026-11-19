@@ -385,7 +385,7 @@ enum FollowUpNotes {
 
     /// The first `headBytes` of a note that is a regular file named `*.md`, not a symbolic
     /// link, and within `maximumNoteBytes`.
-    private static func head(of url: URL) -> Data? {
+    static func head(of url: URL) -> Data? {
         guard url.pathExtension == "md" else { return nil }
         // O_NOFOLLOW refuses a symbolic link, and O_NONBLOCK keeps a named pipe from holding
         // the open.

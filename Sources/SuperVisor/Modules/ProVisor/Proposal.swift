@@ -69,6 +69,9 @@ struct Proposal: Identifiable, Equatable, Sendable {
     /// by mail: it offers a sign-in and never grants one, and the sign-in window opens it only
     /// when the user's own browsers know it (`SiteSignInModel`).
     var site: String?
+    /// When the person took it into a session they direct (`Handoff`), as the file says. It
+    /// is read for the review window's caption alone; `HandoffLedger` is the app's record.
+    var handedOff: Date?
 
     /// Whether the proposal still awaits a decision — a failed one can be approved again.
     var isOpen: Bool { status == .proposed || status == .failed }
@@ -156,7 +159,8 @@ extension Proposal {
             isAutomatic: fields["automatic"] as? Bool ?? false,
             decided: date(fields["decided"]),
             choice: parsedChoice(fields, optionCount: options.count),
-            site: parsedSite(fields["site"])
+            site: parsedSite(fields["site"]),
+            handedOff: date(fields["handedOff"])
         )
     }
 
@@ -271,7 +275,8 @@ extension Proposal {
         return text
     }
 
-    private static func date(_ value: Any?) -> Date? {
+    /// An ISO 8601 time, with or without fractional seconds; nil for anything else.
+    static func date(_ value: Any?) -> Date? {
         guard let text = value as? String, text.count <= 40 else { return nil }
         if let date = try? Date(text, strategy: .iso8601) { return date }
         return try? Date(text, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true))
@@ -669,6 +674,73 @@ enum ProposalStore {
         fields["cleared"] = true
         try write(fields, id: id, in: directory)
         return .settled
+    }
+
+    /// The result recorded on a proposal whose work the person finished in a session they
+    /// directed.
+    static let returnedResult = "Continued in Claude."
+
+    /// Records that the person took the proposal into a session they direct. The agent reads
+    /// the stamp as their answer: this one was worth working through together. The app's own
+    /// record of a handoff is `HandoffLedger`, since the agent can rewrite this file.
+    static func recordHandoff(
+        id: String,
+        in directory: URL,
+        now: Date = Date(),
+        timeZone: TimeZone = .current
+    ) throws {
+        var fields = try readFields(id: id, in: directory)
+        fields["handedOff"] = now.formatted(.iso8601)
+        fields["handedOffLocal"] = ProVisorClock.localStamp(now, timeZone: timeZone)
+        try write(fields, id: id, in: directory)
+    }
+
+    /// Takes the handoff stamp off a proposal whose session never opened.
+    static func removeHandoff(id: String, in directory: URL) throws {
+        var fields = try readFields(id: id, in: directory)
+        fields["handedOff"] = nil
+        fields["handedOffLocal"] = nil
+        try write(fields, id: id, in: directory)
+    }
+
+    /// What recording a return did.
+    enum ReturnSettlement: Equatable {
+        /// The proposal was open and is now done.
+        case settled
+        /// The return was stamped on a proposal that is decided, or is being carried out.
+        case stamped
+    }
+
+    /// Records that the session a proposal was handed to left its findings; the caller
+    /// vouches that it was handed off (`HandoffLedger`). The status is decided by the file on
+    /// disk: a proposal still awaiting a decision becomes done and cleared, since the person
+    /// was there for the work and has nothing new to be told, and one already decided keeps
+    /// its outcome and gains the stamp.
+    ///
+    /// With `settlesOpen` false an open proposal is stamped and left open: a run already
+    /// carrying it out records the outcome itself.
+    static func recordReturn(
+        id: String,
+        in directory: URL,
+        settlesOpen: Bool = true,
+        now: Date = Date(),
+        timeZone: TimeZone = .current
+    ) throws -> ReturnSettlement {
+        var fields = try readFields(id: id, in: directory)
+        fields["returned"] = now.formatted(.iso8601)
+        let status: Proposal.Status? = switch fields["status"] {
+        case nil: .proposed
+        case let name as String: Proposal.Status(rawValue: name)
+        default: nil
+        }
+        let isOpen = settlesOpen && (status == .proposed || status == .failed)
+        if isOpen {
+            stamp(.done, into: &fields, now: now, timeZone: timeZone)
+            fields["result"] = returnedResult
+            fields["cleared"] = true
+        }
+        try write(fields, id: id, in: directory)
+        return isOpen ? .settled : .stamped
     }
 
     private static func url(id: String, in directory: URL) throws -> URL {

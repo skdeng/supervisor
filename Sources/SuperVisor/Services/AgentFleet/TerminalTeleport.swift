@@ -58,45 +58,13 @@ final class TerminalTeleport {
         }
     }
 
-    /// Opens the link in the app it belongs to, so another app registered for the same URL
-    /// scheme never receives it. A failed open still brings that app forward.
+    /// Opens the link in the app it belongs to. A failed open still brings that app forward.
     private func open(_ link: SessionLink, hostedBy host: SessionHost?) {
-        guard let bundleURL = Self.bundleURL(for: link, hostedBy: host) else {
+        guard let bundleURL = link.applicationURL(hostedBy: host) else {
             AppLog.error(.swarm, "session link has no \(link.appName) app to open in")
             return
         }
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-        // LaunchServices calls back off the main thread, so the handler is explicitly
-        // nonisolated rather than inheriting this class's main-actor isolation.
-        let completion: @Sendable (NSRunningApplication?, Error?) -> Void = { _, error in
-            guard let error else { return }
-            AppLog.error(.swarm, "session link open failed: \(error.localizedDescription)")
-            Task { @MainActor in Self.bringForward(bundleURL) }
-        }
-        NSWorkspace.shared.open(
-            [link.url],
-            withApplicationAt: bundleURL,
-            configuration: configuration,
-            completionHandler: completion
-        )
-    }
-
-    /// The link's app: the running host when it is that app, else another running copy, else
-    /// the installed one.
-    private static func bundleURL(for link: SessionLink, hostedBy host: SessionHost?) -> URL? {
-        if let host,
-           let app = NSRunningApplication(processIdentifier: host.processIdentifier),
-           !app.isTerminated,
-           app.bundleIdentifier == link.bundleIdentifier,
-           let bundleURL = app.bundleURL {
-            return bundleURL
-        }
-        let running = NSRunningApplication
-            .runningApplications(withBundleIdentifier: link.bundleIdentifier)
-            .first { !$0.isTerminated }
-        return running?.bundleURL
-            ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: link.bundleIdentifier)
+        link.open(at: bundleURL, category: .swarm) { Self.bringForward(bundleURL) }
     }
 
     /// Brings the host forward through LaunchServices. `NSRunningApplication.activate` is

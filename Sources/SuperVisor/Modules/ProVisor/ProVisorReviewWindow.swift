@@ -10,6 +10,10 @@ enum DecisionRefusal: Equatable {
     case unavailable
     /// The decision could not be written into the proposal's file.
     case notSaved
+    /// The app a proposal would be handed to is not on this Mac.
+    case appMissing
+    /// The folder handoffs are made in holds something the app did not put there.
+    case handoffFolder
 }
 
 /// The review window's decisions that depend on no view.
@@ -83,6 +87,25 @@ enum ProposalReview {
         return "Sign In to \(host)…"
     }
 
+    /// What the review window says when a tap ran nothing.
+    static func notice(for refusal: DecisionRefusal) -> String {
+        switch refusal {
+        case .changed: "This proposal changed as you decided. Nothing was run."
+        case .unavailable: "This proposal can no longer be acted on. Nothing was run."
+        case .notSaved: "The decision could not be saved, so nothing was run."
+        case .appMissing: "The Claude app is not on this Mac, so nothing was opened."
+        case .handoffFolder:
+            "SuperVisor's Handoffs folder holds something it did not put there, so nothing was opened. "
+                + "Look in Application Support/SuperVisor/Handoffs and move it out."
+        }
+    }
+
+    /// What an open proposal says once it has been taken into a session.
+    static func handedOffCaption(_ date: Date) -> String {
+        "You continued this in Claude on \(date.formatted(date: .abbreviated, time: .shortened)). "
+            + "It closes here when that session writes its findings."
+    }
+
     /// What to say in place of the choices when a proposal is past deciding.
     static func closedReason(_ proposal: Proposal, now: Date) -> String? {
         switch proposal.status {
@@ -115,7 +138,12 @@ final class ProVisorReviewWindow {
         // The site button's title is decided from the granted sites as the review opens.
         SiteAccessCenter.shared.refresh()
         let root = AnyView(
-            ProVisorReviewView(center: center, id: id, grantedSites: SiteAccessCenter.shared.sites) { [weak self] in
+            ProVisorReviewView(
+                center: center,
+                id: id,
+                grantedSites: SiteAccessCenter.shared.sites,
+                canHandOff: center.canHandOff
+            ) { [weak self] in
                 self?.close()
             }
             .id(UUID())
@@ -257,6 +285,10 @@ final class FittedWindow: NSWindow {
 /// recommended option and an empty box, because a box pre-filled from a file the scout can
 /// rewrite would run the scout's words as the user's.
 ///
+/// **Continue in Claude** takes the proposal into a session the person directs
+/// (`ProVisorCenter.handOff`), with whatever is in the text box as their direction. It decides
+/// nothing and runs nothing, and like an approval it is live only for the pinned text.
+///
 /// A proposal that asks for a site also offers a button that opens the sign-in window for it.
 /// The button decides nothing: the proposal is settled only when the site is saved there. Its
 /// title is decided when the review opens, or when the user asks for an update, and is one
@@ -268,6 +300,8 @@ struct ProVisorReviewView: View {
     let onClose: () -> Void
     /// The granted sites as the review opened, which name the site button.
     private let grantedSites: [SiteRecord]
+    /// Whether the app a proposal is handed to was installed as the review opened.
+    private let canHandOff: Bool
 
     /// The text being reviewed, as it stood when the window opened or was last brought up to
     /// date by the user.
@@ -287,11 +321,13 @@ struct ProVisorReviewView: View {
         center: ProVisorCenter,
         id: String,
         grantedSites: [SiteRecord] = [],
+        canHandOff: Bool = false,
         onClose: @escaping () -> Void
     ) {
         self.center = center
         self.id = id
         self.grantedSites = grantedSites
+        self.canHandOff = canHandOff
         self.onClose = onClose
         let pinned = center.proposals.first { $0.id == id }.map(ReviewedText.init)
         _pinned = State(initialValue: pinned)
@@ -353,6 +389,12 @@ struct ProVisorReviewView: View {
             } else if isDecidable {
                 if isStale {
                     staleNotice(current)
+                }
+                if let handedOff = proposal.handedOff {
+                    Text(ProposalReview.handedOffCaption(handedOff))
+                        .font(.caption)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 choices(text)
                 if let host = text.site, let title = siteButtonTitle {
@@ -598,6 +640,14 @@ struct ProVisorReviewView: View {
                 isCustom: isCustom
             )
             HStack(spacing: 8) {
+                if canHandOff {
+                    ProVisorCapsuleButton(
+                        title: "Continue in Claude",
+                        isEnabled: !isStale && (!isCustom || ProposalReview.overflow(of: typed) == 0)
+                    ) {
+                        report(center.handOff(proposal, option: index, direction: isCustom ? typed : nil))
+                    }
+                }
                 Spacer(minLength: 0)
                 ProVisorCapsuleButton(title: "Dismiss") {
                     center.dismiss(proposal.id)
@@ -652,18 +702,19 @@ struct ProVisorReviewView: View {
     /// while that copy's text equals the pinned text on screen, and the center refuses a copy
     /// that has changed again since this render.
     private func decide(_ proposal: Proposal, optionIndex index: Int, always: Bool) {
-        let refusal = isCustom
-            ? center.instruct(proposal, reference: index, text: typed)
-            : center.approve(proposal, option: index, always: always)
-        switch refusal {
-        case nil:
+        report(
+            isCustom
+                ? center.instruct(proposal, reference: index, text: typed)
+                : center.approve(proposal, option: index, always: always)
+        )
+    }
+
+    /// Closes the window on a decision that was taken, and says why one was not.
+    private func report(_ refusal: DecisionRefusal?) {
+        if let refusal {
+            notice = ProposalReview.notice(for: refusal)
+        } else {
             onClose()
-        case .changed:
-            notice = "This proposal changed as you decided. Nothing was run."
-        case .unavailable:
-            notice = "This proposal can no longer be acted on. Nothing was run."
-        case .notSaved:
-            notice = "The decision could not be saved, so nothing was run."
         }
     }
 

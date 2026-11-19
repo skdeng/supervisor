@@ -27,17 +27,23 @@ enum ProVisorSetupError: Error, LocalizedError {
 ///   standing.json  the rules the user agreed may be acted on without asking
 ///   sites.json     the sites granted for signed-in reading (secrets are in the Keychain)
 ///   runs/          one tool-channel configuration for each run that is using it
+///   handoffs.json  the handoffs the app made, and the findings brought in (`HandoffLedger`)
 ///   workspace/     the agent's working directory
 ///     proposals/   one JSON file per proposal
 ///     memory/      the agent's own notes between runs
 ///     followups/   checks owed after a decision, one note each
 ///     raised/      items a reviewed run wants put to the user, admitted by `RaisedItems`
+///     returned/    what a handed-off session found, admitted by `HandoffFindings`
+/// Handoffs/        beside ProVisor/: one folder per proposal handed to a session (`Handoff`)
 /// ```
 ///
 /// The brief, the access list, the standing approvals, and each run's tool-channel
 /// configuration sit outside the workspace on purpose. The agent's file tools are confined to
 /// its working directory, so it can neither read nor rewrite the files that say what it is for,
 /// what it may reach, and what it may do unasked — whatever a message it reads tells it to do.
+/// `Handoffs/` sits outside this folder altogether for the opposite reason: the sessions that
+/// work there are unconfined, so nothing of ProVisor's is in or above their working folder, and
+/// what they write reaches the workspace only through `HandoffFindings`.
 ///
 /// The brief the agent receives is `CHARTER.md` followed by the bundled mechanics
 /// (`provisor-protocol.md`), which is never seeded to disk. The split keeps the two apart by
@@ -98,6 +104,19 @@ enum ProVisorHome {
         workspaceURL.appendingPathComponent(raisedDirectoryName, isDirectory: true)
     }
 
+    /// Where each handed-off session's folder is made (`HandoffFolder`).
+    static var handoffsURL: URL {
+        rootURL.deletingLastPathComponent().appendingPathComponent("Handoffs", isDirectory: true)
+    }
+
+    static var handoffLedgerURL: URL {
+        rootURL.appendingPathComponent("handoffs.json", isDirectory: false)
+    }
+
+    static var returnedURL: URL {
+        workspaceURL.appendingPathComponent(returnedDirectoryName, isDirectory: true)
+    }
+
     static let proposalsDirectoryName = "proposals"
     static let memoryDirectoryName = "memory"
     /// Checks the agent owes after a decision: things it could not confirm at the time and is
@@ -107,6 +126,9 @@ enum ProVisorHome {
     /// the queue under an id of its own (`RaisedItems`), so the run never writes in
     /// `proposals/` and can neither replace a proposal nor claim a standing approval.
     static let raisedDirectoryName = "raised"
+    /// Where the app puts what a handed-off session found, one note per proposal. A pass reads
+    /// each as an account to weigh and marks it read; the session itself never writes here.
+    static let returnedDirectoryName = "returned"
 
     static var bundledCharterURL: URL? {
         Bundle.main.url(forResource: "provisor-charter", withExtension: "md")
@@ -120,7 +142,8 @@ enum ProVisorHome {
     /// Existing files are never overwritten: both are the user's once they exist.
     static func prepare() throws {
         for directory in [
-            rootURL, workspaceURL, proposalsURL, memoryURL, followUpsURL, raisedURL,
+            rootURL, workspaceURL, proposalsURL, memoryURL, followUpsURL, raisedURL, returnedURL,
+            handoffsURL,
         ] {
             try FileManager.default.createDirectory(
                 at: directory,
@@ -410,11 +433,13 @@ enum ProVisorCommand {
     /// run ends on its spending limit after one turn.
     static let builtInTools = "Read,Write,Edit,Glob,Grep,ToolSearch"
 
-    /// The folders a pass may write in: its proposals, its own notes, and the checks it owes.
+    /// The folders a pass may write in: its proposals, its own notes, the checks it owes, and
+    /// the returned notes, whose first line it changes once it has dealt with one.
     private static let passDirectories = [
         ProVisorHome.proposalsDirectoryName,
         ProVisorHome.memoryDirectoryName,
         ProVisorHome.followUpsDirectoryName,
+        ProVisorHome.returnedDirectoryName,
     ]
 
     /// The pass that looks through the user's data for things worth proposing. With a `bridge`
@@ -464,8 +489,9 @@ enum ProVisorCommand {
         Run a follow-up pass now, as your standing brief describes. Work through the notes in \
         `followups/` whose first line is `Status: open` and whose `Check from:` date has come, \
         as the "Follow-ups" section of the brief describes: settle the ones that check out without a word, and raise what turns \
-        out wrong or cannot be checked. Look for nothing new, and write no proposal except \
-        what a follow-up turns up. \
+        out wrong or cannot be checked. Then take each note in `returned/` whose first line is \
+        `Status: new`, as the "Handed to Claude" section of the brief describes. Look for \
+        nothing new, and write no proposal except what a follow-up or a returned note turns up. \
         \(passContext(now: now, timeZone: timeZone, access: access, standing: standing))\
         \(bridgeSentence(bridge))\
         \(justSignedInSentence(justSignedIn))

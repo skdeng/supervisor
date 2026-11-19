@@ -588,6 +588,7 @@ struct ProVisorCommandTests {
             "Edit(/proposals/**)",
             "Edit(/memory/**)",
             "Edit(/followups/**)",
+            "Edit(/returned/**)",
             "mcp__mail__get_*",
         ])
         // The prompt tells the scout what an approved action could use, by name.
@@ -732,7 +733,7 @@ struct ProVisorCommandTests {
             "--max-budget-usd", "5.00",
             "--append-system-prompt", "BRIEF",
             "--allowedTools",
-            "Edit(/proposals/**)", "Edit(/memory/**)", "Edit(/followups/**)",
+            "Edit(/proposals/**)", "Edit(/memory/**)", "Edit(/followups/**)", "Edit(/returned/**)",
             "mcp__mail__get_*",
         ])
     }
@@ -882,7 +883,7 @@ struct ProVisorCommandTests {
 
         #expect(values(after: "--mcp-config", in: bridged) == ["/tmp/runs/0a1b2c3d.json"])
         #expect(values(after: "--allowedTools", in: bridged) == [
-            "Edit(/proposals/**)", "Edit(/memory/**)", "Edit(/followups/**)",
+            "Edit(/proposals/**)", "Edit(/memory/**)", "Edit(/followups/**)", "Edit(/returned/**)",
             "mcp__mail__get_*",
         ] + toolRules)
         let sentence = " You can read these sites signed in, through open_site: Bank, City Power. You can read their text messages through read_texts. The \"Sites, texts, and photo places\" section of your brief says how to use them and what never to do."
@@ -936,8 +937,9 @@ struct ProVisorCommandTests {
         #expect(prompt.contains("\"Follow-ups\" section of the brief"))
         #expect(prompt.contains("settle the ones that check out without a word"))
         #expect(prompt.contains("raise what turns out wrong or cannot be checked"))
+        #expect(prompt.contains("Then take each note in `returned/` whose first line is `Status: new`, as the \"Handed to Claude\" section of the brief describes."))
         #expect(prompt.contains("Look for nothing new"))
-        #expect(prompt.contains("write no proposal except what a follow-up turns up"))
+        #expect(prompt.contains("write no proposal except what a follow-up or a returned note turns up"))
         // The date line and standing briefing a scout gets.
         #expect(prompt.contains("Sunday 2026-11-15 09:12"))
         #expect(prompt.contains("America/Los_Angeles"))

@@ -43,7 +43,7 @@ struct SessionHost: Equatable, Sendable {
     }
 }
 
-/// A URL the session's host app opens to show that one session.
+/// A URL a session's host app opens: one of its sessions, or the draft of a new one.
 struct SessionLink: Equatable, Sendable {
     let url: URL
     /// The app the link belongs to, and the only app it is ever opened in.
@@ -79,6 +79,98 @@ struct SessionLink: Equatable, Sendable {
             url: url,
             bundleIdentifier: claudeDesktopBundleIdentifier,
             appName: "Claude"
+        )
+    }
+
+    /// The longest prompt a new-session link carries. The desktop app cuts a prompt past its own
+    /// limit of 14,336 characters, and a cut prompt says something other than what was written.
+    static let newSessionPromptLimit = 4_000
+
+    /// The Claude desktop app's link to the draft of a new session: `claude://code/new` with the
+    /// prompt in `q` and the working folder in `folder`. The app shows the prompt unsent, for
+    /// the person to read and send, and asks them to trust a folder it has not opened before.
+    ///
+    /// Nil for an empty prompt, one past `newSessionPromptLimit`, one holding a control
+    /// character, or a folder that is not an absolute file path. Every character outside the
+    /// unreserved set is percent-encoded: the app decodes the query as a form, where a bare `+`
+    /// reads as a space.
+    static func claudeDesktopNewSession(prompt: String, folder: URL) -> SessionLink? {
+        guard !prompt.isEmpty,
+              prompt.count <= newSessionPromptLimit,
+              prompt.unicodeScalars.allSatisfy({ $0.properties.generalCategory != .control }),
+              folder.isFileURL,
+              folder.path.hasPrefix("/"),
+              let query = formEncoded(prompt),
+              let path = formEncoded(folder.path)
+        else { return nil }
+
+        var components = URLComponents()
+        components.scheme = "claude"
+        components.host = "code"
+        components.path = "/new"
+        components.percentEncodedQueryItems = [
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "folder", value: path),
+        ]
+        guard let url = components.url else { return nil }
+        return SessionLink(
+            url: url,
+            bundleIdentifier: claudeDesktopBundleIdentifier,
+            appName: "Claude"
+        )
+    }
+
+    private static let unreserved = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    )
+
+    private static func formEncoded(_ value: String) -> String? {
+        value.addingPercentEncoding(withAllowedCharacters: unreserved)
+    }
+}
+
+extension SessionLink {
+    /// The app to open the link in: `host` when it is a running copy of the link's app, else
+    /// another running copy, else the installed one. Nil when the app is not on this Mac.
+    @MainActor
+    func applicationURL(hostedBy host: SessionHost? = nil) -> URL? {
+        if let host,
+           let app = NSRunningApplication(processIdentifier: host.processIdentifier),
+           !app.isTerminated,
+           app.bundleIdentifier == bundleIdentifier,
+           let bundleURL = app.bundleURL {
+            return bundleURL
+        }
+        let running = NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleIdentifier)
+            .first { !$0.isTerminated }
+        return running?.bundleURL
+            ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
+    }
+
+    /// Opens the link in the app at `bundleURL`, so another app registered for the same URL
+    /// scheme never receives it. `onFailure` runs on the main actor when the open fails.
+    @MainActor
+    func open(
+        at bundleURL: URL,
+        category: AppLogCategory,
+        onFailure: @escaping @MainActor @Sendable () -> Void = {}
+    ) {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        // LaunchServices calls back off the main thread, so the handler is declared nonisolated.
+        // The error is logged by domain and code: its description can quote the link, whose
+        // query may hold what the person typed.
+        let completion: @Sendable (NSRunningApplication?, Error?) -> Void = { _, error in
+            guard let error = error as NSError? else { return }
+            AppLog.error(category, "session link open failed: \(error.domain) \(error.code)")
+            Task { @MainActor in onFailure() }
+        }
+        NSWorkspace.shared.open(
+            [url],
+            withApplicationAt: bundleURL,
+            configuration: configuration,
+            completionHandler: completion
         )
     }
 }
