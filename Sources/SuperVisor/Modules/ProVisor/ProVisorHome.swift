@@ -109,6 +109,24 @@ enum ProVisorHome {
         rootURL.deletingLastPathComponent().appendingPathComponent("Handoffs", isDirectory: true)
     }
 
+    /// SuperVisor's source checkout at `path`, where a session about ProVisor itself is
+    /// opened (`Handoff.Workplace.source`): an absolute path to a folder holding the package
+    /// and ProVisor's protocol. Nil for anything else, an unset path included, and the session
+    /// then opens in its handoff's own folder.
+    static func sourceFolder(at path: String) -> URL? {
+        guard path.hasPrefix("/") else { return nil }
+        let folder = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        let marks = ["Package.swift", "Resources/provisor-protocol.md"]
+        let holdsSource = marks.allSatisfy { mark in
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(
+                atPath: folder.appendingPathComponent(mark, isDirectory: false).path,
+                isDirectory: &isDirectory
+            ) && !isDirectory.boolValue
+        }
+        return holdsSource ? folder : nil
+    }
+
     static var handoffLedgerURL: URL {
         rootURL.appendingPathComponent("handoffs.json", isDirectory: false)
     }

@@ -85,9 +85,11 @@ enum StandingApprovals {
     /// The rule in force that a proposal may be carried out under, if there is one.
     ///
     /// Nobody chooses among options on a run that nobody reviews, so only a proposal with a
-    /// single action qualifies; one offering a choice waits for a tap.
+    /// single action qualifies; one offering a choice waits for a tap. A proposal about
+    /// ProVisor itself never qualifies: no run carries one out.
     static func rule(for proposal: Proposal, in rules: [StandingRule], now: Date) -> StandingRule? {
         guard proposal.status == .proposed,
+              !proposal.isImprovement,
               proposal.options.count == 1,
               let under = proposal.under
         else { return nil }

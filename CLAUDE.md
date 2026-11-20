@@ -888,6 +888,28 @@ sink. Preserve these guards when touching the relevant code:
     or a sign-in request the browsing-history check judges. A proposal the ledger names is
     never admitted under a standing approval (`admitStandingActions`), and a reviewed acting
     run can read `returned/` as it can read mail.
+- **A proposal about ProVisor itself changes nothing by being approved, because it cannot be
+  approved** (`Proposal.isImprovement`, kind `improve`). The agent may raise what got in its
+  way, or a change to the app, the protocol, or the charter that would let it do more. That
+  text is model output shaped by mail from anyone, and what it asks for can be exactly what a
+  sender wants: a tool that sends, a wider sealed list. So the kind buys one thing, a
+  different folder for a session the person directs. `ProVisorCenter.approve` and `instruct`
+  refuse it, `StandingApprovals.rule(for:)` never admits it, and the review window shows no
+  Do It, no Always, and no offered rule. **Continue in Claude** opens the session in
+  SuperVisor's source (`Handoff.Workplace.source`; the folder is `provisor.sourceFolder`,
+  used only while `ProVisorHome.sourceFolder(at:)` finds `Package.swift` and the protocol
+  there, and otherwise the session opens in the handoff's own folder). The handoff folder is
+  still made, recorded in the ledger, and read for findings as any other, but a session open
+  in the source does not load that folder's `CLAUDE.md`, so the prompt names the folder's
+  path, in the app's words, for the session to read the guide and the brief from. The guide
+  (`Handoff.improvementGuide`) has the session check the item's account against the code,
+  change a file only once the person agrees, and treat any change to what confines a run
+  (`access.json`, the sealed list, a run's flags, the parsers, the bridge's tools, the
+  navigation policy, standing approvals, the handoff briefing) as a request to loosen it that
+  needs the person's say in that session. **That is the session's judgment; the guarantee is
+  the person reviewing the change**, in a session the desktop app's permission prompts
+  bound. The repository's own instructions load in that session too, so its rules for
+  committing apply.
 - **An emailed sign-in code is read by a run that can read mail and nothing else**
   (`EmailedCodeLookup`, `ProVisorCommand.emailedCodeArguments`). The run holds the CLI's
   small-model alias, `--tools ToolSearch` (no file tools), only the Gmail read rules found on
@@ -1327,6 +1349,20 @@ names below are the code paths.
     session is on screen, and may archive without asking in auto mode when it is not. Nothing
     in SuperVisor depends on it, since findings are read from the folder, which archiving
     leaves in place.
+  - **The agent raises what would make it better as an ordinary item.** The protocol's "When
+    ProVisor itself should change" has it keep a tally in `memory/improvements.md` (a tool it
+    lacked, an answer that came back cut or empty, a rule that stopped something wanted, an
+    area the charter does not cover) and, once the tally shows a thing is real, write a
+    proposal of kind `improve`, at most one open at a time. It is announced, counted, and
+    listed exactly as any other proposal. Its review window differs: the action is headed
+    **What it suggests**, a caption says nothing here carries it out and where the session
+    will open (`ProposalReview.improvementCaption`), and the footer holds Dismiss and a
+    prominent **Continue in Claude**, with the text box's words going to that session.
+    Settings › ProVisor has **Choose Source…** for the folder that session opens in. A
+    dismissal tells the agent not to raise it again; the session's findings come back as a
+    returned note, which the agent records on the tally's line. **A change made to the app
+    reaches the agent only once the app is rebuilt**, which the protocol tells it, so the
+    same friction is not raised again in between. Untrusted Input says what bounds this.
   - **Standing approvals** are how "ask me" becomes "just do it", and **both the rule and its
     condition are the agent's to work out from the decision history** — there is no per-kind
     switch and no condition grammar in Swift. A rule is two sentences, a condition and an
@@ -1751,7 +1787,8 @@ artifacts:
   liveness/timeline record: it exists iff an instance bound it and
   died uncleanly since; its mtime is the moment that instance's SwarmModule activated.
 
-**A handoff's log lines** are in `provisor`: `handoff opened`, `handoff findings admitted <n>`,
+**A handoff's log lines** are in `provisor`: `handoff opened` (`handoff opened in source` for
+an item about ProVisor itself whose session opened in the source folder), `handoff findings admitted <n>`,
 and for what went wrong `handoff refused: foreign entry in the handoff folder`, `handoff not
 recorded`, `handoff link not opened` (beside `session link open failed: <domain> <code>`),
 `handoff ledger not saved`, and `handoff return not recorded`. Findings that never arrive are

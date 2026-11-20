@@ -51,7 +51,9 @@ struct ProVisorSettingsView: View {
 
             standingApprovals
 
-            Text("Runs Claude Code in the background on this Mac to read your mail and calendar through the connectors you added in Claude, and lists what it thinks you would want done. While looking it can only read. Nothing changes until you approve a proposal, and by default an approved action can organize mail and write drafts but cannot send. When it sees a pattern in what you approve (always for one person, always on a certain day), a proposal offers a rule with that condition; choose Always and later ones under it are done without asking, limited to steps that can be undone, and shown to you afterwards. Its brief (CHARTER.md) and the connector tools it may use (access.json) are in its folder and are yours to edit; its own notes on each pass, including anything that got in its way, are there under memory. Uses your Claude plan, and needs a recent Claude Code signed in with your Claude account.")
+            sourceFolderRow
+
+            Text("Runs Claude Code in the background on this Mac to read your mail and calendar through the connectors you added in Claude, and lists what it thinks you would want done. While looking it can only read. Nothing changes until you approve a proposal, and by default an approved action can organize mail and write drafts but cannot send. When it sees a pattern in what you approve (always for one person, always on a certain day), a proposal offers a rule with that condition; choose Always and later ones under it are done without asking, limited to steps that can be undone, and shown to you afterwards. Its brief (CHARTER.md) and the connector tools it may use (access.json) are in its folder and are yours to edit; its own notes on each pass, including anything that got in its way, are there under memory. When something keeps getting in its way, or a change to the app would let it do more, it raises that as an item too; nothing carries such an item out, and you continue it in a Claude session where you decide what changes. Uses your Claude plan, and needs a recent Claude Code signed in with your Claude account.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -334,5 +336,53 @@ struct ProVisorSettingsView: View {
     private func openFolder() {
         try? ProVisorHome.prepare()
         NSWorkspace.shared.open(ProVisorHome.rootURL)
+    }
+
+    /// Where a session about ProVisor itself opens: SuperVisor's source, once the person has
+    /// named the folder it is in. The path is the person's own choice, read from the panel.
+    private var sourceFolderRow: some View {
+        let path = settings.provisorSourceFolder
+        return HStack(spacing: 8) {
+            Text(Self.sourceFolderText(path: path, holdsSource: ProVisorHome.sourceFolder(at: path) != nil))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+
+            Spacer()
+
+            if !path.isEmpty {
+                Button("Clear") { settings.provisorSourceFolder = "" }
+                    .buttonStyle(.plain)
+                    .font(.caption.weight(.medium))
+            }
+
+            Button("Choose Source…", action: chooseSourceFolder)
+                .buttonStyle(.plain)
+                .font(.caption.weight(.medium))
+        }
+    }
+
+    /// What the source-folder row says for the stored `path`.
+    static func sourceFolderText(path: String, holdsSource: Bool) -> String {
+        guard !path.isEmpty else {
+            return "When ProVisor raises something about itself, the session you continue it in opens "
+                + "in a folder of its own. Choose SuperVisor's source folder to have it open there."
+        }
+        let shown = (path as NSString).abbreviatingWithTildeInPath
+        return holdsSource
+            ? "Items about ProVisor itself open a session in \(shown)."
+            : "\(shown) does not hold SuperVisor's source, so it is not used."
+    }
+
+    private func chooseSourceFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        panel.message = "Choose the folder that holds SuperVisor's source (its Package.swift)."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        settings.provisorSourceFolder = url.path
     }
 }

@@ -100,6 +100,22 @@ enum ProposalReview {
         }
     }
 
+    /// What a proposal about ProVisor itself says in place of an approval: nothing here can
+    /// carry it out, and where the session it is continued in will open. `sourceFolder` is
+    /// SuperVisor's source as Settings names it, when it names one.
+    static func improvementCaption(sourceFolder: URL?, canHandOff: Bool) -> String {
+        let opening = "This is about ProVisor itself, so no approval here carries it out. "
+        guard canHandOff else {
+            return opening + "It needs a session in the Claude app, which is not on this Mac."
+        }
+        guard let sourceFolder else {
+            return opening + "Continue in Claude opens a session in a folder of its own. To have it "
+                + "open in SuperVisor's source, choose that folder in Settings, under ProVisor."
+        }
+        let path = (sourceFolder.path as NSString).abbreviatingWithTildeInPath
+        return opening + "Continue in Claude opens a session in \(path), where you decide what changes."
+    }
+
     /// What an open proposal says once it has been taken into a session.
     static func handedOffCaption(_ date: Date) -> String {
         "You continued this in Claude on \(date.formatted(date: .abbreviated, time: .shortened)). "
@@ -142,7 +158,8 @@ final class ProVisorReviewWindow {
                 center: center,
                 id: id,
                 grantedSites: SiteAccessCenter.shared.sites,
-                canHandOff: center.canHandOff
+                canHandOff: center.canHandOff,
+                sourceFolder: center.sourceFolder
             ) { [weak self] in
                 self?.close()
             }
@@ -290,6 +307,11 @@ final class FittedWindow: NSWindow {
 /// box. It starts no run of ProVisor's own, and like an approval it is live only for the
 /// pinned text.
 ///
+/// **A proposal about ProVisor itself has no approval** (`Proposal.isImprovement`): what it
+/// asks for is a change to the app or its instructions, which no acting run can make. Its
+/// footer offers Continue in Claude and Dismiss, under a caption saying where that session
+/// opens, and a rule it offers to make standing is not shown.
+///
 /// A proposal that asks for a site also offers a button that opens the sign-in window for it.
 /// The button decides nothing: the proposal is settled only when the site is saved there. Its
 /// title is decided when the review opens, or when the user asks for an update, and is one
@@ -303,6 +325,9 @@ struct ProVisorReviewView: View {
     private let grantedSites: [SiteRecord]
     /// Whether the app a proposal is handed to was installed as the review opened.
     private let canHandOff: Bool
+    /// SuperVisor's source as Settings named it when the review opened, where a proposal
+    /// about ProVisor itself is continued.
+    private let sourceFolder: URL?
 
     /// The text being reviewed, as it stood when the window opened or was last brought up to
     /// date by the user.
@@ -323,12 +348,14 @@ struct ProVisorReviewView: View {
         id: String,
         grantedSites: [SiteRecord] = [],
         canHandOff: Bool = false,
+        sourceFolder: URL? = nil,
         onClose: @escaping () -> Void
     ) {
         self.center = center
         self.id = id
         self.grantedSites = grantedSites
         self.canHandOff = canHandOff
+        self.sourceFolder = sourceFolder
         self.onClose = onClose
         let pinned = center.proposals.first { $0.id == id }.map(ReviewedText.init)
         _pinned = State(initialValue: pinned)
@@ -398,6 +425,12 @@ struct ProVisorReviewView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 choices(text)
+                if text.isImprovement {
+                    Text(ProposalReview.improvementCaption(sourceFolder: sourceFolder, canHandOff: canHandOff))
+                        .font(.caption)
+                        .foregroundStyle(NotchTheme.secondaryForeground)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let host = text.site, let title = siteButtonTitle {
                     siteButton(title: title, host: host, proposalID: proposal.id)
                 }
@@ -474,12 +507,13 @@ struct ProVisorReviewView: View {
         }
 
         if isCustom {
-            instructionBox(suggested: option)
+            instructionBox(suggested: option, isForSession: text.isImprovement)
         } else {
-            block("What approving does", option.action)
+            block(text.isImprovement ? "What it suggests" : "What approving does", option.action)
         }
 
-        if ProposalReview.showsOffer(text.standingOffer, optionIndex: index, isCustom: isCustom),
+        if !text.isImprovement,
+           ProposalReview.showsOffer(text.standingOffer, optionIndex: index, isCustom: isCustom),
            let offer = text.standingOffer {
             ruleBlock(
                 "From now on, without asking",
@@ -507,7 +541,9 @@ struct ProVisorReviewView: View {
 
     /// The text box, beside the suggestion it replaces. That suggestion stays on screen because
     /// it is the background the run is given for what the instruction refers to.
-    private func instructionBox(suggested: ProposalOption) -> some View {
+    /// With `isForSession`, the words go to the session the proposal is continued in, since
+    /// no run of ProVisor's own carries out a proposal about itself.
+    private func instructionBox(suggested: ProposalOption, isForSession: Bool = false) -> some View {
         let overflow = ProposalReview.overflow(of: typed)
 
         return VStack(alignment: .leading, spacing: 10) {
@@ -549,7 +585,9 @@ struct ProVisorReviewView: View {
                 Text(
                     overflow > 0
                         ? "\(overflow) over the \(Proposal.actionLimit)-character limit"
-                        : "Carried out as you write it, with the tools an approved action gets."
+                        : isForSession
+                            ? "Given to the session as what you want, in your words."
+                            : "Carried out as you write it, with the tools an approved action gets."
                 )
                 .font(.caption)
                 .foregroundStyle(overflow > 0 ? Color.red : NotchTheme.secondaryForeground)
@@ -640,35 +678,54 @@ struct ProVisorReviewView: View {
                 optionIndex: index,
                 isCustom: isCustom
             )
-            HStack(spacing: 8) {
-                if canHandOff {
+            if text.isImprovement {
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    ProVisorCapsuleButton(title: "Dismiss") {
+                        center.dismiss(proposal.id)
+                        onClose()
+                    }
+                    if canHandOff {
+                        ProVisorCapsuleButton(
+                            title: "Continue in Claude",
+                            isProminent: true,
+                            isEnabled: !isStale && (!isCustom || ProposalReview.overflow(of: typed) == 0)
+                        ) {
+                            report(center.handOff(proposal, option: index, typed: isCustom ? typed : nil))
+                        }
+                    }
+                }
+            } else {
+                HStack(spacing: 8) {
+                    if canHandOff {
+                        ProVisorCapsuleButton(
+                            title: "Continue in Claude",
+                            isEnabled: !isStale && (!isCustom || ProposalReview.overflow(of: typed) == 0)
+                        ) {
+                            report(center.handOff(proposal, option: index, typed: isCustom ? typed : nil))
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    ProVisorCapsuleButton(title: "Dismiss") {
+                        center.dismiss(proposal.id)
+                        onClose()
+                    }
+                    if showsOffer {
+                        ProVisorCapsuleButton(title: "Always", isEnabled: !isStale) {
+                            decide(proposal, optionIndex: index, always: true)
+                        }
+                    }
                     ProVisorCapsuleButton(
-                        title: "Continue in Claude",
-                        isEnabled: !isStale && (!isCustom || ProposalReview.overflow(of: typed) == 0)
+                        title: ProposalReview.approveTitle(
+                            isRetry: state == .failed,
+                            showsOffer: showsOffer
+                        ),
+                        isProminent: true,
+                        isEnabled: !isStale
+                            && (!isCustom || ProposalReview.instruction(from: typed) != nil)
                     ) {
-                        report(center.handOff(proposal, option: index, typed: isCustom ? typed : nil))
+                        decide(proposal, optionIndex: index, always: false)
                     }
-                }
-                Spacer(minLength: 0)
-                ProVisorCapsuleButton(title: "Dismiss") {
-                    center.dismiss(proposal.id)
-                    onClose()
-                }
-                if showsOffer {
-                    ProVisorCapsuleButton(title: "Always", isEnabled: !isStale) {
-                        decide(proposal, optionIndex: index, always: true)
-                    }
-                }
-                ProVisorCapsuleButton(
-                    title: ProposalReview.approveTitle(
-                        isRetry: state == .failed,
-                        showsOffer: showsOffer
-                    ),
-                    isProminent: true,
-                    isEnabled: !isStale
-                        && (!isCustom || ProposalReview.instruction(from: typed) != nil)
-                ) {
-                    decide(proposal, optionIndex: index, always: false)
                 }
             }
         } else {
@@ -733,8 +790,12 @@ struct ReviewedText: Equatable {
     let options: [ProposalOption]
     let standingOffer: StandingOffer?
     let site: String?
+    /// Whether it is about ProVisor itself, which decides what the footer offers and where a
+    /// session it is continued in opens.
+    let isImprovement: Bool
 
     init(_ proposal: Proposal) {
+        isImprovement = proposal.isImprovement
         title = proposal.title
         why = proposal.why
         options = proposal.options

@@ -867,7 +867,10 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         always: Bool = false
     ) -> DecisionRefusal? {
         if let refusal = refusal(for: displayed) { return refusal }
-        guard displayed.options.indices.contains(index) else { return .unavailable }
+        // Nothing an acting run holds can carry out a change to ProVisor itself.
+        guard !displayed.isImprovement, displayed.options.indices.contains(index) else {
+            return .unavailable
+        }
 
         let decision = ProposalReview.standingDecision(
             for: displayed,
@@ -899,7 +902,8 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
     @discardableResult
     func instruct(_ displayed: Proposal, reference index: Int, text: String) -> DecisionRefusal? {
         if let refusal = refusal(for: displayed) { return refusal }
-        guard displayed.options.indices.contains(index),
+        guard !displayed.isImprovement,
+              displayed.options.indices.contains(index),
               let instruction = ProposalReview.instruction(from: text)
         else { return .unavailable }
 
@@ -919,6 +923,12 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         ) != nil
     }
 
+    /// SuperVisor's source checkout as Settings names it, where a session about ProVisor
+    /// itself is opened; nil when none is set or the folder no longer holds the source.
+    var sourceFolder: URL? {
+        ProVisorHome.sourceFolder(at: SettingsStore.shared.provisorSourceFolder)
+    }
+
     /// Takes a proposal into a session the person directs in the Claude desktop app
     /// (`Handoff`): makes the handoff's folder with its brief, records the handoff, and opens
     /// the draft of a new session there. `index` is the option on screen. `typed` is what the
@@ -928,6 +938,10 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
     ///
     /// The proposal stays open: handing it off starts no run and decides nothing. It is
     /// recorded done when that session's findings come back (`admitReturnedFindings`).
+    ///
+    /// A proposal about ProVisor itself opens in SuperVisor's source (`sourceFolder`). Its
+    /// handoff folder is still made, and still holds the guide and the brief and receives the
+    /// findings, so what comes back is read exactly as any other handoff's is.
     @discardableResult
     func handOff(_ displayed: Proposal, option index: Int, typed: String?) -> DecisionRefusal? {
         if let refusal = refusal(for: displayed) { return refusal }
@@ -936,7 +950,16 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         else { return .unavailable }
 
         let now = Date()
-        let handoff = Handoff(proposal: displayed, request: request, now: now, timeZone: .current)
+        let workplace: Handoff.Workplace = displayed.isImprovement
+            ? .source(folder: sourceFolder, handoffs: ProVisorHome.handoffsURL, home: ProVisorHome.rootURL)
+            : .ownFolder
+        let handoff = Handoff(
+            proposal: displayed,
+            request: request,
+            now: now,
+            timeZone: .current,
+            workplace: workplace
+        )
         guard let link = handoff.link(root: ProVisorHome.handoffsURL),
               let application = link.applicationURL()
         else { return .appMissing }
@@ -964,7 +987,7 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
             try? ProposalStore.removeHandoff(id: id, in: ProVisorHome.proposalsURL)
             self?.reloadSoon()
         }
-        AppLog.notice(.provisor, "handoff opened")
+        AppLog.notice(.provisor, handoff.sessionFolder == nil ? "handoff opened" : "handoff opened in source")
         return nil
     }
 

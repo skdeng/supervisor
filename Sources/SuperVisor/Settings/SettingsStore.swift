@@ -29,6 +29,7 @@ public final class SettingsStore: ObservableObject {
         static let provisorReadTexts = "provisor.readTexts"
         static let provisorOfferPasswords = "provisor.offerPasswords"
         static let provisorReadPhotoPlaces = "provisor.readPhotoPlaces"
+        static let provisorSourceFolder = "provisor.sourceFolder"
     }
 
     /// Modules that stay off until the user turns them on. ProVisor reads the user's mail and
@@ -119,6 +120,13 @@ public final class SettingsStore: ObservableObject {
         didSet { defaults.set(provisorReadsPhotoPlaces, forKey: Key.provisorReadPhotoPlaces) }
     }
 
+    /// ProVisor: the path of SuperVisor's source checkout, where a session about ProVisor
+    /// itself is opened; empty when none is set. It is used only once
+    /// `ProVisorHome.sourceFolder(at:)` finds the source there.
+    @Published public var provisorSourceFolder: String {
+        didSet { defaults.set(provisorSourceFolder, forKey: Key.provisorSourceFolder) }
+    }
+
     /// Per-module enabled flags, keyed by `moduleID`. Absent ids default to enabled, except
     /// opt-in modules.
     @Published public private(set) var moduleEnabled: [String: Bool]
@@ -154,6 +162,8 @@ public final class SettingsStore: ObservableObject {
             (defaults.object(forKey: Key.provisorOfferPasswords) as? Bool) ?? true
         self.provisorReadsPhotoPlaces =
             (defaults.object(forKey: Key.provisorReadPhotoPlaces) as? Bool) ?? false
+        self.provisorSourceFolder =
+            (defaults.object(forKey: Key.provisorSourceFolder) as? String) ?? ""
 
         // Reconstruct the per-module map from any persisted keys.
         var map: [String: Bool] = [:]

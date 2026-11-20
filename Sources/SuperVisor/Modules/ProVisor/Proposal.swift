@@ -73,6 +73,17 @@ struct Proposal: Identifiable, Equatable, Sendable {
     /// is read for the review window's caption alone; `HandoffLedger` is the app's record.
     var handedOff: Date?
 
+    /// The `kind` of a proposal about ProVisor itself: something that got in its way, or a
+    /// change to its code, its protocol, or the charter that would let it do more.
+    static let improvementKind = "improve"
+
+    /// Whether this is a proposal about ProVisor itself. Nothing an acting run holds can carry
+    /// one out, so it is never approved, typed over, or admitted under a standing approval:
+    /// the person takes it into a session of their own (`Handoff.Workplace.source`). The kind
+    /// is the agent's word, shaped by mail, and it buys only that: a different folder for a
+    /// session the person directs.
+    var isImprovement: Bool { kind == Self.improvementKind }
+
     /// Whether the proposal still awaits a decision — a failed one can be approved again.
     var isOpen: Bool { status == .proposed || status == .failed }
 
