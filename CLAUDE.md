@@ -466,7 +466,20 @@ sink. Preserve these guards when touching the relevant code:
   claiming a standing approval. `RaisedItems.admit` copies what it left in `raised/` into the
   queue under an id the app makes up, keeping only the fields a proposal is written with
   (never `under`, `standing`, or anything the app writes) and never over an existing file, at
-  most three per sweep. A follow-up is the agent's own note about a read-only check. Memory
+  most three per sweep. **An item that cannot join the queue is handed to the next pass**: its
+  run has ended and has usually told the person it raised something. `admit` writes a note in
+  `returned/` (`unshown-<day>-<8 hex>.md`, three a sweep at most) with a returned note's first
+  two lines, then the app's paragraph with a fixed reason, then the item, cleaned as a
+  returned note is and cut at 8,000 characters. The follow-up pass that note is owed writes
+  the item again as a proposal of its own. **The note is in `returned/` because a reviewed run
+  cannot write there**: in `followups/`, where it can, a run could write a note of its own
+  that claims to be the app's, and the protocol would have a pass act on it. **The item in
+  the note is cut down to the fields a raised item may carry**, so an `under` or a `standing`
+  the run wrote reaches no pass, and the protocol has the pass write neither. A fourth item in
+  one sweep is dropped with a log line and no note, since the run was told the limit, and a
+  folder in `raised/` is removed and noted without its contents. A note stops owing a pass
+  after three days, like any returned note, so one no pass marks read cannot start passes for
+  good. A follow-up is the agent's own note about a read-only check. Memory
   stays the scout's, and a run under a standing approval writes no files at all. The brief,
   `access.json`, `standing.json`, `sites.json`, and every run's tool-channel configuration (it
   holds the run's token) sit *outside* the working directory, where the agent's file tools
@@ -480,7 +493,19 @@ sink. Preserve these guards when touching the relevant code:
   an approval runs and text the user could not read in full is text they did not approve. A
   proposal offers one action or up to three named `options`; one unusable option, two options
   with one name, an option name over 24 characters, or a file carrying both `action` and
-  `options` rejects the whole proposal. Approval is possible only in the review window, where
+  `options` rejects the whole proposal. **A file that is refused is never shown, and the
+  agent is told**: it stays in `proposals/` looking like a proposal that waits on the person,
+  and the agent, which plans from its files, has no other way to learn that nobody saw it.
+  `Proposal.read` names the reason (`Proposal.Refusal`: a fixed name for the log and a fixed
+  sentence for the agent, neither carrying text from the file), `ProposalStore.list` returns
+  the unshown files beside the proposals, and the next scouting or follow-up pass's prompt
+  lists them (`ProVisorCommand.unshownSentence`, five by name at most). Two kinds are logged
+  and never told (`UnshownFile.isReported`): a file whose name is not a plain id, which a
+  pass can neither rename nor delete, and a file that records a decision, which the person
+  has seen. **The agent is told a label length of 20 and the app enforces 24**
+  (`Proposal.optionLabelTarget`, `optionLabelLimit`): a model estimates a length and does not
+  count it, and told the enforced limit it writes a natural phrase one character over.
+  Approval is possible only in the review window, where
   the selected option's action is shown whole, and the acting run is instructed from the parsed
   copy captured at the tap, never re-read from the file the scout can rewrite. **That window
   stays open while scouting passes run, so the text under review is pinned when it opens**
@@ -1176,8 +1201,8 @@ names below are the code paths.
     `proposals/` (one JSON file each), `memory/` (the agent's own notes: what it has learned
     about the user, what it has already examined), `followups/` (checks owed after a decision,
     one short note each), `raised/` (items a reviewed run wants put to the user, which the
-    app admits into `proposals/` itself), and `returned/` (what a handed-off session found,
-    which the app admits). Each run starts with no recollection, so those notes
+    app admits into `proposals/` itself), and `returned/` (what the app hands back to a pass:
+    what a handed-off session found, and a raised item it could not show). Each run starts with no recollection, so those notes
     and the statuses on past proposals are all it knows. Handed-off sessions work in
     `SuperVisor/Handoffs/`, beside this folder.
   - **The agent does the checking, and the user hears only when a check goes wrong.** A run
@@ -1810,6 +1835,20 @@ cannot verify the app), and a sign-in logs
 `spending limit` (it has still written what it reached) and any other failed result reads
 `agent error`. **`tool open_site: ok` with a page of no text and no links can be a page that
 did not render**: run the `site-read` self-check and see `keepRendering` under Shared Services.
+
+**A run can say it raised an item, or wrote a proposal, that never appears.** The limits on
+a proposal are counted in characters, a model cannot count them exactly, and a file one
+character over is refused whole: told a label limit of 24, the model wrote a 25-character
+label for the same raised item in 2 of 8 tries, and told 20, in none of 8. The `provisor`
+log carries `raised item refused: <reason>` for each entry in `raised/` that did not join
+the queue (`label length`, `action length`, `title`, `surplus`, `folder`, and the other
+names of `Proposal.Refusal` and `RaisedItems.Refusal`), `raised items refused with no note
+<n>` for those not handed to a pass (a fourth item, or a note that could not be written),
+and `proposal files unshown <n>: <reasons>` when the set of unshown files in `proposals/`
+changes. To see how often a prompt's wording
+produces a file over a limit, give the CLI the run's prompt with `--tools ""`, say what to
+assume the reading found, ask for the file's JSON alone, and check each answer against the
+limits.
 
 **A fresh screenshot with no `com.apple.metadata:` attributes is a Spotlight symptom, not a
 capture bug.** `screencapture` applies `kMDItemIsScreenCapture` through the metadata framework,

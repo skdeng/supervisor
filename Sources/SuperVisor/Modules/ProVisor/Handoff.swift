@@ -673,24 +673,7 @@ enum HandoffFindings {
     /// and format character removed, and anything past `characterLimit` replaced by a line
     /// saying it was cut. Nil when nothing is left.
     static func cleaned(_ raw: String, wasCut: Bool = false) -> String? {
-        var scalars = String.UnicodeScalarView()
-        for scalar in raw.unicodeScalars {
-            switch scalar.properties.generalCategory {
-            case .lineSeparator, .paragraphSeparator:
-                scalars.append("\n")
-            case .control:
-                if scalar == "\n" {
-                    scalars.append(scalar)
-                } else if scalar == "\t" {
-                    scalars.append(" ")
-                }
-            case .format, .surrogate, .privateUse, .unassigned:
-                continue
-            default:
-                scalars.append(scalar)
-            }
-        }
-        let text = String(scalars).trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = Proposal.linedText(raw)
         guard !text.isEmpty else { return nil }
         guard wasCut || text.count > characterLimit else { return text }
         return String(text.prefix(characterLimit))

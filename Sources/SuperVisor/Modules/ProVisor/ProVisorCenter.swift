@@ -147,6 +147,9 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
     /// Bumped on every start and stop, so a run that outlives its activation reports to nobody.
     private var activation = 0
     private var reloadSequence = 0
+    /// The files in `proposals/` that could not be shown at the last reload, which the next
+    /// pass is told about.
+    private var unshownFiles: [ProposalStore.UnshownFile] = []
 
     private init(
         defaults: UserDefaults = .standard,
@@ -394,6 +397,7 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
                 recorded: defaults.string(forKey: Self.briefDigestKey),
                 hasScouted: lastScoutDate != nil
             ),
+            unshown: unshownFiles,
             bridge: prepared?.bridge,
             connectorHold: prepared == nil ? bridge.holdConfigurationPath() : nil
         )
@@ -512,13 +516,25 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
     }
 
     /// Brings anything a reviewed run raised into the queue. The run cannot write there itself.
-    private func admitRaisedItems() {
-        let admitted = RaisedItems.admit(
+    /// An item that cannot join the queue becomes a note in `returned/`, which owes a
+    /// follow-up pass; both callers arm that pass once they have finished. `id` is the
+    /// proposal whose run has just ended, when one has.
+    private func admitRaisedItems(raisedBy id: String? = nil) {
+        let sweep = RaisedItems.admit(
             from: ProVisorHome.raisedURL,
-            into: ProVisorHome.proposalsURL
+            into: ProVisorHome.proposalsURL,
+            notes: ProVisorHome.returnedURL,
+            raisedBy: id
         )
-        if admitted > 0 {
-            AppLog.notice(.provisor, "raised items admitted \(admitted)")
+        if sweep.admitted > 0 {
+            AppLog.notice(.provisor, "raised items admitted \(sweep.admitted)")
+        }
+        for refusal in sweep.refused {
+            AppLog.notice(.provisor, "raised item refused: \(refusal.logName)")
+        }
+        let lost = sweep.refused.count - sweep.notesWritten
+        if lost > 0 {
+            AppLog.error(.provisor, "raised items refused with no note \(lost)")
         }
     }
 
@@ -741,6 +757,7 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
             standing: standingRules,
             now: now,
             justSignedIn: justSignedIn,
+            unshown: unshownFiles,
             bridge: prepared?.bridge,
             connectorHold: prepared == nil ? bridge.holdConfigurationPath() : nil
         )
@@ -1296,7 +1313,7 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
             )
         }
         // A reviewed run may have raised something it found and could not settle.
-        admitRaisedItems()
+        admitRaisedItems(raisedBy: id)
         Task { [weak self] in
             guard let loaded = await self?.reload(), activation == self?.activation else {
                 return
@@ -1355,12 +1372,21 @@ final class ProVisorCenter: ObservableObject, FollowUpHolding {
         reloadSequence += 1
         let sequence = reloadSequence
         let directory = ProVisorHome.proposalsURL
-        let loaded = await Task.detached(priority: .utility) {
-            ProposalStore.load(from: directory)
+        let listing = await Task.detached(priority: .utility) {
+            ProposalStore.list(from: directory)
         }.value
+        let loaded = listing.proposals
 
         // A slower, older read must not replace a newer one.
         if sequence == reloadSequence, isActive {
+            if listing.unshown != unshownFiles {
+                unshownFiles = listing.unshown
+                if !unshownFiles.isEmpty {
+                    let reasons = unshownFiles.prefix(ProVisorCommand.maximumUnshownNamed)
+                        .map(\.reason.logName).joined(separator: ", ")
+                    AppLog.notice(.provisor, "proposal files unshown \(unshownFiles.count): \(reasons)")
+                }
+            }
             announcer.seedIfNeeded(with: loaded)
             if loaded != proposals {
                 proposals = loaded

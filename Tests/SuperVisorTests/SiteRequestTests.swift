@@ -82,14 +82,15 @@ struct SiteRequestTests {
         defer { try? FileManager.default.removeItem(at: workspace) }
         let raised = workspace.appendingPathComponent("raised", isDirectory: true)
         let proposals = workspace.appendingPathComponent("proposals", isDirectory: true)
-        for directory in [raised, proposals] {
+        let returned = workspace.appendingPathComponent("returned", isDirectory: true)
+        for directory in [raised, proposals, returned] {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         }
         try JSONSerialization.data(withJSONObject: request).write(to: raised.appendingPathComponent("a.json"))
 
-        let admitted = RaisedItems.admit(from: raised, into: proposals, now: modified) { "0a1b2c3d" }
+        let sweep = RaisedItems.admit(from: raised, into: proposals, notes: returned, now: modified) { "0a1b2c3d" }
 
-        #expect(admitted == 1)
+        #expect(sweep.admitted == 1)
         #expect(ProposalStore.load(from: proposals).first?.site == "example.com")
     }
 

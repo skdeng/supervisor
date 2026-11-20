@@ -478,6 +478,7 @@ enum ProVisorCommand {
         now: Date,
         timeZone: TimeZone = .current,
         briefChanged: Bool = false,
+        unshown: [ProposalStore.UnshownFile] = [],
         bridge: RunBridge? = nil,
         connectorHold: String? = nil
     ) -> [String] {
@@ -485,6 +486,7 @@ enum ProVisorCommand {
             + (briefChanged ? briefChangedSentence + " " : "")
             + passContext(now: now, timeZone: timeZone, access: access, standing: standing)
             + bridgeSentence(bridge)
+            + unshownSentence(unshown)
         return arguments(
             prompt: prompt,
             systemPrompt: brief,
@@ -509,6 +511,7 @@ enum ProVisorCommand {
         now: Date,
         timeZone: TimeZone = .current,
         justSignedIn: [String] = [],
+        unshown: [ProposalStore.UnshownFile] = [],
         bridge: RunBridge? = nil,
         connectorHold: String? = nil
     ) -> [String] {
@@ -521,7 +524,8 @@ enum ProVisorCommand {
         nothing new, and write no proposal except what a follow-up or a returned note turns up. \
         \(passContext(now: now, timeZone: timeZone, access: access, standing: standing))\
         \(bridgeSentence(bridge))\
-        \(justSignedInSentence(justSignedIn))
+        \(justSignedInSentence(justSignedIn))\
+        \(unshownSentence(unshown))
         """
         return arguments(
             prompt: prompt,
@@ -533,6 +537,29 @@ enum ProVisorCommand {
             mcpConfiguration: bridge?.configurationPath ?? connectorHold,
             bridgeRules: bridge?.toolRules ?? []
         )
+    }
+
+    /// The most unshown files a pass is told about by name.
+    static let maximumUnshownNamed = 5
+    /// The heading in the brief's mechanics that says what to do with an unshown file.
+    static let unshownFileSection = "A file that cannot be shown"
+
+    /// What a pass is told about its files in `proposals/` that cannot be shown: which, and
+    /// why, for the ones `UnshownFile.isReported` admits. A file the app skips stays on disk
+    /// looking like a proposal that is waiting, and the agent, which plans from its files, has
+    /// no other way to learn that nobody saw it.
+    static func unshownSentence(_ files: [ProposalStore.UnshownFile]) -> String {
+        let named = files.filter(\.isReported).compactMap { file in
+            file.id.map { "`\($0).json` (\(file.reason.sentence))" }
+        }
+        guard !named.isEmpty else { return "" }
+        var parts = Array(named.prefix(maximumUnshownNamed))
+        if named.count > parts.count {
+            parts.append("and \(named.count - parts.count) more")
+        }
+        return " SuperVisor cannot show these files of yours in `proposals/`, so they have "
+            + "never seen them and are not waiting on them: " + parts.joined(separator: "; ")
+            + ". Deal with each as \"\(unshownFileSection)\" in the brief describes."
     }
 
     /// What a pass that may propose is told about the time and about what an approved proposal
@@ -769,7 +796,7 @@ enum ProVisorCommand {
         100 characters: the thing to confirm or fix), `why` (at most 400: what depends on \
         it, what you tried, and exactly what access would let you check it yourself next \
         time), `options` (one to three of `{"label", "action"}`: the answers or next steps \
-        they are likely to want, no two labels alike, each label at most 24 characters and \
+        they are likely to want, no two labels alike, each label at most \(Proposal.optionLabelTarget) characters and \
         each action at most 600, complete on its own, and within what a run with your tools \
         can do, such as recording their answer in a note under `followups/`), `kind` \
         (`"confirm"`), and `created` (the time now in UTC, like 2026-11-15T17:12:00Z). When \
@@ -778,7 +805,9 @@ enum ProVisorCommand {
         to sign in, so also write the follow-up note for the check, with `Check from: ` today \
         and `Waits on: ` followed by that site's host as its third line, for the pass that \
         follows their sign-in to make. SuperVisor puts the item in their \
-        queue, and they can also answer in their own words. Raise at most three.
+        queue, and they can also answer in their own words. Raise at most three. An item \
+        whose label runs past \(Proposal.optionLabelLimit) characters or whose action runs past \
+        \(Proposal.actionLimit) is not shown to them, and a later run has to write it again.
         - Theirs alone (a payment, a signature, a judgment only they can make): say what it is.
 
         Finish with one or two plain sentences: what you did, anything that is theirs alone, \
