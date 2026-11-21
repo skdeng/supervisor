@@ -84,6 +84,12 @@ enum ProVisorHome {
         rootURL.appendingPathComponent("runs", isDirectory: true)
     }
 
+    /// The folder of direct-message snapshots (`DirectMessageStore`), one file per source. It
+    /// sits beside the workspace, where no run's file tools reach.
+    static var directMessagesURL: URL {
+        rootURL.appendingPathComponent("direct-messages", isDirectory: true)
+    }
+
     static var workspaceURL: URL {
         rootURL.appendingPathComponent("workspace", isDirectory: true)
     }

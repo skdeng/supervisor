@@ -13,6 +13,7 @@ struct ProVisorSettingsView: View {
     @ObservedObject var settings: SettingsStore
     @ObservedObject var center: ProVisorCenter
     @ObservedObject var sites: SiteAccessCenter
+    @ObservedObject var messages: DirectMessageCenter
 
     @State private var showsAccess = false
 
@@ -100,6 +101,15 @@ struct ProVisorSettingsView: View {
                         }
                     }
                 }
+
+                accessSetting(Self.directMessagesExplanation(sourceName: messages.source.name)) {
+                    Toggle(
+                        "Read my \(messages.source.name) messages",
+                        isOn: Binding(get: { messages.isEnabled }, set: { messages.setEnabled($0) })
+                    )
+                } warning: {
+                    directMessagesStatus
+                }
             }
             .padding(.top, 8)
         } label: {
@@ -124,7 +134,8 @@ struct ProVisorSettingsView: View {
                 Text(Self.accessSummary(
                     siteCount: sites.sites.count,
                     texts: sites.textsEnabled,
-                    photoPlaces: sites.photoPlacesEnabled
+                    photoPlaces: sites.photoPlacesEnabled,
+                    directMessages: messages.isEnabled ? messages.source.name : nil
                 ))
                 .foregroundStyle(.secondary)
             }
@@ -144,33 +155,44 @@ struct ProVisorSettingsView: View {
             awaiting: sites.awaitingSignIn,
             texts: sites.textsStatus,
             photoPlaces: sites.photoPlacesStatus,
+            directMessages: messages.status,
             paused: pauseNotice != nil
         )
     }
 
     /// What the access row says is granted: the number of sites, then each other source that
-    /// is switched on.
-    static func accessSummary(siteCount: Int, texts: Bool, photoPlaces: Bool) -> String {
+    /// is switched on. `directMessages` is the name of the direct-message source when it is on.
+    static func accessSummary(
+        siteCount: Int,
+        texts: Bool,
+        photoPlaces: Bool,
+        directMessages: String? = nil
+    ) -> String {
         var parts: [String] = []
         if siteCount > 0 { parts.append(siteCount == 1 ? "1 site" : "\(siteCount) sites") }
         if texts { parts.append("texts") }
         if photoPlaces { parts.append("photo places") }
+        if let directMessages { parts.append("\(directMessages) messages") }
         return parts.isEmpty ? "Nothing yet" : parts.joined(separator: ", ")
     }
 
-    /// Whether a row under the access group is asking for the person: a site waiting for a
-    /// sign-in, a source switched on that macOS will not let the app read, or reading paused.
+    /// Whether a row under the access group is asking for the person: a site or a
+    /// direct-message source waiting for a sign-in, a source switched on that macOS will not
+    /// let the app read, or reading paused.
     static func accessNeedsAttention(
         sites: [SiteRecord],
         awaiting: Set<String>,
         texts: SiteAccessCenter.TextsStatus,
         photoPlaces: SiteAccessCenter.PhotoPlacesStatus,
+        directMessages: DirectMessageCenter.Status = .off,
         paused: Bool
     ) -> Bool {
         paused
             || texts == .accessDenied
             || photoPlaces == .accessNotAsked
             || photoPlaces == .accessDenied
+            || directMessages == .notSignedIn
+            || directMessages == .needsYou
             || sites.contains { SiteAccessCenter.SiteStatus($0, awaiting: awaiting) == .needsYou }
     }
 
@@ -217,6 +239,66 @@ struct ProVisorSettingsView: View {
         }
     }
 
+    static func directMessagesExplanation(sourceName: String) -> String {
+        "SuperVisor keeps a copy of your \(DirectMessageSnapshot.maximumThreads) most recent \(sourceName) chats, "
+            + "with the latest messages in each, for ProVisor; message requests are left out. You sign in on "
+            + "\(sourceName)'s own page and SuperVisor keeps that session, never your password. It then loads "
+            + "your inbox in the background and copies what the page receives, without opening a chat. "
+            + "\(sourceName) can tell this from a person browsing and may ask you to confirm your account. "
+            + "Turning this off deletes the copy and the session on this Mac; \(sourceName) still lists "
+            + "the login until you remove it there."
+    }
+
+    /// Where the direct-message source stands: the sign-in it waits for, or when it was last
+    /// copied, with the way to copy it now.
+    @ViewBuilder
+    private var directMessagesStatus: some View {
+        let name = messages.source.name
+        switch messages.status {
+        case .off:
+            EmptyView()
+        case .notSignedIn:
+            accessRow("Not signed in to \(name) yet.", button: "Sign In…") {
+                DirectMessageSignInWindow.shared.show(center: messages)
+            }
+        case .needsYou:
+            accessRow("\(name) signed you out.", button: "Sign In…") {
+                DirectMessageSignInWindow.shared.show(center: messages)
+            }
+        case let .signedIn(lastSync, chats):
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(Self.directMessagesSyncText(isSyncing: messages.isSyncing, lastSync: lastSync, chats: chats))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Spacer(minLength: 8)
+
+                    Button("Sync Now") {
+                        Task { await messages.sync() }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption.weight(.medium))
+                    .disabled(messages.isSyncing || messages.isSigningIn)
+                }
+
+                if let problem = messages.problem {
+                    Label(problem.sentence(sourceName: name), systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    static func directMessagesSyncText(isSyncing: Bool, lastSync: Date?, chats: Int) -> String {
+        if isSyncing { return "Copying your chats…" }
+        guard let lastSync else { return "Signed in, not copied yet" }
+        let count = chats == 1 ? "1 chat" : "\(chats) chats"
+        return "\(count), copied \(lastSync.formatted(.relative(presentation: .named)))"
+    }
+
     /// How many sites are granted, with the way into the window that manages them.
     private var siteList: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -259,6 +341,7 @@ struct ProVisorSettingsView: View {
     /// tools for them.
     private func refresh() {
         sites.refresh()
+        messages.refresh()
         center.refreshSiteTools()
     }
 

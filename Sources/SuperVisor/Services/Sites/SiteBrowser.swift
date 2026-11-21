@@ -262,6 +262,9 @@ final class SiteBrowser: NSObject {
     /// Messages from the credential script that failed `TypedCredential`'s checks. Only the
     /// count is kept.
     private(set) var droppedCredentials = 0
+    /// What the page listener has reported. Only a browser made with a `PageCapture` adds to
+    /// it.
+    private(set) var captureLog = PageCaptureLog()
 
     private let window: NSWindow
     private let simulatedPages: SimulatedPages?
@@ -279,6 +282,8 @@ final class SiteBrowser: NSObject {
     private var pendingScripts: [ObjectIdentifier: PendingScript] = [:]
     private let typingRelay: TypingRelay?
     private let credentialRelay: CredentialRelay?
+    private let capture: PageCapture?
+    private let captureRelay: PageCaptureRelay?
 
     /// The message the typing script posts. Its body is one of `TypedField`'s raw values: which
     /// kind of field took the input, never what was typed.
@@ -326,16 +331,23 @@ final class SiteBrowser: NSObject {
     /// frame alone, reports a user name or password typed (see `credentialObserver`). The
     /// scripts and their message handlers live in the isolated world, which the page's own
     /// scripts cannot reach.
+    ///
+    /// With a `capture`, its listener is injected into the page's own world in every frame and
+    /// reports into `captureLog` (see `PageCapture` for what that is worth). Every load a page
+    /// in this browser sets off is held to `contentRules`.
     init(
         policy: SiteNavigationPolicy,
         dataStore: WKWebsiteDataStore = SiteBrowser.sharedStore,
         simulatedPages: SimulatedPages? = nil,
         settling: Settling = .standard,
-        observation: Observation = .none
+        observation: Observation = .none,
+        capture: PageCapture? = nil,
+        contentRules: [WKContentRuleList] = []
     ) {
         self.policy = policy
         self.simulatedPages = simulatedPages
         self.settling = settling
+        self.capture = capture
 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = dataStore
@@ -377,6 +389,22 @@ final class SiteBrowser: NSObject {
         } else {
             credentialRelay = nil
         }
+        if let capture {
+            let relay = PageCaptureRelay()
+            configuration.userContentController.addUserScript(WKUserScript(
+                source: capture.script,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false,
+                in: .page
+            ))
+            configuration.userContentController.add(relay, contentWorld: .page, name: PageCapture.message)
+            captureRelay = relay
+        } else {
+            captureRelay = nil
+        }
+        for rules in contentRules {
+            configuration.userContentController.add(rules)
+        }
         webView = WKWebView(frame: Self.initialFrame, configuration: configuration)
 
         let container = NSView(frame: Self.initialFrame)
@@ -398,6 +426,7 @@ final class SiteBrowser: NSObject {
         webView.uiDelegate = self
         typingRelay?.browser = self
         credentialRelay?.browser = self
+        captureRelay?.browser = self
         secureContentObservation = webView.observe(\.hasOnlySecureContent, options: [.new]) { [weak self] _, _ in
             MainActor.assumeIsolated {
                 self?.locationObserver?()
@@ -545,6 +574,12 @@ final class SiteBrowser: NSObject {
             return
         }
         noteCredential(credential)
+    }
+
+    /// Takes one report of the page listener, with the facts about the frame that sent it.
+    func receiveCapture(_ body: Any, from frame: PageCaptureLog.Frame) {
+        guard !isClosed, let capture else { return }
+        captureLog.record(body, from: frame, capture: capture)
     }
 
     private func ensureOpen() throws {

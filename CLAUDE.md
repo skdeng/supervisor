@@ -120,6 +120,17 @@ them.
     `https://example.com/` and reports counts, and whether a page in its hidden window is
     told it is visible and given animation frames (`pageVisible`, `animationFrame`; needs a
     network).
+  - `direct-messages` — makes the sync the app makes of the direct-message source, on the
+    source's own session, and saves nothing (needs the person signed in, and a network).
+    `outcome` is `synced`, `needsSignIn`, `nothingCaptured`, or `pageUnavailable`; the counts
+    say how far the page's responses got (`responses`, `threadsListed`,
+    `threadsOutsideFolders`, `detailsUnmatched`, `threads`, `threadsWithMessages`,
+    `messages`). **It names the operations the page ran** (`operations`) and those the
+    listener refused to send (`refusedOperations`), which are the page's own code
+    identifiers, never anything a person wrote, and `socketsBlocked` counts the realtime
+    connections the page asked for and did not get. `unreadThreads` holding steady across two
+    runs while a chat stays unread shows a sync marks nothing read. `parseStoppedEarly` says
+    the parser spent its budget of visited values before it had read every response.
   - `agent`, `bridge`, `tools`, `connectors` — start real agent runs, each capped at a $0.05 to
     $0.10 spending limit on the user's plan. `agent`: the CLI answers a one-turn prompt when
     started through `AgentTaskService`, disclaimed. `bridge`: a run reaches a served tool through
@@ -796,6 +807,59 @@ sink. Preserve these guards when touching the relevant code:
   days a call names must parse as real `yyyy-MM-dd` days. The log gets the tool's name and
   outcome, and the `photos` self-check reports counts: neither carries a date or a position.
   The agent process is started disclaimed, so the app's grant to Photos never reaches it.
+- **Direct messages are copied by a listener inside the source's own page, so the page's word
+  is all the app has** (`Services/DirectMessages/`, `PageCapture`). A sync loads the source's
+  inbox (the one source is Instagram's web inbox) signed in as the person in a hidden browser
+  and copies the text of the responses the page's own requests receive.
+  - **The listener runs in the page's world**, the only place those requests can be seen
+    from, so a script on the page can post reports of its own making and every report is a
+    stranger's text. `PageCaptureLog.record` keeps one only from the main frame of the
+    source's host over `https`, taking the frame from the web view and never from the report,
+    and holds at most 400 responses of 2 MiB each (UTF-16 units) and 48 MiB in all.
+  - **The parser is shape-based and bounded** (`InstagramInboxParser`: it looks for records
+    by their fields at any depth, since the page's query names and paths change). Text is
+    cleaned as page text is. People are named only by a user name matching
+    `\A[A-Za-z0-9._]{1,30}\z`, since a display name and a chat's title are chosen by the other
+    person. **A chat is kept only when its folder is on the accepted list**, which leaves out
+    message requests, the folder anyone can write into; a list of messages that cannot be
+    tied to a kept chat is dropped, and an unsent message is skipped. Whether a message is
+    the person's own (`isFromViewer`) is the page's word like the rest.
+  - **A page loaded this way believes it is on screen** (`keepRendering`), so it would do
+    what it does in front of a person: open its realtime connection, which is what shows the
+    account as active, and send whatever marks things seen. Three limits keep a sync to
+    reading. The listener replaces `WebSocket`, in every frame, with one that never
+    connects. A request to the watched addresses by any method but GET or HEAD is sent only
+    when its body names an operation ending in `Query`; any other, one with no readable name
+    or naming two included, fails as a request the network refused and never leaves. And
+    WebKit content rules (`DirectMessageSource.blockedRequests`) block every socket, the
+    realtime host, and the addresses that mark a chat seen, for every load the page sets
+    off. **The listener reaches only XHR, `fetch`, and `WebSocket` in the page's windows**:
+    a request from a worker, a beacon, and a form the page submits pass it by, and the rules
+    stop those only at the addresses they name, so an operation that changes something,
+    sent one of those ways to the address the reads use, would go out. Whether the page
+    does that is unverified; `refusedOperations` in the self-check shows what it tried
+    through the listener. A source whose rules WebKit will not compile is not loaded at
+    all. The sync itself opens no chat, types nothing, and presses nothing: it scrolls
+    lists. **The handler is reachable from every frame**, and WebKit builds a posted value
+    in the app before `record` can measure it, so the limits bound what is kept, never
+    what one post costs to receive.
+  - **The session is in a data store of the source's own** (`storeIdentifier`): removing a
+    granted site deletes cookies by registrable domain, and a store shared with the sites
+    would sign the source out with them. The person signs in on the source's own page in a
+    browser that reports nothing typed, so no password is ever held; Done is checked by a
+    sync, never by what the visible page looks like.
+  - **The copy is one file per source outside the agent's working directory**
+    (`ProVisor/direct-messages/<source>.json`, mode 0600, `DirectMessageStore`), because
+    every kind of run can read that directory with its file tools. It holds the 20 most
+    recently active chats with the newest 20 messages of each, and a sync replaces it whole,
+    so a message someone unsends is gone from disk at the next sync. Switching
+    `provisor.readDirectMessages` off cancels a sync under way, closes the sign-in window,
+    and deletes the copy, the stored sign-in, and, once no browser of the source is left to
+    write it back, the session in the data store (`DirectMessageCenter.setEnabled`;
+    nothing loads a page on that store until the removal has ended). It ends nothing on the
+    source's side, where the login stays listed until the person removes it.
+    No run reads the copy yet. The log gets a sync's outcome and counts
+    (`direct messages <source>: …`), never a name, a title, or a message.
 - **The bridge serves a run's tools only to that run's own helper** (`Services/AgentBridge/`).
   The CLI starts `SuperVisor --agent-bridge` as an MCP server over stdio from a per-run
   configuration file, and the helper relays each call over `agent-bridge.sock`. The server
@@ -1176,8 +1240,9 @@ names below are the code paths.
   proposes things they would want done but have not thought to ask for (an unused subscription
   still billing, a question nobody answered, senders never opened). **Off until enabled**
   (`SettingsStore.optInModules`): it reads mail and spends Claude quota. Reading texts is a
-  second, separate opt-in (`provisor.readTexts`, default off), and reading where photos were
-  taken a third (`provisor.readPhotoPlaces`, default off). **The app's part is
+  second, separate opt-in (`provisor.readTexts`, default off), reading where photos were
+  taken a third (`provisor.readPhotoPlaces`, default off), and keeping a copy of their
+  direct messages a fourth (`provisor.readDirectMessages`, default off). **The app's part is
   deliberately thin; the judgment lives with the agent.** `ProVisorCenter` (a singleton, because
   Settings needs the live state and the registry builds a second, never-activated module set
   just to list names) starts a headless Claude Code run through
@@ -1442,6 +1507,20 @@ names below are the code paths.
     proposal behind a visible sign-in prompt is folded into that prompt's sheet row and left
     out of the count. In the sheet, sign-in rows lead the section, three unprompted and the
     rest behind **N more**. No compact presence.
+  - **Direct messages** (`DirectMessageCenter`; Untrusted Input says what bounds a sync). The
+    **Read my Instagram messages** toggle under Access switches the source on; the row under
+    it reads **Not signed in to Instagram yet** or **Instagram signed you out** with **Sign
+    In…**, or how many chats were copied and when, with **Sync Now** and, after a sync that
+    failed, why in the app's words (`DirectMessageCenter.Problem`). **Sign In…** opens a
+    window of its own (`DirectMessageSignInWindow`, composed from the site window's location
+    bar and web-view host and sharing nothing else with it): the person signs in on the
+    source's page and presses Done, which makes a sync, and the window closes only when the
+    inbox loaded without asking for a sign-in. **A sync that finds the page asking for a
+    sign-in marks the source as needing the person and no further sync is made** until they
+    sign in again; an inbox that failed to load, or left the source's hosts, changes
+    nothing, since it says nothing about the session. While that window is open the only
+    sync is the one Done makes. The Access row's summary names the source while it is on and reads **Needs
+    attention** while it waits for a sign-in. A lapsed session shows on this pane only.
   - **Settings › ProVisor never shows the agent's account of a pass.** The agent's words
     are drawn from mail anyone can send, so they appear only where a proposal is reviewed
     and, on this pane, in a standing rule the user read in full and accepted. The pane shows
@@ -1713,6 +1792,24 @@ at runtime.
   recognises its own serve (`pendingServe`) and lets it through; frames other than `about:` ones
   are cancelled and sub-resources are not intercepted, so simulated pages must be
   self-contained. `TestSite`, in the test target, is an in-memory site built on the seam.
+  **`TestSite` keys a route by `URL.path`, which drops a trailing slash**, so a route for
+  `https://host/inbox/` is written `/inbox`; written with the slash it matches nothing and
+  the load fails. `PageCapture` is the browser's page-world listener and `RequestBlocking`
+  its content rules (both under Untrusted Input); `HiddenRead.withBrowser` takes either.
+  **A page-world listener is tested with a `data:` URL as the watched address**: a simulated
+  page's own requests are not intercepted, and one to a `data:` URL is answered inside the
+  web view. A socket block is tested against a listener on the loopback interface, from a
+  browser's empty first document, with the same request unblocked as the control.
+- **`Services/DirectMessages/`** — the copy of a direct-message source's recent chats (rules
+  under Untrusted Input): `DirectMessageSource` (the inbox address, the listener's settings,
+  the request rules, and the data store, with `instagram` the one source),
+  `DirectMessageSync` (one sync in a hidden browser), `InstagramInboxParser`, the
+  `DirectMessage`, `DirectMessageThread`, and `DirectMessageSnapshot` values, and
+  `DirectMessageStore` (the snapshot files). **A sync scrolls every scrolling list on the
+  page that holds at least three rows**, since which element is the chat list is the page's
+  business; the list fetches its next page, and the messages of the chats that come into
+  view, as it moves. It stops once the chats a snapshot keeps all have messages, after four
+  rounds that bring nothing new, after twenty rounds, or at 90 s, and uses what it has.
 - **`Services/Messages/MessagesStore.swift`** — a read-only view of
   `~/Library/Messages/chat.db`, which needs Full Disk Access. It reads texts since a date (one
   sender, or containing a phrase), the newest row id, and the newest or first code message after

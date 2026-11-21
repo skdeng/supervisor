@@ -30,6 +30,7 @@ public final class SettingsStore: ObservableObject {
         static let provisorOfferPasswords = "provisor.offerPasswords"
         static let provisorReadPhotoPlaces = "provisor.readPhotoPlaces"
         static let provisorSourceFolder = "provisor.sourceFolder"
+        static let provisorReadDirectMessages = "provisor.readDirectMessages"
     }
 
     /// Modules that stay off until the user turns them on. ProVisor reads the user's mail and
@@ -127,6 +128,13 @@ public final class SettingsStore: ObservableObject {
         didSet { defaults.set(provisorSourceFolder, forKey: Key.provisorSourceFolder) }
     }
 
+    /// ProVisor: whether the app keeps a copy of the person's recent direct messages from the
+    /// source they signed in to. Off by default: it holds a signed-in session and other
+    /// people's messages.
+    @Published public var provisorReadsDirectMessages: Bool {
+        didSet { defaults.set(provisorReadsDirectMessages, forKey: Key.provisorReadDirectMessages) }
+    }
+
     /// Per-module enabled flags, keyed by `moduleID`. Absent ids default to enabled, except
     /// opt-in modules.
     @Published public private(set) var moduleEnabled: [String: Bool]
@@ -164,6 +172,8 @@ public final class SettingsStore: ObservableObject {
             (defaults.object(forKey: Key.provisorReadPhotoPlaces) as? Bool) ?? false
         self.provisorSourceFolder =
             (defaults.object(forKey: Key.provisorSourceFolder) as? String) ?? ""
+        self.provisorReadsDirectMessages =
+            (defaults.object(forKey: Key.provisorReadDirectMessages) as? Bool) ?? false
 
         // Reconstruct the per-module map from any persisted keys.
         var map: [String: Bool] = [:]

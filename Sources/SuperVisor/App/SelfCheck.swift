@@ -58,6 +58,15 @@ enum SelfCheck {
             }
             application.run()
             exit(0)
+        case "direct-messages":
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            let check = DirectMessagesCheck()
+            check.start { result in
+                finish(result, report: report)
+            }
+            application.run()
+            exit(0)
         case "agent":
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
@@ -451,6 +460,63 @@ private final class SiteReadCheck {
             }
             result["seconds"] = Date().timeIntervalSince(started)
             browser.close()
+            completion(result)
+        }
+    }
+}
+
+/// Whether a sync of the direct-message source reads the person's chats in the real bundle: it
+/// makes the sync the app makes, on the source's own session, and reports how it ended as
+/// counts and the names of the operations the page ran. It saves no snapshot and reports no
+/// message, name, or title. `refusedOperations` are the requests the page tried to make and
+/// the listener did not send, and `socketsBlocked` the realtime connections it asked for and
+/// did not get. `unreadThreads` holding steady from one run to the next, while a chat stays
+/// unread, shows that a sync marks nothing read. Run it signed in, with a network connection.
+@MainActor
+private final class DirectMessagesCheck {
+    func start(completion: @escaping ([String: Any]) -> Void) {
+        let started = Date()
+        let source = DirectMessageSource.instagram
+
+        Task { @MainActor in
+            var result: [String: Any] = ["check": "direct-messages", "source": source.id]
+            let rules = await RequestBlocking.compile(
+                identifier: "direct-messages-\(source.id)",
+                rules: source.blockedRequests
+            )
+            result["rulesCompiled"] = rules != nil
+            guard let rules else {
+                result["outcome"] = "notRun"
+                completion(result)
+                return
+            }
+            let sync = await DirectMessageSync.run(
+                source: source,
+                dataStore: WKWebsiteDataStore(forIdentifier: source.storeIdentifier),
+                contentRules: [rules]
+            )
+            let report = sync.report
+            result["outcome"] = sync.outcome.rawValue
+            result["pagePath"] = report.pagePath ?? ""
+            result["responses"] = report.responses
+            result["capturedBytes"] = report.capturedBytes
+            result["operations"] = report.operations
+            result["refusedOperations"] = report.refusedOperations
+            result["socketsBlocked"] = report.blockedSockets
+            result["droppedReports"] = report.droppedReports
+            result["scrollRounds"] = report.scrollRounds
+            result["foundScroller"] = report.foundScroller
+            result["documents"] = report.parse.documents
+            result["unreadableResponses"] = report.parse.unreadableResponses
+            result["threadsListed"] = report.parse.threadsListed
+            result["threadsOutsideFolders"] = report.parse.threadsOutsideFolders
+            result["detailsUnmatched"] = report.parse.detailsUnmatched
+            result["parseStoppedEarly"] = report.parse.stoppedEarly
+            result["threads"] = sync.snapshot?.threads.count ?? 0
+            result["threadsWithMessages"] = report.threadsWithMessages
+            result["unreadThreads"] = report.unreadThreads
+            result["messages"] = sync.snapshot?.threads.reduce(0) { $0 + $1.messages.count } ?? 0
+            result["seconds"] = Date().timeIntervalSince(started)
             completion(result)
         }
     }

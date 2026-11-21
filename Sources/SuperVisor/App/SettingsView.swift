@@ -119,7 +119,8 @@ struct SettingsView: View {
             ProVisorSettingsView(
                 settings: settings,
                 center: ProVisorCenter.shared,
-                sites: SiteAccessCenter.shared
+                sites: SiteAccessCenter.shared,
+                messages: DirectMessageCenter.shared
             )
         default:
             EmptyView()

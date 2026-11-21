@@ -40,6 +40,8 @@ enum HiddenRead {
         pages: SiteBrowser.SimulatedPages?,
         settling: SiteBrowser.Settling,
         timeout: Duration,
+        capture: PageCapture? = nil,
+        contentRules: [WKContentRuleList] = [],
         _ body: @escaping @MainActor (SiteBrowser) async -> Result
     ) async -> Result {
         var bounded = settling
@@ -48,7 +50,9 @@ enum HiddenRead {
             policy: SiteNavigationPolicy(browseHosts: browseHosts),
             dataStore: dataStore,
             simulatedPages: pages,
-            settling: bounded
+            settling: bounded,
+            capture: capture,
+            contentRules: contentRules
         )
         defer { browser.close() }
 

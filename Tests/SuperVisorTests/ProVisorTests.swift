@@ -2250,6 +2250,18 @@ struct ProVisorSettingsTests {
             ProVisorSettingsView.accessSummary(siteCount: 3, texts: true, photoPlaces: true)
                 == "3 sites, texts, photo places"
         )
+        #expect(
+            ProVisorSettingsView.accessSummary(siteCount: 0, texts: true, photoPlaces: false, directMessages: "Chatter")
+                == "texts, Chatter messages"
+        )
+    }
+
+    @Test("The direct-message row says when the chats were copied, or that they are being copied")
+    func directMessagesSyncText() {
+        #expect(ProVisorSettingsView.directMessagesSyncText(isSyncing: true, lastSync: Date(), chats: 3) == "Copying your chats…")
+        #expect(ProVisorSettingsView.directMessagesSyncText(isSyncing: false, lastSync: nil, chats: 0) == "Signed in, not copied yet")
+        #expect(ProVisorSettingsView.directMessagesSyncText(isSyncing: false, lastSync: Date(), chats: 1).hasPrefix("1 chat, copied "))
+        #expect(ProVisorSettingsView.directMessagesSyncText(isSyncing: false, lastSync: Date(), chats: 20).hasPrefix("20 chats, copied "))
     }
 
     @Test("The access row warns while a row under it needs the person")
@@ -2264,10 +2276,12 @@ struct ProVisorSettingsTests {
             awaiting: Set<String> = [],
             texts: SiteAccessCenter.TextsStatus = .on,
             photoPlaces: SiteAccessCenter.PhotoPlacesStatus = .on,
+            directMessages: DirectMessageCenter.Status = .off,
             paused: Bool = false
         ) -> Bool {
             ProVisorSettingsView.accessNeedsAttention(
-                sites: sites, awaiting: awaiting, texts: texts, photoPlaces: photoPlaces, paused: paused
+                sites: sites, awaiting: awaiting, texts: texts, photoPlaces: photoPlaces,
+                directMessages: directMessages, paused: paused
             )
         }
 
@@ -2279,6 +2293,9 @@ struct ProVisorSettingsTests {
         #expect(needsAttention(photoPlaces: .accessNotAsked))
         #expect(needsAttention(photoPlaces: .accessDenied))
         #expect(needsAttention(paused: true))
+        #expect(needsAttention(directMessages: .notSignedIn))
+        #expect(needsAttention(directMessages: .needsYou))
+        #expect(!needsAttention(directMessages: .signedIn(lastSync: nil, chats: 0)))
     }
 
     @Test("A failed pass is described in the app's words, never the agent's or its process's")
